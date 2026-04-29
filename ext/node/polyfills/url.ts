@@ -609,12 +609,9 @@ export class Url {
     for (let i = 0, inWs = false, split = false; i < url.length; ++i) {
       const code = url.charCodeAt(i);
 
-      // Find first and last non-whitespace characters for trimming
-      const isWs = code === CHAR_SPACE ||
-        code === CHAR_TAB ||
-        code === CHAR_CARRIAGE_RETURN ||
-        code === CHAR_LINE_FEED ||
-        code === CHAR_FORM_FEED ||
+      // Trim leading and trailing C0 control characters plus legacy
+      // url.parse() whitespace before parsing the URL body.
+      const isWs = code <= CHAR_SPACE ||
         code === CHAR_NO_BREAK_SPACE ||
         code === CHAR_ZERO_WIDTH_NOBREAK_SPACE;
       if (start === -1) {
