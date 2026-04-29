@@ -202,7 +202,9 @@ function spawnChildInner(command, apiName, {
     cmd: pathFromURL(command),
     args: ArrayPrototypeMap(args, String),
     cwd: pathFromURL(cwd),
-    clearEnv,
+    // Node subprocesses should inherit the explicit JS-visible env contract,
+    // not the hidden embedder host environment.
+    clearEnv: true,
     argv0,
     env: ObjectEntries(env),
     uid,
@@ -376,7 +378,9 @@ export function nodeSpawnSyncChild({
     cmd: pathFromURL(args[0]),
     args: ArrayPrototypeMap(ArrayPrototypeSlice(args, 1), String),
     cwd: pathFromURL(cwd),
-    clearEnv,
+    // Keep sync node:child_process env inheritance aligned with JS-visible
+    // process.env instead of re-merging the host process environment.
+    clearEnv: true,
     env: ObjectEntries(env),
     uid,
     gid,
