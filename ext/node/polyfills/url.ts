@@ -670,7 +670,10 @@ export class Url {
       }
     }
 
-    if (!slashesDenoteHost && !hasHash) {
+    if (!slashesDenoteHost && !hasHash && !hostPattern.test(rest)) {
+      // Keep protocol-less auth-bearing URLs like //user@example.com/path on
+      // the authority-parsing path. Legacy url.parse() only uses the simple
+      // pathname fast path for inputs that cannot denote a host.
       // Try fast path regexp
       const simplePath = simplePathPattern.exec(rest);
       if (simplePath) {
