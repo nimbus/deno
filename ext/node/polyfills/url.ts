@@ -739,6 +739,10 @@ export class Url {
           case CHAR_TAB:
           case CHAR_LINE_FEED:
           case CHAR_CARRIAGE_RETURN:
+            // Legacy url.parse() strips these from the authority segment
+            // instead of treating them as host terminators. Keep them out of
+            // auth/host parsing while preserving later path encoding cases.
+            continue;
           case CHAR_SPACE:
           case CHAR_DOUBLE_QUOTE:
           case CHAR_PERCENT:
@@ -773,14 +777,14 @@ export class Url {
       }
       start = 0;
       if (atSign !== -1) {
-        this.auth = decodeURIComponent(rest.slice(0, atSign));
+        this.auth = decodeURIComponent(rest.slice(0, atSign).replace(/[\r\n\t]/g, ""));
         start = atSign + 1;
       }
       if (nonHost === -1) {
-        this.host = rest.slice(start);
+        this.host = rest.slice(start).replace(/[\r\n\t]/g, "");
         rest = "";
       } else {
-        this.host = rest.slice(start, nonHost);
+        this.host = rest.slice(start, nonHost).replace(/[\r\n\t]/g, "");
         rest = rest.slice(nonHost);
       }
 
