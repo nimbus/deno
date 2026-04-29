@@ -39,6 +39,7 @@ import {
   CHAR_BACKWARD_SLASH,
   CHAR_CARRIAGE_RETURN,
   CHAR_CIRCUMFLEX_ACCENT,
+  CHAR_COLON,
   CHAR_DOT,
   CHAR_DOUBLE_QUOTE,
   CHAR_FORM_FEED,
@@ -1042,15 +1043,11 @@ function isIpv6Hostname(hostname: string) {
 function getHostname(self: Url, rest: string, hostname: string) {
   for (let i = 0; i < hostname.length; ++i) {
     const code = hostname.charCodeAt(i);
-    const isValid = (code >= CHAR_LOWERCASE_A && code <= CHAR_LOWERCASE_Z) ||
-      code === CHAR_DOT ||
-      (code >= CHAR_UPPERCASE_A && code <= CHAR_UPPERCASE_Z) ||
-      (code >= CHAR_0 && code <= CHAR_9) ||
-      code === CHAR_HYPHEN_MINUS ||
-      code === 42 /* * */ ||
-      code === CHAR_PLUS ||
-      code === CHAR_UNDERSCORE ||
-      code > 127;
+    const isValid = code !== CHAR_FORWARD_SLASH &&
+      code !== CHAR_BACKWARD_SLASH &&
+      code !== CHAR_HASH &&
+      code !== CHAR_QUESTION_MARK &&
+      code !== CHAR_COLON;
 
     // Invalid host character
     if (!isValid) {
