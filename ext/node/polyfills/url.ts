@@ -803,8 +803,12 @@ export class Url {
       const ipv6Hostname = isIpv6Hostname(hostname);
 
       // validate a little.
+      const hadLegacyPortSeparator = !ipv6Hostname && hostname.includes(":");
       if (!ipv6Hostname) {
         rest = getHostname(this, rest, hostname);
+        if (hadLegacyPortSeparator && rest.startsWith("/:")) {
+          throw new ERR_INVALID_ARG_VALUE("url", url, "Invalid port in url");
+        }
       }
 
       if (this.hostname.length > hostnameMaxLen) {
