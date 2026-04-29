@@ -364,24 +364,13 @@ impl ContextifyContext {
         },
       )
     };
-    let ptr =
-      deno_core::cppgc::try_unwrap_cppgc_object::<Self>(scope, wrapper.into());
-
-    // SAFETY: We are storing a pointer to the ContextifyContext
-    // in the embedder data of the v8::Context. The contextified wrapper
-    // lives longer than the execution context, so this should be safe.
-    unsafe {
-      context.set_aligned_pointer_in_embedder_data(
-        3,
-        &*ptr.unwrap() as *const ContextifyContext as _,
-      );
-    }
-
     let private_str =
       v8::String::new_from_onebyte_const(scope, &PRIVATE_SYMBOL_NAME);
     let private_symbol = v8::Private::for_api(scope, private_str);
+    let global_proxy = context.global(scope);
 
     sandbox_obj.set_private(scope, private_symbol, wrapper.into());
+    global_proxy.set_private(scope, private_symbol, wrapper.into());
   }
 
   pub fn attach_vanilla<'s>(
@@ -413,7 +402,6 @@ impl ContextifyContext {
       unsafe {
         ctx.set_aligned_pointer_in_embedder_data(1, std::ptr::null_mut());
         ctx.set_aligned_pointer_in_embedder_data(2, std::ptr::null_mut());
-        ctx.set_aligned_pointer_in_embedder_data(3, std::ptr::null_mut());
         ctx.clear_all_slots();
       };
       esc_scope.escape(ctx)
@@ -457,19 +445,6 @@ impl ContextifyContext {
         },
       )
     };
-    let ptr =
-      deno_core::cppgc::try_unwrap_cppgc_object::<Self>(scope, wrapper.into());
-
-    // SAFETY: We are storing a pointer to the ContextifyContext
-    // in the embedder data of the v8::Context. The contextified wrapper
-    // lives longer than the execution context, so this should be safe.
-    unsafe {
-      context.set_aligned_pointer_in_embedder_data(
-        3,
-        &*ptr.unwrap() as *const ContextifyContext as _,
-      );
-    }
-
     let private_str =
       v8::String::new_from_onebyte_const(scope, &PRIVATE_SYMBOL_NAME);
     let private_symbol = v8::Private::for_api(scope, private_str);
@@ -536,19 +511,17 @@ impl ContextifyContext {
     }
   }
 
-  fn get<'a, 'c>(
+  fn get<'a>(
     scope: &mut v8::PinScope<'a, '_>,
     object: v8::Local<'a, v8::Object>,
-  ) -> Option<&'c ContextifyContext> {
-    let context = object.get_creation_context(scope)?;
-
-    let context_ptr = context.get_aligned_pointer_from_embedder_data(3);
-    if context_ptr.is_null() {
-      return None;
+  ) -> Option<&'a ContextifyContext> {
+    if let Some(contextify) = Self::from_sandbox_obj(scope, object) {
+      return Some(contextify);
     }
-    // SAFETY: We are storing a pointer to the ContextifyContext
-    // in the embedder data of the v8::Context during creation.
-    Some(unsafe { &*(context_ptr as *const ContextifyContext) })
+
+    let context = object.get_creation_context(scope)?;
+    let global = context.global(scope);
+    Self::from_sandbox_obj(scope, global)
   }
 }
 
@@ -558,6 +531,31 @@ pub const VM_CONTEXT_INDEX: usize = 0;
 pub enum ContextInitMode {
   ForSnapshot,
   UseSnapshot,
+}
+
+fn create_fresh_v8_context<'a>(
+  scope: &mut v8::PinScope<'a, '_, ()>,
+  object_template: v8::Local<'a, v8::ObjectTemplate>,
+  microtask_queue: *mut v8::MicrotaskQueue,
+  clear_slots: bool,
+) -> v8::Local<'a, v8::Context> {
+  let ctx = v8::Context::new(
+    scope,
+    v8::ContextOptions {
+      global_template: Some(object_template),
+      microtask_queue: Some(microtask_queue),
+      ..Default::default()
+    },
+  );
+  // SAFETY: ContextifyContexts will update this to a pointer to the native object
+  unsafe {
+    ctx.set_aligned_pointer_in_embedder_data(1, std::ptr::null_mut());
+    ctx.set_aligned_pointer_in_embedder_data(2, std::ptr::null_mut());
+    if clear_slots {
+      ctx.clear_all_slots();
+    }
+  };
+  ctx
 }
 
 pub fn create_v8_context<'a>(
@@ -578,24 +576,11 @@ pub fn create_v8_context<'a>(
         ..Default::default()
       },
     )
-    .unwrap()
+    .unwrap_or_else(|| {
+      create_fresh_v8_context(scope, object_template, microtask_queue, false)
+    })
   } else {
-    let ctx = v8::Context::new(
-      scope,
-      v8::ContextOptions {
-        global_template: Some(object_template),
-        microtask_queue: Some(microtask_queue),
-        ..Default::default()
-      },
-    );
-    // SAFETY: ContextifyContexts will update this to a pointer to the native object
-    unsafe {
-      ctx.set_aligned_pointer_in_embedder_data(1, std::ptr::null_mut());
-      ctx.set_aligned_pointer_in_embedder_data(2, std::ptr::null_mut());
-      ctx.set_aligned_pointer_in_embedder_data(3, std::ptr::null_mut());
-      ctx.clear_all_slots();
-    };
-    ctx
+    create_fresh_v8_context(scope, object_template, microtask_queue, true)
   };
 
   scope.escape(context)
