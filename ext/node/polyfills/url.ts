@@ -803,12 +803,8 @@ export class Url {
       const ipv6Hostname = isIpv6Hostname(hostname);
 
       // validate a little.
-      const hadLegacyPortSeparator = !ipv6Hostname && hostname.includes(":");
       if (!ipv6Hostname) {
-        rest = getHostname(this, rest, hostname);
-        if (hadLegacyPortSeparator && rest.startsWith("/:")) {
-          throw new ERR_INVALID_ARG_VALUE("url", url, "Invalid port in url");
-        }
+        rest = getHostname(this, rest, hostname, url);
       }
 
       if (this.hostname.length > hostnameMaxLen) {
@@ -1044,7 +1040,8 @@ function isIpv6Hostname(hostname: string) {
   );
 }
 
-function getHostname(self: Url, rest: string, hostname: string) {
+let warnInvalidPort = true;
+function getHostname(self: Url, rest: string, hostname: string, url: string) {
   for (let i = 0; i < hostname.length; ++i) {
     const code = hostname.charCodeAt(i);
     const isValid = code !== CHAR_FORWARD_SLASH &&
@@ -1055,6 +1052,15 @@ function getHostname(self: Url, rest: string, hostname: string) {
 
     // Invalid host character
     if (!isValid) {
+      // If leftover starts with :, then it represents an invalid port.
+      // But url.parse() is lenient about it for now.
+      // Issue a warning and continue.
+      if (warnInvalidPort && code === CHAR_COLON) {
+        const detail =
+          `The URL ${url} is invalid. Future versions of Node.js will throw an error.`;
+        process.emitWarning(detail, "DeprecationWarning", "DEP0170");
+        warnInvalidPort = false;
+      }
       self.hostname = hostname.slice(0, i);
       return `/${hostname.slice(i)}${rest}`;
     }
