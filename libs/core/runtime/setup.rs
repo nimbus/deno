@@ -214,14 +214,29 @@ pub fn create_isolate(
   maybe_create_params: Option<v8::CreateParams>,
   maybe_startup_snapshot: Option<V8Snapshot>,
   external_refs: Cow<'static, [v8::ExternalReference]>,
-) -> v8::OwnedIsolate {
+  use_locker: bool,
+) -> super::managed_isolate::ManagedIsolate {
+  use super::managed_isolate::{LockerIsolate, ManagedIsolate};
+
   let mut params = maybe_create_params.unwrap_or_default();
-  let mut isolate = if will_snapshot {
-    snapshot::create_snapshot_creator(
+
+  assert!(
+    !(will_snapshot && use_locker),
+    "use_locker is not supported with snapshot creation"
+  );
+
+  let mut isolate = if use_locker {
+    params = params.external_references(external_refs);
+    if let Some(snapshot) = maybe_startup_snapshot {
+      params = params.snapshot_blob(v8::StartupData::from(snapshot.0));
+    }
+    ManagedIsolate::Lockable(LockerIsolate::new(params))
+  } else if will_snapshot {
+    ManagedIsolate::Owned(snapshot::create_snapshot_creator(
       external_refs,
       maybe_startup_snapshot,
       params,
-    )
+    ))
   } else {
     params = params.external_references(external_refs);
     let has_snapshot = maybe_startup_snapshot.is_some();
@@ -234,17 +249,19 @@ pub fn create_isolate(
     // On Windows, the snapshot deserialization code appears to be crashing and we are not
     // certain of the reason. We take a mutex the first time an isolate with a snapshot to
     // prevent this. https://github.com/denoland/deno/issues/15590
-    if cfg!(windows)
-      && has_snapshot
-      && FIRST_SNAPSHOT_INIT.load(Ordering::SeqCst)
-    {
-      let _g = SNAPSHOW_INIT_MUT.lock().unwrap();
-      let res = v8::Isolate::new(params);
-      FIRST_SNAPSHOT_INIT.store(true, Ordering::SeqCst);
-      res
-    } else {
-      v8::Isolate::new(params)
-    }
+    ManagedIsolate::Owned(
+      if cfg!(windows)
+        && has_snapshot
+        && FIRST_SNAPSHOT_INIT.load(Ordering::SeqCst)
+      {
+        let _g = SNAPSHOW_INIT_MUT.lock().unwrap();
+        let res = v8::Isolate::new(params);
+        FIRST_SNAPSHOT_INIT.store(true, Ordering::SeqCst);
+        res
+      } else {
+        v8::Isolate::new(params)
+      },
+    )
   };
 
   isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);

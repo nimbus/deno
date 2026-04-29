@@ -610,3 +610,5 @@ opt-level = 3
 opt-level = 3
 [profile.release.package.twox-hash]
 opt-level = 3
+[patch.crates-io]
+v8 = { git = "https://github.com/agentstation/rusty_v8", tag = "v147.4.0-locker.1" }

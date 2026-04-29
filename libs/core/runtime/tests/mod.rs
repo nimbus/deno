@@ -17,6 +17,7 @@ use crate::op2;
 
 mod error;
 mod jsrealm;
+mod locker;
 mod misc;
 mod ops;
 mod snapshot;

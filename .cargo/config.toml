@@ -36,3 +36,9 @@ rustflags = [
   "--cfg",
   "tokio_unstable",
 ]
+
+[net]
+git-fetch-with-cli = true
+
+[env]
+RUSTY_V8_VERSION = "147.4.0-locker.1"

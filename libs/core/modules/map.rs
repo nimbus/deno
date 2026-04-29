@@ -264,6 +264,20 @@ impl ModuleMap {
     std::mem::take(&mut *self.data.borrow_mut());
   }
 
+  /// Clear in-flight module loading/evaluation state for warm reuse.
+  /// Preserves the module registry and loader so evaluated modules stay live.
+  pub(crate) fn clear_pending_state(&self) {
+    self.dynamic_import_map.borrow_mut().clear();
+    self.preparing_dynamic_imports.clear();
+    self.pending_dynamic_imports.clear();
+    self.pending_dyn_mod_evaluations.clear();
+    self.pending_tla_waiters.borrow_mut().clear();
+    self.pending_mod_evaluation.set(false);
+    self.evaluating_top_level.set(false);
+    self.code_cache_ready_futs.clear();
+    self.dyn_module_evaluate_idle_counter.set(0);
+  }
+
   pub(crate) fn next_load_id(&self) -> i32 {
     // TODO(mmastrac): move recursive module loading into here so we can avoid making this pub
     let mut data = self.data.borrow_mut();

@@ -230,6 +230,11 @@ impl ExternalOpsTracker {
   pub(crate) fn has_pending_ops(&self) -> bool {
     self.counter.load(Ordering::Relaxed) > 0
   }
+
+  /// Reset the counter to zero for warm reuse.
+  pub(crate) fn reset(&self) {
+    self.counter.store(0, Ordering::Relaxed);
+  }
 }
 
 pub type OpStackTraceCallback = Box<dyn Fn(Vec<JsStackFrame>)>;
