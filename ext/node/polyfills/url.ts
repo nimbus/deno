@@ -1047,6 +1047,7 @@ function getHostname(self: Url, rest: string, hostname: string) {
       (code >= CHAR_UPPERCASE_A && code <= CHAR_UPPERCASE_Z) ||
       (code >= CHAR_0 && code <= CHAR_9) ||
       code === CHAR_HYPHEN_MINUS ||
+      code === 42 /* * */ ||
       code === CHAR_PLUS ||
       code === CHAR_UNDERSCORE ||
       code > 127;
