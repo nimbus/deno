@@ -629,6 +629,10 @@ function handleCycles(
         iterationType,
       );
       memos.deep = false;
+      if (memos.set !== undefined) {
+        memos.set.delete(memos.c);
+        memos.set.delete(memos.d);
+      }
       return result;
     }
     memos.set = new SafeSet();

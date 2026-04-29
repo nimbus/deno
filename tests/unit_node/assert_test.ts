@@ -63,6 +63,56 @@ Deno.test("[node/assert] deepStrictEqual passes for equal Number objects", () =>
   });
 });
 
+Deno.test("[node/assert] deep equality stays commutative for circular structures", () => {
+  const assertDeepAndStrictEqual = (actual: unknown, expected: unknown) => {
+    assert.doesNotThrow(() => {
+      assert.deepEqual(actual, expected);
+      assert.deepStrictEqual(actual, expected);
+    });
+    assert.doesNotThrow(() => {
+      assert.deepEqual(expected, actual);
+      assert.deepStrictEqual(expected, actual);
+    });
+  };
+
+  {
+    const a: Record<string, unknown> = {};
+    a.a = a;
+
+    const b: Record<string, unknown> = {};
+    b.a = {};
+    (b.a as Record<string, unknown>).a = a;
+
+    assertDeepAndStrictEqual(a, b);
+  }
+
+  {
+    const a: Record<string, unknown> = {};
+    a.a = a;
+
+    const b: Record<string, unknown> = {};
+    b.a = b;
+
+    const c: Record<string, unknown> = {};
+    c.a = a;
+
+    assertDeepAndStrictEqual(b, c);
+  }
+
+  {
+    const a = new Set();
+    a.add(a);
+
+    const b = new Set();
+    b.add(b);
+
+    const c = new Set();
+    c.add(a);
+
+    assertDeepAndStrictEqual(b, c);
+  }
+});
+
 Deno.test("[node/assert] throws with 2 parameters", () => {
   assert.throws(
     () => {
