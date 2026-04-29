@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 import { assertEquals, assertThrows } from "@std/assert";
+import { Buffer } from "node:buffer";
 import {
   createContext,
   isContext,
@@ -51,6 +52,19 @@ Deno.test({
     const context = { a: 1, b: 2 };
     const result = runInNewContext("a + b", context);
     assertEquals(result, 3);
+  },
+});
+
+// Mirrors nodejs/node test/parallel/test-buffer-from.js and protects the
+// contextified global-proxy lookup path used by Buffer.from(String objects).
+Deno.test({
+  name: "vm runInNewContext boxed string stays visible to Buffer.from",
+  fn() {
+    const checkString = "test";
+    const result = Buffer.from(
+      runInNewContext("new String(checkString)", { checkString }),
+    );
+    assertEquals(result.toString(), checkString);
   },
 });
 
