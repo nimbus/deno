@@ -1,12 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 import { primordials } from "ext:core/mod.js";
-import {
-  DatabaseSync as DatabaseSyncOp,
-  op_node_database_backup,
-  Session,
-  StatementSync,
-} from "ext:core/ops";
+import * as coreOps from "ext:core/ops";
 import type { Buffer } from "node:buffer";
 import { isUint8Array } from "ext:deno_node/internal/util/types.ts";
 import { URLPrototype } from "ext:deno_web/00_url.js";
@@ -23,6 +18,30 @@ const {
   SymbolFor,
   TypeError,
 } = primordials;
+
+const DatabaseSyncOp = coreOps.DatabaseSync;
+const op_node_database_backup = coreOps.op_node_database_backup;
+const Session = coreOps.Session;
+const StatementSync = coreOps.StatementSync;
+
+class SqliteUnavailableError extends Error {
+  code: string;
+  constructor() {
+    super("node:sqlite is unavailable in this runtime");
+    this.code = "ERR_NOT_SUPPORTED";
+  }
+}
+
+function ensureSqliteEnabled() {
+  if (
+    typeof DatabaseSyncOp !== "function" ||
+    typeof op_node_database_backup !== "function" ||
+    typeof Session === "undefined" ||
+    typeof StatementSync === "undefined"
+  ) {
+    throw new SqliteUnavailableError();
+  }
+}
 
 class ConstructCallRequiredError extends TypeError {
   code: string;
@@ -80,18 +99,21 @@ const parsePath = (path: unknown): string => {
 function DatabaseSync(
   path: string | URL | Buffer,
   options?: unknown,
-): DatabaseSyncOp {
+) {
   if (new.target === undefined) {
     throw new ConstructCallRequiredError();
   }
+  ensureSqliteEnabled();
   return ReflectConstruct(
     DatabaseSyncOp,
     [parsePath(path), options],
     new.target,
   );
 }
-ObjectSetPrototypeOf(DatabaseSync.prototype, DatabaseSyncOp.prototype);
-ObjectSetPrototypeOf(DatabaseSync, DatabaseSyncOp);
+if (typeof DatabaseSyncOp === "function") {
+  ObjectSetPrototypeOf(DatabaseSync.prototype, DatabaseSyncOp.prototype);
+  ObjectSetPrototypeOf(DatabaseSync, DatabaseSyncOp);
+}
 
 interface BackupOptions {
   /**
@@ -159,6 +181,7 @@ async function backup(
   path: string | Buffer | URL,
   options?: BackupOptions,
 ): Promise<number> {
+  ensureSqliteEnabled();
   if (!ObjectPrototypeIsPrototypeOf(DatabaseSync.prototype, sourceDb)) {
     throw new InvalidArgTypeError(
       'The "sourceDb" argument must be an object.',
@@ -253,21 +276,23 @@ ObjectDefineProperties(DatabaseSync.prototype, {
   },
 });
 
-ObjectDefineProperties(Session.prototype, {
-  [SymbolDispose]: {
-    __proto__: null,
-    value: function () {
-      try {
-        this.close();
-      } catch {
-        // Ignore errors.
-      }
+if (typeof Session !== "undefined") {
+  ObjectDefineProperties(Session.prototype, {
+    [SymbolDispose]: {
+      __proto__: null,
+      value: function () {
+        try {
+          this.close();
+        } catch {
+          // Ignore errors.
+        }
+      },
+      enumerable: true,
+      configurable: true,
+      writable: true,
     },
-    enumerable: true,
-    configurable: true,
-    writable: true,
-  },
-});
+  });
+}
 
 export { backup, DatabaseSync, StatementSync };
 
