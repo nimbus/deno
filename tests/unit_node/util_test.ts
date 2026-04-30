@@ -295,6 +295,7 @@ Deno.test("[util] parseEnv()", () => {
   const env =
     "KEY1=VALUE1\nKEY2='VALUE2'\nKEYÄ3=\"VALUE3\"\nKEY4=VALÜE4\nKEY5='VALUE6'INVALID_LINE\nKEY6=A";
   const parsed = util.parseEnv(env);
+  assertStrictEquals(Object.getPrototypeOf(parsed), Object.prototype);
   assertEquals(parsed, {
     KEY1: "VALUE1",
     KEY2: "VALUE2",
