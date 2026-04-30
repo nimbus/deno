@@ -3,6 +3,7 @@
 
 import { primordials } from "ext:core/mod.js";
 const { queueMicrotask, SymbolDispose } = primordials;
+import { kResistStopPropagation } from "ext:deno_web/02_event.js";
 import { validateAbortSignal, validateFunction } from "../validators.mjs";
 import { codes } from "../errors.ts";
 const { ERR_INVALID_ARG_TYPE } = codes;
@@ -26,6 +27,7 @@ function addAbortListener(signal, listener) {
     signal.addEventListener("abort", listener, {
       __proto__: null,
       once: true,
+      [kResistStopPropagation]: true,
     });
     removeEventListener = () => {
       signal.removeEventListener("abort", listener);
