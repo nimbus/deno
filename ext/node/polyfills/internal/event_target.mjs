@@ -56,6 +56,7 @@ import {
   kEnumerableProperty,
 } from "ext:deno_node/internal/util.mjs";
 import { inspect } from "node:util";
+import { kResistStopPropagation } from "ext:deno_node/internal/event_target_symbols.mjs";
 
 const kIsEventTarget = SymbolFor("nodejs.event_target");
 const kIsNodeEventTarget = Symbol("kIsNodeEventTarget");
@@ -72,8 +73,6 @@ const kStop = Symbol("kStop");
 const kTarget = Symbol("kTarget");
 const kHandlers = Symbol("khandlers");
 const kWeakHandler = Symbol("kWeak");
-const kResistStopPropagation = Symbol("kResistStopPropagation");
-
 const kHybridDispatch = SymbolFor("nodejs.internal.kHybridDispatch");
 const kCreateEvent = Symbol("kCreateEvent");
 const kNewListener = Symbol("kNewListener");
