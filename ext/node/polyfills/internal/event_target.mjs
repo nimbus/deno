@@ -432,6 +432,7 @@ class Listener {
     passive,
     isNodeStyleListener,
     weak,
+    resistStopPropagation,
   ) {
     this.next = undefined;
     if (previous !== undefined) {
@@ -446,6 +447,7 @@ class Listener {
     this.isNodeStyleListener = isNodeStyleListener;
     this.removed = false;
     this.weak = Boolean(weak); // Don't retain the object
+    this.resistStopPropagation = Boolean(resistStopPropagation);
 
     if (this.weak) {
       this.callback = new SafeWeakRef(listener);
@@ -569,6 +571,7 @@ class EventTarget extends WebEventTarget {
       signal,
       isNodeStyleListener,
       weak,
+      resistStopPropagation,
     } = validateEventListenerOptions(options);
 
     if (!shouldAddListener(listener)) {
@@ -595,13 +598,17 @@ class EventTarget extends WebEventTarget {
       // not prevent the event target from GC.
       signal.addEventListener("abort", () => {
         this.removeEventListener(type, listener, options);
-      }, { once: true, [kWeakHandler]: this });
+      }, { once: true, [kWeakHandler]: this, [kResistStopPropagation]: true });
     }
 
     let root = MapPrototypeGet(this[kEvents], type);
 
     if (root === undefined) {
-      root = { size: 1, next: undefined };
+      root = {
+        size: 1,
+        next: undefined,
+        resistStopPropagation: Boolean(resistStopPropagation),
+      };
       // This is the first handler in our linked list.
       new Listener(
         root,
@@ -611,6 +618,7 @@ class EventTarget extends WebEventTarget {
         passive,
         isNodeStyleListener,
         weak,
+        resistStopPropagation,
       );
       this[kNewListener](
         root.size,
@@ -646,8 +654,10 @@ class EventTarget extends WebEventTarget {
       passive,
       isNodeStyleListener,
       weak,
+      resistStopPropagation,
     );
     root.size++;
+    root.resistStopPropagation ||= Boolean(resistStopPropagation);
     this[kNewListener](root.size, type, listener, once, capture, passive, weak);
   }
 
@@ -737,12 +747,12 @@ class EventTarget extends WebEventTarget {
 
     while (
       handler !== undefined &&
-      (handler.passive || event?.[kStop] !== true)
+      (root.resistStopPropagation || handler.passive || event?.[kStop] !== true)
     ) {
       // Cache the next item in case this iteration removes the current one
       next = handler.next;
 
-      if (handler.removed) {
+      if (handler.removed || (event?.[kStop] === true && !handler.resistStopPropagation)) {
         // Deal with the case an event is removed while event handlers are
         // Being processed (removeEventListener called from a listener)
         handler = next;
@@ -1031,6 +1041,7 @@ function validateEventListenerOptions(options) {
     passive: Boolean(options.passive),
     signal: options.signal,
     weak: options[kWeakHandler],
+    resistStopPropagation: options[kResistStopPropagation] ?? false,
     isNodeStyleListener: Boolean(options[kIsNodeStyleListener]),
   };
 }
