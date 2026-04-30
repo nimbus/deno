@@ -10,6 +10,7 @@ const {
   ArrayPrototypePush,
   ArrayPrototypeSlice,
   ArrayPrototypeSplice,
+  ObjectDefineProperties,
   ObjectKeys,
   ObjectPrototypeIsPrototypeOf,
   queueMicrotask,
@@ -368,6 +369,279 @@ class PerformanceMeasure extends PerformanceEntry {
 webidl.configureInterface(PerformanceMeasure);
 const PerformanceMeasurePrototype = PerformanceMeasure.prototype;
 
+
+const _cacheMode = Symbol("[[cacheMode]]");
+const _requestedUrl = Symbol("[[requestedUrl]]");
+const _timingInfo = Symbol("[[timingInfo]]");
+const _initiatorType = Symbol("[[initiatorType]]");
+const _deliveryType = Symbol("[[deliveryType]]");
+const _responseStatus = Symbol("[[responseStatus]]");
+class PerformanceResourceTiming extends PerformanceEntry {
+  [_cacheMode] = "";
+  [_requestedUrl] = "";
+  [_timingInfo] = null;
+  [_initiatorType] = "";
+  [_deliveryType] = "";
+  [_responseStatus] = 0;
+
+  get name() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_requestedUrl];
+  }
+
+  get startTime() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].startTime;
+  }
+
+  get duration() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].endTime - this[_timingInfo].startTime;
+  }
+
+  get initiatorType() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_initiatorType];
+  }
+
+  get workerStart() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].finalServiceWorkerStartTime;
+  }
+
+  get redirectStart() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].redirectStartTime;
+  }
+
+  get redirectEnd() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].redirectEndTime;
+  }
+
+  get fetchStart() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].postRedirectStartTime;
+  }
+
+  get domainLookupStart() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].finalConnectionTimingInfo?.domainLookupStartTime;
+  }
+
+  get domainLookupEnd() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].finalConnectionTimingInfo?.domainLookupEndTime;
+  }
+
+  get connectStart() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].finalConnectionTimingInfo?.connectionStartTime;
+  }
+
+  get connectEnd() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].finalConnectionTimingInfo?.connectionEndTime;
+  }
+
+  get secureConnectionStart() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].finalConnectionTimingInfo?.secureConnectionStartTime;
+  }
+
+  get nextHopProtocol() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].finalConnectionTimingInfo?.ALPNNegotiatedProtocol;
+  }
+
+  get requestStart() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].finalNetworkRequestStartTime;
+  }
+
+  get responseStart() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].finalNetworkResponseStartTime;
+  }
+
+  get responseEnd() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].endTime;
+  }
+
+  get encodedBodySize() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].encodedBodySize;
+  }
+
+  get decodedBodySize() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_timingInfo].decodedBodySize;
+  }
+
+  get transferSize() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    if (this[_cacheMode] === "local") return 0;
+    if (this[_cacheMode] === "validated") return 300;
+    return this[_timingInfo].encodedBodySize + 300;
+  }
+
+  get deliveryType() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_deliveryType];
+  }
+
+  get responseStatus() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return this[_responseStatus];
+  }
+
+  constructor(
+    requestedUrl = "",
+    initiatorType = "",
+    timingInfo = null,
+    cacheMode = "",
+    responseStatus = 0,
+    deliveryType = "",
+    key = undefined,
+  ) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+
+    super(requestedUrl, "resource", timingInfo?.startTime ?? 0, 0, illegalConstructorKey);
+    this[webidl.brand] = webidl.brand;
+    this[_cacheMode] = cacheMode;
+    this[_requestedUrl] = requestedUrl;
+    this[_timingInfo] = timingInfo;
+    this[_initiatorType] = initiatorType;
+    this[_deliveryType] = deliveryType;
+    this[_responseStatus] = responseStatus;
+  }
+
+  toJSON() {
+    webidl.assertBranded(this, PerformanceResourceTimingPrototype);
+    return {
+      name: this.name,
+      entryType: this.entryType,
+      startTime: this.startTime,
+      duration: this.duration,
+      initiatorType: this.initiatorType,
+      nextHopProtocol: this.nextHopProtocol,
+      workerStart: this.workerStart,
+      redirectStart: this.redirectStart,
+      redirectEnd: this.redirectEnd,
+      fetchStart: this.fetchStart,
+      domainLookupStart: this.domainLookupStart,
+      domainLookupEnd: this.domainLookupEnd,
+      connectStart: this.connectStart,
+      connectEnd: this.connectEnd,
+      secureConnectionStart: this.secureConnectionStart,
+      requestStart: this.requestStart,
+      responseStart: this.responseStart,
+      responseEnd: this.responseEnd,
+      transferSize: this.transferSize,
+      encodedBodySize: this.encodedBodySize,
+      decodedBodySize: this.decodedBodySize,
+      deliveryType: this.deliveryType,
+      responseStatus: this.responseStatus,
+    };
+  }
+
+  [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    return inspect(
+      createFilteredInspectProxy({
+        object: this,
+        evaluate: ObjectPrototypeIsPrototypeOf(
+          PerformanceResourceTimingPrototype,
+          this,
+        ),
+        keys: [
+          "name",
+          "entryType",
+          "startTime",
+          "duration",
+          "initiatorType",
+          "nextHopProtocol",
+          "workerStart",
+          "redirectStart",
+          "redirectEnd",
+          "fetchStart",
+          "domainLookupStart",
+          "domainLookupEnd",
+          "connectStart",
+          "connectEnd",
+          "secureConnectionStart",
+          "requestStart",
+          "responseStart",
+          "responseEnd",
+          "transferSize",
+          "encodedBodySize",
+          "decodedBodySize",
+          "deliveryType",
+          "responseStatus",
+        ],
+      }),
+      inspectOptions,
+    );
+  }
+}
+webidl.configureInterface(PerformanceResourceTiming);
+const PerformanceResourceTimingPrototype = PerformanceResourceTiming.prototype;
+ObjectDefineProperties(PerformanceResourceTiming.prototype, {
+  initiatorType: kEnumerableProperty,
+  nextHopProtocol: kEnumerableProperty,
+  workerStart: kEnumerableProperty,
+  redirectStart: kEnumerableProperty,
+  redirectEnd: kEnumerableProperty,
+  fetchStart: kEnumerableProperty,
+  domainLookupStart: kEnumerableProperty,
+  domainLookupEnd: kEnumerableProperty,
+  connectStart: kEnumerableProperty,
+  connectEnd: kEnumerableProperty,
+  secureConnectionStart: kEnumerableProperty,
+  requestStart: kEnumerableProperty,
+  responseStart: kEnumerableProperty,
+  responseEnd: kEnumerableProperty,
+  transferSize: kEnumerableProperty,
+  encodedBodySize: kEnumerableProperty,
+  decodedBodySize: kEnumerableProperty,
+  deliveryType: kEnumerableProperty,
+  responseStatus: kEnumerableProperty,
+  toJSON: kEnumerableProperty,
+  [Symbol.toStringTag]: {
+    __proto__: null,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+    value: "PerformanceResourceTiming",
+  },
+});
+
+function markResourceTiming(
+  timingInfo,
+  requestedUrl,
+  initiatorType,
+  _global,
+  cacheMode,
+  _bodyInfo,
+  responseStatus,
+  deliveryType = "",
+) {
+  const resource = new PerformanceResourceTiming(
+    requestedUrl,
+    initiatorType,
+    timingInfo,
+    cacheMode,
+    responseStatus,
+    deliveryType,
+    illegalConstructorKey,
+  );
+  ArrayPrototypePush(performanceEntries, resource);
+  queuePerformanceEntry(resource);
+  return resource;
+}
+
 function queuePerformanceEntry(entry) {
   for (let i = 0; i < performanceObservers.length; i++) {
     const observer = performanceObservers[i];
@@ -449,7 +723,7 @@ const _scheduled = Symbol("[[scheduled]]");
 
 class PerformanceObserver {
   static get supportedEntryTypes() {
-    return ["mark", "measure"];
+    return ["mark", "measure", "resource"];
   }
 
   [_callback] = null;
@@ -771,6 +1045,29 @@ class Performance extends EventTarget {
     return entry;
   }
 
+  markResourceTiming(
+    timingInfo,
+    requestedUrl,
+    initiatorType,
+    global,
+    cacheMode,
+    bodyInfo,
+    responseStatus,
+    deliveryType = "",
+  ) {
+    webidl.assertBranded(this, PerformancePrototype);
+    return markResourceTiming(
+      timingInfo,
+      requestedUrl,
+      initiatorType,
+      global,
+      cacheMode,
+      bodyInfo,
+      responseStatus,
+      deliveryType,
+    );
+  }
+
   now() {
     webidl.assertBranded(this, PerformancePrototype);
     return now();
@@ -812,5 +1109,6 @@ export {
   PerformanceMeasure,
   PerformanceObserver,
   PerformanceObserverEntryList,
+  PerformanceResourceTiming,
   setTimeOrigin,
 };

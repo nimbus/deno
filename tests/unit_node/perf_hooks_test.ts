@@ -6,6 +6,7 @@ import {
   PerformanceMark,
   PerformanceMeasure,
   PerformanceObserver,
+  PerformanceResourceTiming,
 } from "node:perf_hooks";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 
@@ -47,6 +48,45 @@ Deno.test("[perf_hooks]: monitorEventLoopDelay", async () => {
 
 Deno.test("[perf_hooks]: markResourceTiming", () => {
   assert(typeof performance.markResourceTiming === "function");
+});
+
+
+Deno.test("[perf_hooks]: resource timing entries", () => {
+  const entry = performance.markResourceTiming(
+    {
+      startTime: 0,
+      redirectStartTime: 0,
+      redirectEndTime: 0,
+      postRedirectStartTime: 0,
+      finalServiceWorkerStartTime: 0,
+      finalNetworkRequestStartTime: 0,
+      finalNetworkResponseStartTime: 0,
+      endTime: 0,
+      encodedBodySize: 0,
+      decodedBodySize: 0,
+      finalConnectionTimingInfo: {
+        domainLookupStartTime: 0,
+        domainLookupEndTime: 0,
+        connectionStartTime: 0,
+        connectionEndTime: 0,
+        secureConnectionStartTime: 0,
+        ALPNNegotiatedProtocol: [],
+      },
+    },
+    "http://localhost:8080",
+    "fetch",
+    {},
+    "local",
+    {},
+    200,
+    "",
+  );
+
+  assert(entry instanceof PerformanceEntry);
+  assert(entry instanceof PerformanceResourceTiming);
+  assertEquals(performance.getEntriesByType("resource").length, 1);
+  performance.clearResourceTimings();
+  assertEquals(performance.getEntries().length, 0);
 });
 
 Deno.test("[perf_hooks]: PerformanceObserver.supportedEntryTypes", () => {

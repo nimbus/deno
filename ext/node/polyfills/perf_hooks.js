@@ -10,6 +10,7 @@ import {
   PerformanceMeasure,
   PerformanceObserver as WebPerformanceObserver,
   PerformanceObserverEntryList,
+  PerformanceResourceTiming,
 } from "ext:deno_web/15_performance.js";
 import { EldHistogram } from "ext:core/ops";
 import { ERR_INVALID_ARG_TYPE } from "ext:deno_node/internal/errors.ts";
@@ -161,8 +162,6 @@ const timerify = (fn, options = {}) => {
 };
 
 performance.timerify = timerify;
-// TODO(bartlomieju):
-performance.markResourceTiming = () => {};
 
 function monitorEventLoopDelay(options = {}) {
   const { resolution = 10 } = options;
@@ -177,6 +176,7 @@ export default {
   PerformanceEntry,
   PerformanceMark,
   PerformanceMeasure,
+  PerformanceResourceTiming,
   monitorEventLoopDelay,
   eventLoopUtilization,
   timerify,
@@ -193,5 +193,6 @@ export {
   PerformanceObserverEntryList,
   PerformanceMark,
   PerformanceMeasure,
+  PerformanceResourceTiming,
   timerify,
 };
