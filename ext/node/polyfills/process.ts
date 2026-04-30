@@ -107,9 +107,16 @@ const lazyLoadFsUtils = core.createLazyLoader<typeof fsUtils>(
 
 const {
   ArrayIsArray,
+  ArrayPrototypeFilter,
+  ArrayPrototypeIndexOf,
+  ArrayPrototypePush,
+  ArrayPrototypeSplice,
   NumberMAX_SAFE_INTEGER,
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
+  SafeFinalizationRegistry,
+  SafeSet,
+  SafeWeakRef,
 } = primordials;
 
 export const argv: string[] = ["", ""];
@@ -1166,6 +1173,142 @@ export function loadEnvFile(path = ".env") {
 }
 
 process.loadEnvFile = loadEnvFile;
+
+type ProcessFinalizationEvent = "exit" | "beforeExit";
+type ProcessFinalizationCallback = (
+  obj: object,
+  event: ProcessFinalizationEvent,
+) => void;
+type ProcessFinalizationRef = WeakRef<object> & {
+  fn: ProcessFinalizationCallback;
+};
+
+const processFinalizationWarnings = new SafeSet<string>();
+
+function emitProcessFinalizationExperimentalWarning(feature: string) {
+  if (processFinalizationWarnings.has(feature)) {
+    return;
+  }
+  processFinalizationWarnings.add(feature);
+  process.emitWarning(
+    `${feature} is an experimental feature and might change at any time`,
+    "ExperimentalWarning",
+  );
+}
+
+function createFinalization() {
+  let registry: FinalizationRegistry<ProcessFinalizationRef> | null = null;
+  const refs: Record<ProcessFinalizationEvent, ProcessFinalizationRef[]> = {
+    exit: [],
+    beforeExit: [],
+  };
+
+  const listeners: Record<ProcessFinalizationEvent, () => void> = {
+    exit() {
+      callRefsToFree("exit");
+    },
+    beforeExit() {
+      callRefsToFree("beforeExit");
+    },
+  };
+
+  function install(event: ProcessFinalizationEvent) {
+    if (refs[event].length > 0) {
+      return;
+    }
+    process.on(event, listeners[event]);
+  }
+
+  function uninstall(event: ProcessFinalizationEvent) {
+    if (refs[event].length > 0) {
+      return;
+    }
+    process.removeListener(event, listeners[event]);
+    if (refs.exit.length === 0 && refs.beforeExit.length === 0) {
+      registry = null;
+    }
+  }
+
+  function callRefsToFree(event: ProcessFinalizationEvent) {
+    for (const ref of refs[event]) {
+      const obj = ref.deref();
+      if (obj !== undefined) {
+        ref.fn(obj, event);
+      }
+    }
+    refs[event] = [];
+    uninstall(event);
+  }
+
+  function clear(ref: ProcessFinalizationRef) {
+    for (const event of ["exit", "beforeExit"] as const) {
+      const index = ArrayPrototypeIndexOf(refs[event], ref);
+      if (index !== -1) {
+        ArrayPrototypeSplice(refs[event], index, 1);
+      }
+      uninstall(event);
+    }
+  }
+
+  function registerRef(
+    event: ProcessFinalizationEvent,
+    obj: object,
+    fn: ProcessFinalizationCallback,
+  ) {
+    install(event);
+
+    const ref = new SafeWeakRef(obj) as ProcessFinalizationRef;
+    ref.fn = fn;
+
+    registry ??= new SafeFinalizationRegistry(clear);
+    registry.register(obj, ref, obj);
+
+    ArrayPrototypePush(refs[event], ref);
+  }
+
+  function register(obj: object, fn: ProcessFinalizationCallback) {
+    emitProcessFinalizationExperimentalWarning("process.finalization.register");
+    validateObject(obj, "obj", { allowFunction: true });
+    registerRef("exit", obj, fn);
+  }
+
+  function registerBeforeExit(obj: object, fn: ProcessFinalizationCallback) {
+    emitProcessFinalizationExperimentalWarning(
+      "process.finalization.registerBeforeExit",
+    );
+    validateObject(obj, "obj", { allowFunction: true });
+    registerRef("beforeExit", obj, fn);
+  }
+
+  function unregister(obj: object) {
+    emitProcessFinalizationExperimentalWarning("process.finalization.unregister");
+    if (!registry) {
+      return;
+    }
+    registry.unregister(obj);
+    for (const event of ["exit", "beforeExit"] as const) {
+      refs[event] = ArrayPrototypeFilter(refs[event], (ref) => {
+        const registered = ref.deref();
+        return registered !== undefined && registered !== obj;
+      });
+      uninstall(event);
+    }
+  }
+
+  return {
+    register,
+    registerBeforeExit,
+    unregister,
+  };
+}
+
+ObjectDefineProperty(process, "finalization", {
+  __proto__: null,
+  enumerable: true,
+  configurable: true,
+  writable: true,
+  value: createFinalization(),
+});
 
 /** https://nodejs.org/api/process.html#processexecpath */
 

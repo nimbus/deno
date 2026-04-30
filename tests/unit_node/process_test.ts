@@ -1404,6 +1404,94 @@ Deno.test("process.emitWarning() does not print to stderr when it is deprecation
   (process as any).noDeprecation = false; // Reset noDeprecation
 });
 
+Deno.test("process.finalization.register() emits an ExperimentalWarning once and runs on exit", async () => {
+  using writeStub = stub(process.stderr, "write", () => true);
+  const warnings: Array<Error & { name?: string }> = [];
+  const onWarning = (warning: Error & { name?: string }) => {
+    warnings.push(warning);
+  };
+  process.on("warning", onWarning);
+
+  try {
+    const first = { foo: "first" };
+    const second = { foo: "second" };
+    const exitCalls: string[] = [];
+
+    process.finalization.register(first, (obj, event) => {
+      exitCalls.push(`${event}:${(obj as { foo: string }).foo}`);
+    });
+    process.finalization.register(second, () => {
+      exitCalls.push("second");
+    });
+
+    await new Promise((resolve) => process.nextTick(resolve));
+    process.emit("exit", 0);
+
+    assertEquals(exitCalls, ["exit:first", "second"]);
+    assertEquals(
+      warnings.filter((warning) => warning.name === "ExperimentalWarning")
+        .length,
+      1,
+    );
+    assertMatch(
+      warnings[0].message,
+      /process\.finalization\.register is an experimental feature/,
+    );
+    assertEquals(writeStub.calls.length, 1);
+  } finally {
+    process.off("warning", onWarning);
+  }
+});
+
+Deno.test("process.finalization.registerBeforeExit() and unregister() honor beforeExit semantics", async () => {
+  using writeStub = stub(process.stderr, "write", () => true);
+  const warnings: Array<Error & { name?: string }> = [];
+  const onWarning = (warning: Error & { name?: string }) => {
+    warnings.push(warning);
+  };
+  process.on("warning", onWarning);
+
+  try {
+    const beforeExitCalls: string[] = [];
+    const beforeExitObj = { foo: "before" };
+    const exitObj = { foo: "exit" };
+
+    process.finalization.registerBeforeExit(beforeExitObj, (obj, event) => {
+      beforeExitCalls.push(`${event}:${(obj as { foo: string }).foo}`);
+    });
+    process.finalization.register(exitObj, () => {
+      beforeExitCalls.push("unexpected-exit");
+    });
+    process.finalization.unregister(exitObj);
+
+    await new Promise((resolve) => process.nextTick(resolve));
+    process.emit("beforeExit", 0);
+    process.emit("exit", 0);
+
+    assertEquals(beforeExitCalls, ["beforeExit:before"]);
+    assertEquals(
+      warnings.filter((warning) => warning.name === "ExperimentalWarning")
+        .length,
+      3,
+    );
+    assertMatch(
+      warnings[0].message,
+      /process\.finalization\.registerBeforeExit is an experimental feature/,
+    );
+    assertMatch(
+      warnings[1].message,
+      /process\.finalization\.register is an experimental feature/,
+    );
+    assertMatch(
+      warnings[2].message,
+      /process\.finalization\.unregister is an experimental feature/,
+    );
+    assertEquals(writeStub.calls.length, 3);
+  } finally {
+    process.off("warning", onWarning);
+  }
+});
+
 Deno.test("process.moduleLoadList", () => {
   // deno-lint-ignore no-explicit-any
   const moduleLoadList = (process as any).moduleLoadList;
