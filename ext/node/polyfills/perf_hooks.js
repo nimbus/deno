@@ -85,8 +85,27 @@ const coerceNodeMarkName = (markName) => {
   return markName;
 };
 
+const validateNodeMarkOptions = (markOptions) => {
+  if (markOptions === undefined) {
+    return;
+  }
+  if (markOptions === null || typeof markOptions !== "object") {
+    throw new ERR_INVALID_ARG_TYPE("options", "Object", markOptions);
+  }
+  if (
+    "startTime" in markOptions && typeof markOptions.startTime !== "number"
+  ) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "startTime",
+      "number",
+      markOptions.startTime,
+    );
+  }
+};
+
 const originalMark = performance.mark.bind(performance);
 performance.mark = (markName, markOptions = { __proto__: null }) => {
+  validateNodeMarkOptions(markOptions);
   return originalMark(coerceNodeMarkName(markName), markOptions);
 };
 

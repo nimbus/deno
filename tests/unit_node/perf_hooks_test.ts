@@ -77,6 +77,13 @@ Deno.test("[perf_hooks]: symbol mark names throw Node-style coercion errors", ()
   assertThrows(() => performance.clearMarks(Symbol("mark")));
 });
 
+Deno.test("[perf_hooks]: mark validates startTime like Node", () => {
+  const error = assertThrows(
+    () => performance.mark("bad-start", { startTime: "a" as unknown as number }),
+  );
+  assertEquals(error.code, "ERR_INVALID_ARG_TYPE");
+});
+
 Deno.test("[perf_hooks]: PerformanceObserver observes marks", async () => {
   const entries: PerformanceEntry[] = [];
   const observer = new PerformanceObserver((list) => {
