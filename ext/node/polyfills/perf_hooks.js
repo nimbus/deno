@@ -78,9 +78,22 @@ const seedNodeTimingMarks = () => {
 performance.nodeTiming = nodeTiming;
 seedNodeTimingMarks();
 
+const coerceNodeMarkName = (markName) => {
+  if (typeof markName === "symbol") {
+    `${markName}`;
+  }
+  return markName;
+};
+
+const originalMark = performance.mark.bind(performance);
+performance.mark = (markName, markOptions = { __proto__: null }) => {
+  return originalMark(coerceNodeMarkName(markName), markOptions);
+};
+
 const originalClearMarks = performance.clearMarks.bind(performance);
 performance.clearMarks = (markName = undefined) => {
-  originalClearMarks(markName);
+  const coercedMarkName = markName === undefined ? undefined : coerceNodeMarkName(markName);
+  originalClearMarks(coercedMarkName);
   if (markName === undefined) {
     seedNodeTimingMarks();
   }

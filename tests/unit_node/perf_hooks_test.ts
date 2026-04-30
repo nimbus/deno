@@ -72,6 +72,11 @@ Deno.test("[perf_hooks]: user timing exports", () => {
   performance.clearMeasures();
 });
 
+Deno.test("[perf_hooks]: symbol mark names throw Node-style coercion errors", () => {
+  assertThrows(() => performance.mark(Symbol("mark")));
+  assertThrows(() => performance.clearMarks(Symbol("mark")));
+});
+
 Deno.test("[perf_hooks]: PerformanceObserver observes marks", async () => {
   const entries: PerformanceEntry[] = [];
   const observer = new PerformanceObserver((list) => {
