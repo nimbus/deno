@@ -79,6 +79,12 @@ const seedNodeTimingMarks = () => {
 performance.nodeTiming = nodeTiming;
 seedNodeTimingMarks();
 
+const nodeTimingMarkNames = new Set(["nodeStart", "bootstrapComplete"]);
+const isVisiblePerformanceEntry = (entry) =>
+  entry.entryType !== "mark" || !nodeTimingMarkNames.has(entry.name);
+const filterVisiblePerformanceEntries = (entries) =>
+  entries.filter(isVisiblePerformanceEntry);
+
 const coerceNodeMarkName = (markName) => {
   if (typeof markName === "symbol") {
     `${markName}`;
@@ -113,11 +119,25 @@ performance.mark = (markName, markOptions = { __proto__: null }) => {
 const originalClearMarks = performance.clearMarks.bind(performance);
 performance.clearMarks = (markName = undefined) => {
   const coercedMarkName = markName === undefined ? undefined : coerceNodeMarkName(markName);
+  if (coercedMarkName !== undefined && nodeTimingMarkNames.has(coercedMarkName)) {
+    return;
+  }
   originalClearMarks(coercedMarkName);
   if (markName === undefined) {
     seedNodeTimingMarks();
   }
 };
+
+const originalGetEntries = performance.getEntries.bind(performance);
+performance.getEntries = () => filterVisiblePerformanceEntries(originalGetEntries());
+
+const originalGetEntriesByType = performance.getEntriesByType.bind(performance);
+performance.getEntriesByType = (type) =>
+  filterVisiblePerformanceEntries(originalGetEntriesByType(type));
+
+const originalGetEntriesByName = performance.getEntriesByName.bind(performance);
+performance.getEntriesByName = (name, type = undefined) =>
+  filterVisiblePerformanceEntries(originalGetEntriesByName(name, type));
 
 const timerify = (fn, options = {}) => {
   if (typeof fn !== "function") {

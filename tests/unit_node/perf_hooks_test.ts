@@ -84,7 +84,9 @@ Deno.test("[perf_hooks]: resource timing entries", () => {
 
   assert(entry instanceof PerformanceEntry);
   assert(entry instanceof PerformanceResourceTiming);
+  assertEquals(performance.getEntries().length, 1);
   assertEquals(performance.getEntriesByType("resource").length, 1);
+  assertEquals(performance.getEntriesByName("nodeStart").length, 0);
   performance.clearResourceTimings();
   assertEquals(performance.getEntries().length, 0);
 });
