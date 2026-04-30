@@ -3,7 +3,7 @@
 
 import { primordials } from "ext:core/mod.js";
 const { queueMicrotask, SymbolDispose } = primordials;
-import { kResistStopPropagation } from "ext:deno_web/02_event.js";
+import { kResistStopPropagation } from "ext:deno_node/internal/event_target.mjs";
 import { validateAbortSignal, validateFunction } from "../validators.mjs";
 import { codes } from "../errors.ts";
 const { ERR_INVALID_ARG_TYPE } = codes;
