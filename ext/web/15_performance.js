@@ -30,6 +30,7 @@ import { EventTarget } from "./02_event.js";
 import { DOMException } from "./01_dom_exception.js";
 
 const illegalConstructorKey = Symbol("illegalConstructorKey");
+const kEnumerableProperty = { __proto__: null, enumerable: true };
 let performanceEntries = [];
 let timeOrigin;
 const performanceObservers = [];
