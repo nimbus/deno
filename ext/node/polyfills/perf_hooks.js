@@ -6,6 +6,8 @@
 import {
   performance,
   PerformanceEntry,
+  PerformanceMark,
+  PerformanceMeasure,
   PerformanceObserver as WebPerformanceObserver,
   PerformanceObserverEntryList,
 } from "ext:deno_web/15_performance.js";
@@ -61,7 +63,28 @@ const eventLoopUtilization = () => {
 
 performance.eventLoopUtilization = eventLoopUtilization;
 
-performance.nodeTiming = {};
+const nodeTiming = {
+  nodeStart: 0,
+  bootstrapComplete: performance.now(),
+};
+
+const seedNodeTimingMarks = () => {
+  performance.mark("nodeStart", { startTime: nodeTiming.nodeStart });
+  performance.mark("bootstrapComplete", {
+    startTime: nodeTiming.bootstrapComplete,
+  });
+};
+
+performance.nodeTiming = nodeTiming;
+seedNodeTimingMarks();
+
+const originalClearMarks = performance.clearMarks.bind(performance);
+performance.clearMarks = (markName = undefined) => {
+  originalClearMarks(markName);
+  if (markName === undefined) {
+    seedNodeTimingMarks();
+  }
+};
 
 const timerify = (fn, options = {}) => {
   if (typeof fn !== "function") {
@@ -120,6 +143,8 @@ export default {
   PerformanceObserver,
   PerformanceObserverEntryList,
   PerformanceEntry,
+  PerformanceMark,
+  PerformanceMeasure,
   monitorEventLoopDelay,
   eventLoopUtilization,
   timerify,
@@ -134,5 +159,7 @@ export {
   PerformanceEntry,
   PerformanceObserver,
   PerformanceObserverEntryList,
+  PerformanceMark,
+  PerformanceMeasure,
   timerify,
 };

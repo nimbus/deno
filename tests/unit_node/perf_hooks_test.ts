@@ -3,6 +3,8 @@ import {
   monitorEventLoopDelay,
   performance,
   PerformanceEntry,
+  PerformanceMark,
+  PerformanceMeasure,
   PerformanceObserver,
 } from "node:perf_hooks";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -52,6 +54,22 @@ Deno.test("[perf_hooks]: PerformanceObserver.supportedEntryTypes", () => {
   assert(Array.isArray(supported));
   assert(supported.includes("mark"));
   assert(supported.includes("measure"));
+});
+
+Deno.test("[perf_hooks]: user timing exports", () => {
+  const mark = performance.mark("test-mark");
+  const measure = performance.measure("test-measure", "nodeStart", "bootstrapComplete");
+
+  assert(mark instanceof PerformanceMark);
+  assert(measure instanceof PerformanceMeasure);
+  assertEquals(measure.startTime, performance.nodeTiming.nodeStart);
+  assertEquals(
+    measure.duration,
+    performance.nodeTiming.bootstrapComplete - performance.nodeTiming.nodeStart,
+  );
+
+  performance.clearMarks();
+  performance.clearMeasures();
 });
 
 Deno.test("[perf_hooks]: PerformanceObserver observes marks", async () => {
