@@ -52,6 +52,7 @@ const {
   StringPrototypeSlice,
   StringPrototypeSplit,
   SymbolFor,
+  SymbolToPrimitive,
 } = primordials;
 import {
   validateBoolean,
@@ -378,6 +379,10 @@ const isZeroWidthCodePoint = (code) => {
     (code >= 0xE0100 && code <= 0xE01EF); // Variation Selectors
 };
 
+function returnFalse() {
+  return false;
+}
+
 function hasBuiltInToString(value) {
   // TODO(wafuwafu13): Implement
   // // Prevent triggering proxy traps.
@@ -388,25 +393,34 @@ function hasBuiltInToString(value) {
     value = proxyTarget;
   }
 
-  // Count objects that have no `toString` function as built-in.
-  if (typeof value.toString !== "function") {
-    return true;
-  }
+  let hasOwnToString = ObjectPrototypeHasOwnProperty;
+  let hasOwnToPrimitive = ObjectPrototypeHasOwnProperty;
 
-  // The object has a own `toString` property. Thus it's not a built-in one.
-  if (
-    FunctionPrototypeCall(Object.prototype.hasOwnProperty, value, "toString")
-  ) {
+  // Count objects without `toString` and `Symbol.toPrimitive` function as
+  // built-in.
+  if (typeof value.toString !== "function") {
+    if (typeof value[SymbolToPrimitive] !== "function") {
+      return true;
+    } else if (ObjectPrototypeHasOwnProperty(value, SymbolToPrimitive)) {
+      return false;
+    }
+    hasOwnToString = returnFalse;
+  } else if (ObjectPrototypeHasOwnProperty(value, "toString")) {
+    return false;
+  } else if (typeof value[SymbolToPrimitive] !== "function") {
+    hasOwnToPrimitive = returnFalse;
+  } else if (ObjectPrototypeHasOwnProperty(value, SymbolToPrimitive)) {
     return false;
   }
 
-  // Find the object that has the `toString` property as own property in the
-  // prototype chain.
+  // Find the object that has the `toString` property or `Symbol.toPrimitive`
+  // property as an own property in the prototype chain.
   let pointer = value;
   do {
     pointer = ObjectGetPrototypeOf(pointer);
   } while (
-    !FunctionPrototypeCall(Object.prototype.hasOwnProperty, pointer, "toString")
+    !hasOwnToString(pointer, "toString") &&
+    !hasOwnToPrimitive(pointer, SymbolToPrimitive)
   );
 
   // Check closer if the object is a built-in.

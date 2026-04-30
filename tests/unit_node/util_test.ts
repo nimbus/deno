@@ -38,6 +38,34 @@ Deno.test({
 });
 
 Deno.test({
+  name: "[util] format honors Symbol.toPrimitive for %s",
+  fn() {
+    const objectWithToPrimitive = {
+      [Symbol.toPrimitive](hint: string) {
+        switch (hint) {
+          case "number":
+            return 42;
+          case "string":
+            return "string representation";
+          default:
+            return "default context";
+        }
+      },
+    };
+
+    assertEquals(util.format("%s", +objectWithToPrimitive), "42");
+    assertEquals(
+      util.format("%s", objectWithToPrimitive),
+      "string representation",
+    );
+    assertEquals(
+      util.format("%s", objectWithToPrimitive + ""),
+      "default context",
+    );
+  },
+});
+
+Deno.test({
   name: "[util] inspect.custom",
   fn() {
     assertEquals(util.inspect.custom, Symbol.for("nodejs.util.inspect.custom"));
