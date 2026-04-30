@@ -2,11 +2,11 @@
 // Copyright Joyent, Inc. and Node.js contributors. All rights reserved. MIT license.
 
 import { primordials } from "ext:core/mod.js";
-const { queueMicrotask, SymbolDispose } = primordials;
-import { kResistStopPropagation } from "ext:deno_node/internal/event_target_symbols.mjs";
+const { queueMicrotask, SymbolDispose, SymbolFor } = primordials;
 import { validateAbortSignal, validateFunction } from "../validators.mjs";
 import { codes } from "../errors.ts";
 const { ERR_INVALID_ARG_TYPE } = codes;
+const kResistStopPropagation = SymbolFor("nodejs.internal.kResistStopPropagation");
 
 /**
  * @param {AbortSignal} signal
