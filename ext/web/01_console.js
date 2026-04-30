@@ -99,6 +99,7 @@ const {
   MathRound,
   MathSqrt,
   Number,
+  NumberIsFinite,
   NumberIsInteger,
   NumberIsNaN,
   NumberParseInt,
@@ -2139,9 +2140,59 @@ function formatArrayBuffer(ctx, value) {
   return [`${ctx.stylize("[Uint8Contents]", "special")}: <${str}>`];
 }
 
-function formatNumber(fn, value) {
+function addNumericSeparator(integerString) {
+  let result = "";
+  let index = integerString.length;
+  const start = integerString[0] === "-" ? 1 : 0;
+  for (; index >= start + 4; index -= 3) {
+    result = `_${integerString.slice(index - 3, index)}${result}`;
+  }
+  return index === integerString.length
+    ? integerString
+    : `${integerString.slice(0, index)}${result}`;
+}
+
+function addNumericSeparatorEnd(integerString) {
+  let result = "";
+  let index = 0;
+  for (; index < integerString.length - 3; index += 3) {
+    result += `${integerString.slice(index, index + 3)}_`;
+  }
+  return index === 0
+    ? integerString
+    : `${result}${integerString.slice(index)}`;
+}
+
+function formatNumber(fn, value, numericSeparator = false) {
   // Format -0 as '-0'. Checking `value === -0` won't distinguish 0 from -0.
-  return fn(ObjectIs(value, -0) ? "-0" : `${value}`, "number");
+  const stringValue = ObjectIs(value, -0) ? "-0" : `${value}`;
+  if (!numericSeparator) {
+    return fn(stringValue, "number");
+  }
+
+  const integer = Math.trunc(value);
+  if (integer === value) {
+    if (!NumberIsFinite(value) || StringPrototypeIncludes(stringValue, "e")) {
+      return fn(stringValue, "number");
+    }
+    return fn(addNumericSeparator(stringValue), "number");
+  }
+
+  if (NumberIsNaN(value)) {
+    return fn(stringValue, "number");
+  }
+
+  const decimalIndex = StringPrototypeIndexOf(stringValue, ".");
+  if (decimalIndex === -1) {
+    return fn(stringValue, "number");
+  }
+
+  const integerPart = StringPrototypeSlice(stringValue, 0, decimalIndex);
+  const fractionalPart = StringPrototypeSlice(stringValue, decimalIndex + 1);
+  return fn(
+    `${addNumericSeparator(integerPart)}.${addNumericSeparatorEnd(fractionalPart)}`,
+    "number",
+  );
 }
 
 const PromiseState = {
@@ -2288,8 +2339,12 @@ function isBelowBreakLength(ctx, output, start, base) {
   return base === "" || !StringPrototypeIncludes(base, "\n");
 }
 
-function formatBigInt(fn, value) {
-  return fn(`${value}n`, "bigint");
+function formatBigInt(fn, value, numericSeparator = false) {
+  const stringValue = `${value}`;
+  return fn(
+    numericSeparator ? `${addNumericSeparator(stringValue)}n` : `${stringValue}n`,
+    "bigint",
+  );
 }
 
 function formatNamespaceObject(

@@ -1748,7 +1748,9 @@ export function spawnSync(
       stdin: stdin_ == "inherit" ? "inherit" : "null",
       uid,
       gid,
-      clearEnv: false,
+      // Keep sync node:child_process aligned with the explicit JS-visible
+      // envPairs contract instead of re-merging the host process environment.
+      clearEnv: true,
       extraStdio: extraStdioNormalized,
       windowsRawArguments: windowsVerbatimArguments,
       // deno-lint-ignore no-explicit-any

@@ -13,7 +13,8 @@ const {
   ArrayPrototypeAt,
   ArrayPrototypeIndexOf,
   ArrayPrototypePush,
-  ArrayPrototypeSplice,
+  ArrayPrototypePushApply,
+  ArrayPrototypeSlice,
   ObjectDefineProperty,
   ObjectGetPrototypeOf,
   ObjectSetPrototypeOf,
@@ -94,6 +95,7 @@ function wrapStoreRun(store, data, next, transform = defaultTransform) {
 class ActiveChannel {
   subscribe(subscription) {
     validateFunction(subscription, "subscription");
+    this._subscribers = ArrayPrototypeSlice(this._subscribers);
     ArrayPrototypePush(this._subscribers, subscription);
     channels.incRef(this.name);
   }
@@ -102,7 +104,10 @@ class ActiveChannel {
     const index = ArrayPrototypeIndexOf(this._subscribers, subscription);
     if (index === -1) return false;
 
-    ArrayPrototypeSplice(this._subscribers, index, 1);
+    const before = ArrayPrototypeSlice(this._subscribers, 0, index);
+    const after = ArrayPrototypeSlice(this._subscribers, index + 1);
+    this._subscribers = before;
+    ArrayPrototypePushApply(this._subscribers, after);
 
     channels.decRef(this.name);
     maybeMarkInactive(this);
@@ -134,9 +139,10 @@ class ActiveChannel {
   }
 
   publish(data) {
-    for (let i = 0; i < (this._subscribers?.length || 0); i++) {
+    const subscribers = this._subscribers;
+    for (let i = 0; i < (subscribers?.length || 0); i++) {
       try {
-        const onMessage = this._subscribers[i];
+        const onMessage = subscribers[i];
         onMessage(data, this.name);
       } catch (err) {
         nextTick(() => {

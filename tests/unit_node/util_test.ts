@@ -19,6 +19,25 @@ Deno.test({
 });
 
 Deno.test({
+  name: "[util] format honors numericSeparator",
+  fn() {
+    util.inspect.defaultOptions.numericSeparator = true;
+    try {
+      assertEquals(
+        util.format("%d %i %f", 118059162071741140000, 118059162071741140000, 123123123),
+        "118_059_162_071_741_140_000 118_059_162_071_741_140_000 123_123_123",
+      );
+      assertEquals(
+        util.formatWithOptions({ numericSeparator: true }, "%d %i %f", 118059162071741140000, 118059162071741140000, 123123123),
+        "118_059_162_071_741_140_000 118_059_162_071_741_140_000 123_123_123",
+      );
+    } finally {
+      util.inspect.defaultOptions.numericSeparator = false;
+    }
+  },
+});
+
+Deno.test({
   name: "[util] inspect.custom",
   fn() {
     assertEquals(util.inspect.custom, Symbol.for("nodejs.util.inspect.custom"));
