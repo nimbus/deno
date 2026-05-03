@@ -140,7 +140,24 @@ class NodeTestContext {
           );
           try {
             await before();
-            await prepared.fn(newNodeTextContext);
+            if (prepared.fn.length >= 2) {
+              await new Promise((testResolve, testReject) => {
+                const done = (err?: Error) => {
+                  if (err) {
+                    testReject(err);
+                  } else {
+                    testResolve(undefined);
+                  }
+                };
+                try {
+                  prepared.fn(newNodeTextContext, done);
+                } catch (err) {
+                  testReject(err);
+                }
+              });
+            } else {
+              await prepared.fn(newNodeTextContext);
+            }
             await after();
           } catch (err) {
             if (!newNodeTextContext[skippedSymbol]) {
@@ -149,6 +166,8 @@ class NodeTestContext {
             try {
               await after();
             } catch { /* ignore, test is already failing */ }
+          } finally {
+            mock.restoreAll();
           }
         },
         ignore: prepared.options.todo || prepared.options.skip,
@@ -296,6 +315,7 @@ function wrapTestFn(fn, resolve) {
         throw err;
       }
     } finally {
+      mock.restoreAll();
       resolve();
     }
   };
