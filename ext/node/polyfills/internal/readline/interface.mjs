@@ -27,6 +27,7 @@
 import { op_get_env_no_permission_check } from "ext:core/ops";
 
 import {
+  AbortError,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
   ERR_OUT_OF_RANGE,
@@ -82,6 +83,7 @@ import {
   kPreviousKey,
   kPrompt,
   kQuestionCallback,
+  kQuestionReject,
   kRefreshLine,
   kSawKeyPress,
   kSawReturnAt,
@@ -155,6 +157,7 @@ export {
   kPreviousKey,
   kPrompt,
   kQuestionCallback,
+  kQuestionReject,
   kRefreshLine,
   kSawKeyPress,
   kSawReturnAt,
@@ -1121,6 +1124,7 @@ export class Interface extends InterfaceConstructor {
           } else {
             // This readline instance is finished
             this.close();
+            this[kQuestionReject]?.(new AbortError("Aborted with Ctrl+C"));
           }
           break;
 
@@ -1132,6 +1136,7 @@ export class Interface extends InterfaceConstructor {
           if (this.cursor === 0 && this.line.length === 0) {
             // This readline instance is finished
             this.close();
+            this[kQuestionReject]?.(new AbortError("Aborted with Ctrl+D"));
           } else if (this.cursor < this.line.length) {
             this[kDeleteRight]();
           }

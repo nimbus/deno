@@ -10,6 +10,7 @@ import {
   Interface as _Interface,
   kQuestion,
   kQuestionCancel,
+  kQuestionReject,
 } from "ext:deno_node/internal/readline/interface.mjs";
 import { AbortError } from "ext:deno_node/internal/errors.ts";
 import { validateAbortSignal } from "ext:deno_node/internal/validators.mjs";
@@ -102,6 +103,7 @@ export class Interface extends _Interface {
         };
       }
 
+      this[kQuestionReject] = reject;
       this[kQuestion](query, cb);
     });
   }

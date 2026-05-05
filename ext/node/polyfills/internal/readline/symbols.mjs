@@ -25,6 +25,7 @@ export const kOnLine = Symbol("_onLine");
 export const kPreviousKey = Symbol("_previousKey");
 export const kPrompt = Symbol("_prompt");
 export const kQuestionCallback = Symbol("_questionCallback");
+export const kQuestionReject = Symbol("_questionReject");
 export const kRefreshLine = Symbol("_refreshLine");
 export const kSawKeyPress = Symbol("_sawKeyPress");
 export const kSawReturnAt = Symbol("_sawReturnAt");
