@@ -61,7 +61,9 @@ import { IncomingMessage } from "node:_http_incoming";
 import {
   connResetException,
   ERR_HTTP_HEADERS_SENT,
+  ERR_HTTP_INVALID_STATUS_CODE,
   ERR_HTTP_SOCKET_ASSIGNED,
+  ERR_INVALID_ARG_VALUE,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_CHAR,
   ERR_OUT_OF_RANGE,
@@ -380,13 +382,10 @@ ServerResponse.prototype.writeHead = function writeHead(
     throw new ERR_HTTP_HEADERS_SENT("write");
   }
 
+  const originalStatusCode = statusCode;
   statusCode |= 0;
   if (statusCode < 100 || statusCode > 999) {
-    throw new ERR_INVALID_ARG_TYPE(
-      "statusCode",
-      "integer [100, 999]",
-      statusCode,
-    );
+    throw new ERR_HTTP_INVALID_STATUS_CODE(originalStatusCode);
   }
 
   if (typeof reason === "string") {
@@ -407,11 +406,7 @@ ServerResponse.prototype.writeHead = function writeHead(
     // Slow-case: progressive API and header fields are passed.
     if (ArrayIsArray(obj)) {
       if (obj.length % 2 !== 0) {
-        throw new ERR_INVALID_ARG_TYPE(
-          "headers",
-          "Array with even length",
-          obj,
-        );
+        throw new ERR_INVALID_ARG_VALUE("headers", obj);
       }
       for (let n = 0; n < obj.length; n += 2) {
         const k = obj[n + 0];
@@ -919,20 +914,14 @@ function resOnFinish(req, res, socket, state, server) {
       socket.end();
     }
   } else if (state.outgoing.length === 0) {
-    // If the server is closing, destroy the socket instead of
-    // setting a keep-alive timeout (prevents timer leaks).
-    if (!server.listening) {
-      socket.destroy();
-    } else {
-      const keepAliveTimeout = NumberIsFinite(server.keepAliveTimeout) &&
-          server.keepAliveTimeout >= 0
-        ? server.keepAliveTimeout
-        : 0;
+    const keepAliveTimeout = NumberIsFinite(server.keepAliveTimeout) &&
+        server.keepAliveTimeout >= 0
+      ? server.keepAliveTimeout
+      : 0;
 
-      if (keepAliveTimeout) {
-        socket.setTimeout(keepAliveTimeout + 1000);
-        state.keepAliveTimeoutSet = true;
-      }
+    if (keepAliveTimeout) {
+      socket.setTimeout(keepAliveTimeout + 1000);
+      state.keepAliveTimeoutSet = true;
     }
   } else {
     const m = state.outgoing.shift();

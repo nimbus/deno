@@ -20,6 +20,7 @@ const {
   SafeSet,
   String,
   StringFromCharCode,
+  StringPrototypeIncludes,
   StringPrototypeSlice,
   StringPrototypeToLowerCase,
   Symbol,
@@ -774,6 +775,90 @@ const emptyArray = [];
 const kNeverIndexFlag = StringFromCharCode(NGHTTP2_NV_FLAG_NO_INDEX);
 const kNoHeaderFlags = StringFromCharCode(NGHTTP2_NV_FLAG_NONE);
 
+function mapToHeaders(
+  map,
+  assertValuePseudoHeader = assertValidPseudoHeader,
+) {
+  let headers = "";
+  let pseudoHeaders = "";
+  let count = 0;
+  const keys = ObjectKeys(map);
+  const singles = new SafeSet();
+  let i;
+  let j;
+  let isArray;
+  let key;
+  let value;
+  let isSingleValueHeader;
+  let err;
+  const neverIndex = ArrayPrototypeMap(
+    map[kSensitiveHeaders] || emptyArray,
+    (v) => StringPrototypeToLowerCase(v),
+  );
+  for (i = 0; i < keys.length; ++i) {
+    key = keys[i];
+    value = map[key];
+    if (value === undefined || key === "") {
+      continue;
+    }
+    key = StringPrototypeToLowerCase(key);
+    isSingleValueHeader = kSingleValueHeaders.has(key);
+    isArray = ArrayIsArray(value);
+    if (isArray) {
+      switch (value.length) {
+        case 0:
+          continue;
+        case 1:
+          value = String(value[0]);
+          isArray = false;
+          break;
+        default:
+          if (isSingleValueHeader) {
+            throw new ERR_HTTP2_HEADER_SINGLE_VALUE(key);
+          }
+      }
+    } else {
+      value = String(value);
+    }
+    if (isSingleValueHeader) {
+      if (singles.has(key)) {
+        throw new ERR_HTTP2_HEADER_SINGLE_VALUE(key);
+      }
+      singles.add(key);
+    }
+    const flags = ArrayPrototypeIncludes(neverIndex, key)
+      ? kNeverIndexFlag
+      : kNoHeaderFlags;
+    if (key[0] === ":") {
+      err = assertValuePseudoHeader(key);
+      if (err !== undefined) {
+        throw err;
+      }
+      pseudoHeaders += `${key}\0${value}\0${flags}`;
+      count++;
+      continue;
+    }
+    if (StringPrototypeIncludes(key, " ")) {
+      throw new ERR_INVALID_HTTP_TOKEN("Header name", key);
+    }
+    if (isIllegalConnectionSpecificHeader(key, value)) {
+      throw new ERR_HTTP2_INVALID_CONNECTION_HEADERS(key);
+    }
+    if (isArray) {
+      for (j = 0; j < value.length; ++j) {
+        const val = String(value[j]);
+        headers += `${key}\0${val}\0${flags}`;
+      }
+      count += value.length;
+      continue;
+    }
+    headers += `${key}\0${value}\0${flags}`;
+    count++;
+  }
+
+  return [pseudoHeaders + headers, count];
+}
+
 /**
  * Builds an NgHeader string + header count value, validating the header key
  * format, rejecting illegal header configurations, and marking sensitive headers
@@ -1033,6 +1118,7 @@ export {
   kProxySocket,
   kRequest,
   kSensitiveHeaders,
+  mapToHeaders,
   kSocket,
   kStrictSingleValueFields,
   MAX_ADDITIONAL_SETTINGS,
@@ -1066,6 +1152,7 @@ export default {
   kStrictSingleValueFields,
   kProtocol,
   kProxySocket,
+  mapToHeaders,
   kRequest,
   MAX_ADDITIONAL_SETTINGS,
   NghttpError,

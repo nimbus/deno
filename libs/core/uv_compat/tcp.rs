@@ -549,10 +549,64 @@ pub unsafe fn uv_tcp_nodelay(tcp: *mut uv_tcp_t, enable: c_int) -> c_int {
 pub unsafe fn uv_tcp_reset(tcp: *mut uv_tcp_t) -> c_int {
   // SAFETY: Caller guarantees tcp is valid and initialized.
   unsafe {
-    if let Some(ref stream) = (*tcp).internal_stream
-      && stream.set_linger(Some(std::time::Duration::ZERO)).is_err()
-    {
-      return UV_EINVAL;
+    if let Some(ref stream) = (*tcp).internal_stream {
+      #[cfg(unix)]
+      {
+        use std::os::unix::io::AsRawFd;
+
+        let linger = libc::linger {
+          l_onoff: 1,
+          l_linger: 0,
+        };
+        if libc::setsockopt(
+          stream.as_raw_fd(),
+          libc::SOL_SOCKET,
+          libc::SO_LINGER,
+          &linger as *const libc::linger as *const c_void,
+          std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        ) != 0
+        {
+          return UV_EINVAL;
+        }
+      }
+      #[cfg(windows)]
+      {
+        use std::os::windows::io::AsRawSocket;
+
+        #[repr(C)]
+        struct Linger {
+          l_onoff: u16,
+          l_linger: u16,
+        }
+
+        unsafe extern "system" {
+          fn setsockopt(
+            s: usize,
+            level: c_int,
+            optname: c_int,
+            optval: *const c_void,
+            optlen: c_int,
+          ) -> c_int;
+        }
+
+        const SOL_SOCKET: c_int = 0xffff;
+        const SO_LINGER: c_int = 0x0080;
+
+        let linger = Linger {
+          l_onoff: 1,
+          l_linger: 0,
+        };
+        if setsockopt(
+          stream.as_raw_socket() as usize,
+          SOL_SOCKET,
+          SO_LINGER,
+          &linger as *const Linger as *const c_void,
+          std::mem::size_of::<Linger>() as c_int,
+        ) != 0
+        {
+          return UV_EINVAL;
+        }
+      }
     }
     // Drop the stream immediately so the fd is closed with SO_LINGER=0,
     // causing the kernel to send RST to the peer.  `stop_tcp` will find
