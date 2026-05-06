@@ -1163,6 +1163,10 @@ impl TLSWrapInner {
             }
           }
           Err(e) => {
+            eprintln!(
+              "TLSWrap {:?} process_new_packets error: {e:?}",
+              self.kind
+            );
             if total_consumed > 0 {
               self.enc_in.drain(..total_consumed);
             }
@@ -2826,6 +2830,12 @@ fn parse_pkcs12_identity(
   )
   .ok()?
   .clone_key();
+
+  eprintln!(
+    "TLSWrap PKCS12 parsed: certs={}, key_der_len={}",
+    certs.len(),
+    private_key_der.len()
+  );
 
   Some(deno_tls::TlsKey(certs, private_key))
 }
