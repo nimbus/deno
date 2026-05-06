@@ -128,6 +128,40 @@ pub struct uv_tcp_t {
     Option<std::sync::Arc<crate::uv_compat::waker::TcpHandleWaker>>,
 }
 
+impl uv_tcp_t {
+  #[cfg(unix)]
+  pub fn fd(&self) -> Option<std::os::unix::io::RawFd> {
+    use std::os::unix::io::AsRawFd;
+
+    if let Some(ref stream) = self.internal_stream {
+      return Some(stream.as_raw_fd());
+    }
+    if let Some(ref listener) = self.internal_listener {
+      return Some(listener.as_raw_fd());
+    }
+    if let Some(ref socket) = self.internal_socket {
+      return Some(socket.as_raw_fd());
+    }
+    self.internal_fd
+  }
+
+  #[cfg(windows)]
+  pub fn fd(&self) -> Option<std::os::windows::io::RawSocket> {
+    use std::os::windows::io::AsRawSocket;
+
+    if let Some(ref stream) = self.internal_stream {
+      return Some(stream.as_raw_socket());
+    }
+    if let Some(ref listener) = self.internal_listener {
+      return Some(listener.as_raw_socket());
+    }
+    if let Some(ref socket) = self.internal_socket {
+      return Some(socket.as_raw_socket());
+    }
+    self.internal_fd
+  }
+}
+
 /// In-flight TCP connect operation.
 ///
 /// # Safety

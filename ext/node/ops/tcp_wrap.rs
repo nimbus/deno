@@ -342,6 +342,24 @@ impl TCPWrap {
     tcp
   }
 
+  #[getter]
+  fn fd(&self) -> i32 {
+    let tcp = self.tcp_ptr();
+    if tcp.is_null() {
+      return -1;
+    }
+    #[cfg(unix)]
+    {
+      // SAFETY: tcp is valid (null-checked above).
+      unsafe { &*tcp }.fd().unwrap_or(-1)
+    }
+    #[cfg(windows)]
+    {
+      // SAFETY: tcp is valid (null-checked above).
+      unsafe { &*tcp }.fd().map(|fd| fd as i32).unwrap_or(-1)
+    }
+  }
+
   #[fast]
   fn open(&self, #[smi] fd: i32) -> i32 {
     if fd < 0 {
