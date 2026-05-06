@@ -8,6 +8,7 @@ import * as buffer from "ext:deno_node/internal_binding/buffer.ts";
 import caresWrap from "ext:deno_node/internal_binding/cares_wrap.ts";
 import * as constants from "ext:deno_node/internal_binding/constants.ts";
 import * as crypto from "ext:deno_node/internal_binding/crypto.ts";
+import * as http2 from "ext:deno_node/internal_binding/http2.ts";
 import * as pipeWrap from "ext:deno_node/internal_binding/pipe_wrap.ts";
 import * as streamWrap from "ext:deno_node/internal_binding/stream_wrap.ts";
 import * as stringDecoder from "ext:deno_node/internal_binding/string_decoder.ts";
@@ -34,6 +35,7 @@ const modules = {
   "fs_dir": {},
   "fs_event_wrap": {},
   "heap_utils": {},
+  http2,
   "http_parser": httpParser,
   icu: {},
   inspector: {},
