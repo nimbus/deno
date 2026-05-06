@@ -57,6 +57,10 @@ export function Server(
     ...opts,
   }, _connectionListener);
 
+  if (opts.ALPNCallback) {
+    this.ALPNCallback = opts.ALPNCallback;
+  }
+
   this.httpAllowHalfOpen = false;
 
   if (requestListener) {

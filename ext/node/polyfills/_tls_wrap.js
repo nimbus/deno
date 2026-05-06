@@ -856,6 +856,7 @@ function tlsConnectionListener(rawSocket) {
     secureContext: this._sharedCreds,
     isServer: true,
     server: this,
+    handshakeTimeout: this._handshakeTimeout,
     requestCert: this.requestCert,
     rejectUnauthorized: this.rejectUnauthorized,
     ALPNProtocols: this.ALPNProtocols,
