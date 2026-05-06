@@ -67,6 +67,7 @@ import { os } from "ext:deno_node/internal_binding/constants.ts";
 import { nextTick } from "node:process";
 import { deprecate } from "node:util";
 import { channel } from "node:diagnostics_channel";
+import { isIP } from "ext:deno_node/internal/net.ts";
 import { isArrayBufferView } from "ext:deno_node/internal/util/types.ts";
 
 const { UV_UDP_REUSEADDR, UV_UDP_IPV6ONLY } = os;
@@ -762,6 +763,14 @@ export class Socket extends EventEmitter {
    */
   getSendBufferSize(): number {
     return bufferSize(this, 0, SEND_BUFFER);
+  }
+
+  getSendQueueSize(): number {
+    return this[kStateSymbol].handle!.getSendQueueSize();
+  }
+
+  getSendQueueCount(): number {
+    return this[kStateSymbol].handle!.getSendQueueCount();
   }
 
   /**

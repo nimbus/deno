@@ -117,6 +117,8 @@ export class UDP extends HandleWrap {
   #rid?: number;
   #receiving = false;
   #recvPromiseId?: number;
+  #sendQueueCount = 0;
+  #sendQueueSize = 0;
   #unrefed = false;
 
   #recvBufferSize = UDP_DGRAM_MAXSIZE;
@@ -253,6 +255,14 @@ export class UDP extends HandleWrap {
     }
 
     return buffer ? this.#recvBufferSize : this.#sendBufferSize;
+  }
+
+  getSendQueueCount(): number {
+    return this.#sendQueueCount;
+  }
+
+  getSendQueueSize(): number {
+    return this.#sendQueueSize;
   }
 
   connect(ip: string, port: number): number {
@@ -529,7 +539,13 @@ export class UDP extends HandleWrap {
       if (e instanceof Deno.errors.NotCapable) {
         throw e;
       }
-      return codeMap.get(e.code ?? "UNKNOWN") ?? codeMap.get("UNKNOWN")!;
+      const code = e &&
+          typeof e === "object" &&
+          "code" in e &&
+          typeof (e as { code?: unknown }).code === "string"
+        ? (e as { code: string }).code
+        : "UNKNOWN";
+      return codeMap.get(code) ?? codeMap.get("UNKNOWN")!;
     }
   }
 
@@ -571,6 +587,9 @@ export class UDP extends HandleWrap {
         }),
       ),
     );
+    const queuedBytes = payload.byteLength;
+    this.#sendQueueCount++;
+    this.#sendQueueSize += queuedBytes;
     (async () => {
       let sent: number;
       let err: number | null = null;
@@ -595,6 +614,9 @@ export class UDP extends HandleWrap {
         }
 
         sent = 0;
+      } finally {
+        this.#sendQueueCount = Math.max(0, this.#sendQueueCount - 1);
+        this.#sendQueueSize = Math.max(0, this.#sendQueueSize - queuedBytes);
       }
 
       if (hasCallback) {
@@ -666,6 +688,8 @@ export class UDP extends HandleWrap {
   /** Handle socket closure. */
   override _onClose(): number {
     this.#receiving = false;
+    this.#sendQueueCount = 0;
+    this.#sendQueueSize = 0;
 
     this.#address = undefined;
     this.#port = undefined;
