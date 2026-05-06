@@ -1273,6 +1273,10 @@ function connect(...args) {
     options.singleUse = true;
   }
 
+  if (options.path == null && options.socketPath != null) {
+    options.path = options.socketPath;
+  }
+
   validateFunction(options.checkServerIdentity, "options.checkServerIdentity");
   validateNumber(options.minDHSize, "options.minDHSize", 1);
 
