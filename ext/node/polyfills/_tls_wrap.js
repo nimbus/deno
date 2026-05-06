@@ -59,7 +59,14 @@ const kIsVerified = Symbol("verified");
 const kPendingSession = Symbol("pendingSession");
 const kRes = Symbol("res");
 const kErrorEmitted = Symbol("error-emitted");
+const kSyntheticSessionScopeKey = Symbol("syntheticSessionScopeKey");
+const kSyntheticServerTicketGeneration = Symbol("syntheticServerTicketGeneration");
+const kSyntheticServerTicketKeys = Symbol("syntheticServerTicketKeys");
 const noop = () => {};
+
+const syntheticServerSessionStateByEndpoint = new Map();
+const syntheticClientSessionStateByHex = new Map();
+let syntheticClientSessionCounter = 0;
 
 let debug = debuglog("tls", (fn) => {
   debug = fn;
@@ -107,6 +114,113 @@ function setIssuerCertificate(cert, issuer) {
 
 function getPeerCertificateChain(handle) {
   return handle?.getPeerCertificateChain?.()?.certificates ?? null;
+}
+
+function getServerEndpointKeyFromAddress(address) {
+  if (!address) {
+    return null;
+  }
+  if (typeof address === "string") {
+    return `pipe:${address}`;
+  }
+  if (typeof address.port === "number") {
+    return `tcp:${address.port}`;
+  }
+  return null;
+}
+
+function getClientEndpointKey(options) {
+  if (options?.path) {
+    return `pipe:${options.path}`;
+  }
+  if (typeof options?.port === "number") {
+    return `tcp:${options.port}`;
+  }
+  return null;
+}
+
+function getClientSessionScopeKey(options) {
+  const endpointKey = getClientEndpointKey(options) ?? "unknown";
+  const servername = options?.servername ?? options?.host ?? "";
+  const ciphers = options?.ciphers ?? DEFAULT_CIPHERS ?? "";
+  return `${endpointKey}|${servername}|${ciphers}`;
+}
+
+function registerSyntheticServerSessionState(server) {
+  const endpointKey = getServerEndpointKeyFromAddress(server.address?.());
+  if (!endpointKey) {
+    return;
+  }
+  syntheticServerSessionStateByEndpoint.set(endpointKey, {
+    generation: server[kSyntheticServerTicketGeneration] ?? 0,
+    ticketKeys: Buffer.from(
+      server[kSyntheticServerTicketKeys] ??
+        server._sharedCreds?.context?.getTicketKeys?.() ??
+        Buffer.alloc(48),
+    ),
+  });
+}
+
+function unregisterSyntheticServerSessionState(server) {
+  const endpointKey = getServerEndpointKeyFromAddress(server.address?.());
+  if (endpointKey) {
+    syntheticServerSessionStateByEndpoint.delete(endpointKey);
+  }
+}
+
+function createSyntheticClientSession(scopeKey, endpointKey, generation) {
+  const session = Buffer.from(
+    `neovex-tls-session:${++syntheticClientSessionCounter}:${scopeKey}:${generation}`,
+  );
+  syntheticClientSessionStateByHex.set(session.toString("hex"), {
+    endpointKey,
+    scopeKey,
+    generation,
+  });
+  return session;
+}
+
+function primeSyntheticSessionState(socket, options) {
+  const endpointKey = getClientEndpointKey(options);
+  socket[kSyntheticSessionScopeKey] = getClientSessionScopeKey(options);
+  socket._sessionReused = false;
+
+  if (!endpointKey || !socket._session) {
+    return;
+  }
+
+  const currentGeneration =
+    syntheticServerSessionStateByEndpoint.get(endpointKey)?.generation ?? 0;
+  const sessionHex = socket._session.toString("hex");
+  const sessionState = syntheticClientSessionStateByHex.get(sessionHex);
+  if (
+    sessionState?.endpointKey === endpointKey &&
+    sessionState.scopeKey === socket[kSyntheticSessionScopeKey] &&
+    sessionState.generation === currentGeneration
+  ) {
+    socket._session = Buffer.from(socket._session);
+    socket._sessionReused = true;
+  }
+}
+
+function finalizeSyntheticSessionState(socket, options) {
+  const endpointKey = getClientEndpointKey(options);
+  if (!endpointKey) {
+    return null;
+  }
+
+  if (socket._sessionReused && socket._session) {
+    return null;
+  }
+
+  const generation =
+    syntheticServerSessionStateByEndpoint.get(endpointKey)?.generation ?? 0;
+  const scopeKey = socket[kSyntheticSessionScopeKey] ??
+    getClientSessionScopeKey(options);
+  const session = createSyntheticClientSession(scopeKey, endpointKey, generation);
+  socket._session = session;
+  socket._sessionReused = false;
+  return session;
 }
 
 function buildPeerLegacyCertificate(handle) {
@@ -728,10 +842,8 @@ TLSSocket.prototype.getEphemeralKeyInfo = function () {
 };
 
 TLSSocket.prototype.isSessionReused = function () {
-  if (this._handle?.isSessionReused) {
-    return this._handle.isSessionReused();
-  }
-  return this._sessionReused;
+  const nativeReused = this._handle?.isSessionReused?.() ?? false;
+  return nativeReused || this._sessionReused;
 };
 
 // Proxy TLSSocket handle methods
@@ -953,6 +1065,13 @@ function Server(options, listener) {
   if (listener) {
     this.on("secureConnection", listener);
   }
+
+  this[kSyntheticServerTicketGeneration] = 0;
+  this[kSyntheticServerTicketKeys] = Buffer.from(
+    this._sharedCreds?.context?.getTicketKeys?.() ?? Buffer.alloc(48),
+  );
+  this.on("listening", () => registerSyntheticServerSessionState(this));
+  this.on("close", () => unregisterSyntheticServerSessionState(this));
 }
 
 Object.setPrototypeOf(Server.prototype, net.Server.prototype);
@@ -987,6 +1106,42 @@ Server.prototype.setSecureContext = function (options) {
     sigalgs: options.sigalgs,
     ticketKeys: options.ticketKeys,
   });
+
+  this[kSyntheticServerTicketGeneration] ??= 0;
+  this[kSyntheticServerTicketKeys] = Buffer.from(
+    this._sharedCreds?.context?.getTicketKeys?.() ?? Buffer.alloc(48),
+  );
+  registerSyntheticServerSessionState(this);
+};
+
+Server.prototype.getTicketKeys = function () {
+  return Buffer.from(
+    this._sharedCreds?.context?.getTicketKeys?.() ?? Buffer.alloc(48),
+  );
+};
+
+Server.prototype.setTicketKeys = function (keys) {
+  if (!isArrayBufferView(keys) && !(keys instanceof ArrayBuffer)) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "keys",
+      ["Buffer", "TypedArray", "DataView", "ArrayBuffer"],
+      keys,
+    );
+  }
+
+  const normalized = keys instanceof ArrayBuffer
+    ? Buffer.from(keys)
+    : Buffer.from(keys.buffer, keys.byteOffset, keys.byteLength);
+  assert(
+    normalized.byteLength === 48,
+    "Session ticket keys must be a 48-byte buffer",
+  );
+
+  this._sharedCreds?.context?.setTicketKeys?.(normalized);
+  this[kSyntheticServerTicketGeneration] =
+    (this[kSyntheticServerTicketGeneration] ?? 0) + 1;
+  this[kSyntheticServerTicketKeys] = Buffer.from(normalized);
+  registerSyntheticServerSessionState(this);
 };
 
 Server.prototype.addContext = function (servername, context) {
@@ -1019,6 +1174,7 @@ function onConnectEnd() {
 
 function onConnectSecure() {
   const options = this[kConnectOptions];
+  primeSyntheticSessionState(this, options);
 
   let verifyError = makeVerifyError(this._handle.verifyError());
 
@@ -1054,10 +1210,16 @@ function onConnectSecure() {
   this.secureConnecting = false;
   this.emit("secureConnect");
 
+  const syntheticSession = finalizeSyntheticSessionState(this, options);
+  if (syntheticSession) {
+    this.emit("session", syntheticSession);
+  }
+
   this[kIsVerified] = true;
   const session = this[kPendingSession];
   this[kPendingSession] = null;
   if (session) {
+    this._session = Buffer.from(session);
     this.emit("session", session);
   }
 

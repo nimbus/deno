@@ -11,6 +11,7 @@ import {
 } from "ext:deno_node/internal/errors.ts";
 import { isArrayBufferView } from "ext:deno_node/internal/util/types.ts";
 import { validateString } from "ext:deno_node/internal/validators.mjs";
+import { Buffer } from "node:buffer";
 
 // OpenSSL cipher names are uppercase alphanumeric with hyphens/underscores
 // and may include inline "@SECLEVEL=N" suffixes. Examples:
@@ -84,6 +85,17 @@ function normalizeCertValue(
     );
   }
   return toStringOrUndefined(val);
+}
+
+function normalizeTicketKeys(value: any): Buffer | undefined {
+  if (value == null) return undefined;
+  if (isArrayBufferView(value)) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value instanceof globalThis.ArrayBuffer) {
+    return Buffer.from(value);
+  }
+  return undefined;
 }
 
 function getProtocolRange(
@@ -184,6 +196,11 @@ export class SecureContext {
     passphrase?: string;
     sigalgs?: string;
     ecdhCurve?: string;
+    ticketKeys?: Buffer;
+    onticketkeycallback?: ((...args: any[]) => unknown) | null;
+    enableTicketKeyCallback?: () => void;
+    getTicketKeys?: () => Buffer;
+    setTicketKeys?: (keys: any) => void;
   };
 
   constructor(options: any = {}) {
@@ -216,6 +233,9 @@ export class SecureContext {
 
     const { minVersion, maxVersion } = getProtocolRange(options);
 
+    const initialTicketKeys = normalizeTicketKeys(options.ticketKeys) ??
+      Buffer.alloc(48);
+
     this.context = {
       ca: normalizeCertValue(options.ca),
       cert: toStringOrUndefined(options.cert),
@@ -226,6 +246,26 @@ export class SecureContext {
       passphrase: options.passphrase,
       sigalgs: options.sigalgs,
       ecdhCurve: options.ecdhCurve,
+      ticketKeys: Buffer.from(initialTicketKeys),
+    };
+    let currentTicketKeys = Buffer.from(initialTicketKeys);
+    this.context.onticketkeycallback = null;
+    this.context.enableTicketKeyCallback = () => {
+      // rustls session resumption is handled natively; this preserves the
+      // Node surface so higher-level TLS/HTTPS fixtures can install the hook.
+    };
+    this.context.getTicketKeys = () => Buffer.from(currentTicketKeys);
+    this.context.setTicketKeys = (keys: any) => {
+      const normalized = normalizeTicketKeys(keys);
+      if (!normalized) {
+        throw new ERR_INVALID_ARG_TYPE(
+          "keys",
+          ["Buffer", "TypedArray", "DataView", "ArrayBuffer"],
+          keys,
+        );
+      }
+      currentTicketKeys = Buffer.from(normalized);
+      this.context.ticketKeys = Buffer.from(currentTicketKeys);
     };
     secureContextBrand.add(this.context);
     Object.defineProperty(this.context, "_external", {
