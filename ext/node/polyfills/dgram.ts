@@ -53,11 +53,7 @@ import {
   defaultTriggerAsyncIdScope,
   ownerSymbol,
 } from "ext:deno_node/internal/async_hooks.ts";
-import {
-  isSyntheticUdpFd,
-  SendWrap,
-  UDP,
-} from "ext:deno_node/internal_binding/udp_wrap.ts";
+import { SendWrap, UDP } from "ext:deno_node/internal_binding/udp_wrap.ts";
 import {
   isInt32,
   validateAbortSignal,
@@ -487,7 +483,7 @@ export class Socket extends EventEmitter {
       // Though Deno has has a Worker capability from which we could simulate this,
       // for now we assert that we are _always_ on the primary process.
 
-      const type = isSyntheticUdpFd(fd) ? "UDP" : guessHandleType(fd);
+      const type = guessHandleType(fd);
 
       if (type !== "UDP") {
         throw new ERR_INVALID_FD_TYPE(type);
@@ -766,14 +762,6 @@ export class Socket extends EventEmitter {
    */
   getSendBufferSize(): number {
     return bufferSize(this, 0, SEND_BUFFER);
-  }
-
-  getSendQueueSize(): number {
-    return this[kStateSymbol].handle!.getSendQueueSize();
-  }
-
-  getSendQueueCount(): number {
-    return this[kStateSymbol].handle!.getSendQueueCount();
   }
 
   /**
@@ -1398,7 +1386,6 @@ function startListening(socket: Socket) {
   const state = socket[kStateSymbol];
 
   state.handle!.onmessage = onMessage;
-  state.handle!.markSocketBoundOwner();
   // Todo(@bartlomieju): handle errors
   state.handle!.recvStart();
   state.receiving = true;

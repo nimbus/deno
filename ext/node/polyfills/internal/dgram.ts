@@ -27,10 +27,7 @@ import {
 } from "ext:deno_node/internal/validators.mjs";
 import type { ErrnoException } from "ext:deno_node/internal/errors.ts";
 import { ERR_SOCKET_BAD_TYPE } from "ext:deno_node/internal/errors.ts";
-import {
-  isSyntheticUdpFd,
-  UDP,
-} from "ext:deno_node/internal_binding/udp_wrap.ts";
+import { UDP } from "ext:deno_node/internal_binding/udp_wrap.ts";
 import { guessHandleType } from "ext:deno_node/internal_binding/util.ts";
 import { codeMap } from "ext:deno_node/internal_binding/uv.ts";
 import { primordials } from "ext:core/mod.js";
@@ -107,7 +104,7 @@ export function _createSocketHandle(
   let err;
 
   if (isInt32(fd) && fd > 0) {
-    const type = isSyntheticUdpFd(fd) ? "UDP" : guessHandleType(fd);
+    const type = guessHandleType(fd);
 
     if (type !== "UDP") {
       err = MapPrototypeGet(codeMap, "EINVAL")!;
