@@ -203,7 +203,7 @@ pub fn op_node_udp_open(
   ))
 }
 
-#[op2]
+#[op2(fast)]
 #[smi]
 pub fn op_node_udp_get_fd(
   state: &mut OpState,
