@@ -31,6 +31,7 @@ const {
 
 let optionsMap: Map<string, { value: string }>;
 const dummyOptions = new SafeMap<string, { value: string }>();
+let warnOnAllowUnauthorized = true;
 
 function getOptionsFromBinding() {
   // If Deno.build is not defined, this is in warmup phase.
@@ -58,4 +59,21 @@ export function getOptionValue(optionName: string) {
   }
 
   return MapPrototypeGet(options, optionName)?.value;
+}
+
+export function getAllowUnauthorized() {
+  const allowUnauthorized =
+    globalThis.process?.env?.NODE_TLS_REJECT_UNAUTHORIZED === "0";
+
+  if (allowUnauthorized && warnOnAllowUnauthorized) {
+    warnOnAllowUnauthorized = false;
+    globalThis.process?.emitWarning?.(
+      "Setting the NODE_TLS_REJECT_UNAUTHORIZED " +
+        "environment variable to '0' makes TLS connections " +
+        "and HTTPS requests insecure by disabling " +
+        "certificate verification.",
+    );
+  }
+
+  return allowUnauthorized;
 }

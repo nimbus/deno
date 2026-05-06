@@ -51,6 +51,7 @@ import { op_tls_canonicalize_ipv4_address } from "ext:core/ops";
 import tlsWrap from "ext:deno_node/internal_binding/tls_wrap.ts";
 import { ownerSymbol } from "ext:deno_node/internal_binding/symbols.ts";
 import { X509Certificate } from "ext:deno_node/internal/crypto/x509.ts";
+import { getAllowUnauthorized } from "ext:deno_node/internal/options.ts";
 
 const kConnectOptions = Symbol("connect-options");
 const kHandshakeTimer = Symbol("handshake-timer");
@@ -1161,10 +1162,6 @@ function connect(...args) {
   tlssock.prependListener("end", onConnectEnd);
 
   return tlssock;
-}
-
-function getAllowUnauthorized() {
-  return false;
 }
 
 function createServer(options, listener) {
