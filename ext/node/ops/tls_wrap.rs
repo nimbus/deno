@@ -28,6 +28,7 @@ use std::cell::Cell;
 use std::ffi::c_char;
 use std::io::Read;
 use std::io::Write;
+use std::sync::Mutex;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -183,6 +184,44 @@ impl TlsConnection {
 #[derive(serde::Serialize)]
 struct PeerCertificateChain {
   certificates: Vec<ToJsBuffer>,
+}
+
+#[derive(Debug, Default)]
+struct JsKeyLog {
+  lines: Mutex<Vec<Vec<u8>>>,
+}
+
+impl JsKeyLog {
+  fn take_lines(&self) -> Vec<Vec<u8>> {
+    let mut lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *lines)
+  }
+}
+
+impl rustls::KeyLog for JsKeyLog {
+  fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
+    let mut line = Vec::with_capacity(
+      label.len() + 1 + (client_random.len() * 2) + 1 + (secret.len() * 2) + 1,
+    );
+    let _ = write!(&mut line, "{label} ");
+    for byte in client_random {
+      let _ = write!(&mut line, "{byte:02x}");
+    }
+    let _ = write!(&mut line, " ");
+    for byte in secret {
+      let _ = write!(&mut line, "{byte:02x}");
+    }
+    line.push(b'\n');
+    self
+      .lines
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .push(line);
+  }
+
+  fn will_log(&self, _label: &str) -> bool {
+    true
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +484,43 @@ unsafe fn do_emit_handshake_done(ctx: &EmitCtx) {
       && let Ok(func) = v8::Local::<v8::Function>::try_from(val)
     {
       func.call(scope, this.into(), &[]);
+    }
+  }
+}
+
+/// Emit a TLS keylog line to JS via the onkeylog callback.
+///
+/// # Safety
+/// EmitCtx must contain valid pointers. No TLSWrapInner reference may be held by the caller.
+unsafe fn do_emit_keylog(ctx: &EmitCtx, line: &[u8]) {
+  unsafe {
+    let mut isolate = v8::Isolate::from_raw_isolate_ptr(ctx.isolate_ptr);
+
+    if ctx.loop_ptr.is_null() {
+      return;
+    }
+    let ctx_ptr = (*ctx.loop_ptr).data;
+    if ctx_ptr.is_null() {
+      return;
+    }
+    let context_global = clone_context_global(&mut isolate, ctx_ptr);
+
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Local::new(handle_scope, context_global);
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let this = v8::Local::new(scope, &ctx.js_handle);
+    let key =
+      v8::String::new_external_onebyte_static(scope, b"onkeylog").unwrap();
+    if let Some(val) = this.get(scope, key.into())
+      && let Ok(func) = v8::Local::<v8::Function>::try_from(val)
+    {
+      let store = v8::ArrayBuffer::new(scope, line.len());
+      let backing = store.get_backing_store();
+      for (i, byte) in line.iter().enumerate() {
+        backing[i].set(*byte);
+      }
+      func.call(scope, this.into(), &[store.into()]);
     }
   }
 }
@@ -805,6 +881,8 @@ struct TLSWrapInner {
   /// Cached uv_loop pointer, set during attach(). Avoids dereferencing
   /// the stream pointer (which may become dangling) to get the loop.
   cached_loop_ptr: *mut uv_compat::uv_loop_t,
+  keylog_enabled: bool,
+  keylog: Arc<JsKeyLog>,
 }
 
 /// Convert a rustls error to a (message, code) pair that matches Node's
@@ -923,6 +1001,8 @@ impl TLSWrapInner {
       pending_server_name: None,
       pending_server_config: None,
       cached_loop_ptr: std::ptr::null_mut(),
+      keylog_enabled: false,
+      keylog: Arc::new(JsKeyLog::default()),
     }
   }
 
@@ -943,6 +1023,7 @@ impl TLSWrapInner {
       (*ptr).cycling = true;
       (*ptr).clear_in();
       let result = (*ptr).clear_out_process();
+      let keylog_lines = (*ptr).keylog.take_lines();
       let enc_action = (*ptr).enc_out_collect();
       (*ptr).cycling = false;
 
@@ -950,6 +1031,13 @@ impl TLSWrapInner {
       TLSWrapInner::dispatch_clear_out_callbacks(ptr, &result);
       if result.tls_error.is_some() {
         return;
+      }
+      if (*ptr).keylog_enabled
+        && let Some(ctx) = extract_emit_ctx(ptr)
+      {
+        for line in &keylog_lines {
+          do_emit_keylog(&ctx, line);
+        }
       }
       TLSWrapInner::do_enc_out_action(ptr, enc_action);
 
@@ -1709,6 +1797,8 @@ impl TLSWrap {
         Some(c) => c,
         None => return -1,
       };
+    let mut client_config = client_config;
+    client_config.key_log = inner.keylog.clone();
     inner.pending_client_config = Some(Arc::new(client_config));
     inner.pending_server_name = server_name;
     0
@@ -1733,6 +1823,8 @@ impl TLSWrap {
       };
 
     let inner = unsafe { &mut *self.inner.as_mut_ptr() };
+    let mut server_config = server_config;
+    server_config.key_log = inner.keylog.clone();
     inner.pending_server_config = Some(Arc::new(server_config));
     // Share the client cert verify error store with the TLSWrap so that
     // `verifyError()` on the server side returns client cert errors.
@@ -2500,6 +2592,13 @@ impl TLSWrap {
   #[fast]
   fn enable_session_callbacks(&self) {
     // No-op for rustls
+  }
+
+  /// Enable keylog callbacks.
+  #[fast]
+  fn enable_keylog_callback(&self) {
+    let inner = unsafe { &mut *self.inner.as_mut_ptr() };
+    inner.keylog_enabled = true;
   }
 
   /// Set the serialized TLS session for client resumption.

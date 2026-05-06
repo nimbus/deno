@@ -252,6 +252,14 @@ function onhandshakedone() {
   if (owner) owner._finishInit();
 }
 
+function onkeylog(line) {
+  debug("onkeylog");
+  this._owner?.emit(
+    "keylog",
+    Buffer.from(line.buffer, line.byteOffset, line.byteLength),
+  );
+}
+
 function onerror(err) {
   const owner = this._owner;
   if (!owner) return;
@@ -590,6 +598,8 @@ TLSSocket.prototype._init = function (socket, wrap) {
   if (requestCert || rejectUnauthorized) {
     ssl.setVerifyMode(requestCert, rejectUnauthorized);
   }
+  ssl.onkeylog = onkeylog;
+  ssl.enableKeylogCallback();
 
   if (options.isServer) {
     ssl.onhandshakestart = noop;
@@ -953,6 +963,10 @@ function onSocketTLSError(err) {
   }
 }
 
+function onSocketKeylog(line) {
+  this._tlsOptions.server.emit("keylog", line, this);
+}
+
 function onSocketClose(err) {
   if (err) return;
   if (!this._controlReleased && !this[kErrorEmitted]) {
@@ -992,6 +1006,9 @@ function tlsConnectionListener(rawSocket) {
   socket._start();
 
   socket.on("secure", onServerSocketSecure);
+  if (this.listenerCount("keylog") > 0) {
+    socket.on("keylog", onSocketKeylog);
+  }
 
   socket[kErrorEmitted] = false;
   socket.on("close", onSocketClose);
