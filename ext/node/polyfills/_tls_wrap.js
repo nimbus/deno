@@ -254,10 +254,7 @@ function onhandshakedone() {
 
 function onkeylog(line) {
   debug("onkeylog");
-  this._owner?.emit(
-    "keylog",
-    Buffer.from(line.buffer, line.byteOffset, line.byteLength),
-  );
+  this._owner?.emit("keylog", Buffer.from(line));
 }
 
 function onerror(err) {
@@ -1002,9 +999,6 @@ function tlsConnectionListener(rawSocket) {
     return;
   }
 
-  // Start the TLS handshake for server-side sockets
-  socket._start();
-
   socket.on("secure", onServerSocketSecure);
   if (this.listenerCount("keylog") > 0) {
     socket.on("keylog", onSocketKeylog);
@@ -1014,6 +1008,10 @@ function tlsConnectionListener(rawSocket) {
   socket.on("close", onSocketClose);
   socket.on("_tlsError", onSocketTLSError);
   socket.on("error", onSocketTLSError);
+
+  // Start the TLS handshake for server-side sockets after listener wiring so
+  // handshake-time keylog events are not dropped.
+  socket._start();
 }
 
 function Server(options, listener) {
