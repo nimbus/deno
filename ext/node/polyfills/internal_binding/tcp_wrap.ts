@@ -43,6 +43,10 @@ import {
 // Mark TCPWrap as a StreamBase handle, matching Node's StreamBase::AddMethods.
 // This allows parser.consume(socket._handle) to detect it as consumable.
 TCPWrap.prototype.isStreamBase = true;
+const tcpListen = TCPWrap.prototype.listen;
+TCPWrap.prototype.listen = function (backlog = 511) {
+  return tcpListen.call(this, backlog);
+};
 
 /** The type of TCP socket. */
 export enum socketType {

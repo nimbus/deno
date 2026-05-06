@@ -453,12 +453,11 @@ impl TCPWrap {
   }
 
   #[fast]
-  fn listen(&self, #[smi] backlog: Option<i32>) -> i32 {
+  fn listen(&self, #[smi] backlog: i32) -> i32 {
     let tcp = self.tcp_ptr();
     if tcp.is_null() {
       return -1;
     }
-    let backlog = backlog.unwrap_or(511);
     // SAFETY: tcp is valid (null-checked above); cast to uv_stream_t is
     // safe because uv_tcp_t embeds uv_stream_t at offset 0.
     unsafe {
