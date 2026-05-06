@@ -2835,6 +2835,10 @@ fn parse_pkcs12_identity(
 fn is_self_issued_cert(
   cert_der: &rustls::pki_types::CertificateDer<'_>,
 ) -> bool {
+  is_self_issued_cert_der(cert_der.as_ref())
+}
+
+fn is_self_issued_cert_der(cert_der: &[u8]) -> bool {
   let Ok(cert) = X509::from_der(cert_der.as_ref()) else {
     return false;
   };
@@ -3069,6 +3073,7 @@ fn verify_chain_structure(
   intermediates: &[rustls::pki_types::CertificateDer<'_>],
   root_cert_ders: &[Vec<u8>],
 ) -> Result<(), &'static str> {
+  let ee_is_self_issued = is_self_issued_cert_der(end_entity);
   // Parse all certs' (issuer, subject) pairs up front.
   let ee = extract_issuer_and_subject(end_entity)
     .ok_or("UNABLE_TO_VERIFY_LEAF_SIGNATURE")?;
@@ -3105,11 +3110,8 @@ fn verify_chain_structure(
   }
 
   // Chain doesn't reach a trusted root.
-  if root_cert_ders.is_empty() {
-    // No explicit CA was provided (only system/default roots which
-    // didn't match). OpenSSL reports this as "unable to get local
-    // issuer certificate".
-    Err("UNABLE_TO_GET_ISSUER_CERT_LOCALLY")
+  if ee_is_self_issued {
+    Err("DEPTH_ZERO_SELF_SIGNED_CERT")
   } else {
     Err("UNABLE_TO_VERIFY_LEAF_SIGNATURE")
   }
@@ -3160,6 +3162,13 @@ impl rustls::client::danger::ServerCertVerifier for NodeServerCertVerifier {
     ) {
       Ok(v) => Ok(v),
       Err(rustls::Error::InvalidCertificate(ref cert_error)) => {
+        if matches!(cert_error, rustls::CertificateError::UnknownIssuer)
+          && is_self_issued_cert(end_entity)
+        {
+          *self.verify_error.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some("DEPTH_ZERO_SELF_SIGNED_CERT".to_string());
+          return Ok(rustls::client::danger::ServerCertVerified::assertion());
+        }
         // Server-name checks are handled by JS (checkServerIdentity).
         if matches!(
           cert_error,
