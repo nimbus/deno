@@ -30,6 +30,7 @@ import { ERR_SOCKET_BAD_TYPE } from "ext:deno_node/internal/errors.ts";
 import { UDP } from "ext:deno_node/internal_binding/udp_wrap.ts";
 import { guessHandleType } from "ext:deno_node/internal_binding/util.ts";
 import { codeMap } from "ext:deno_node/internal_binding/uv.ts";
+import { isIP } from "ext:deno_node/internal/net.ts";
 import { primordials } from "ext:core/mod.js";
 const { FunctionPrototypeBind, MapPrototypeGet, Symbol } = primordials;
 
@@ -112,8 +113,12 @@ export function _createSocketHandle(
       err = handle.open(fd);
     }
   } else if (port || address) {
+    if (address && isIP(address) === 0) {
+      err = MapPrototypeGet(codeMap, "EINVAL")!;
+    } else {
     // deno-lint-ignore prefer-primordials
-    err = handle.bind(address, port || 0, flags);
+      err = handle.bind(address, port || 0, flags);
+    }
   }
 
   if (err) {
