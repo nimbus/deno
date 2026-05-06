@@ -26,12 +26,14 @@
 import { core } from "ext:core/mod.js";
 import {
   op_node_udp_bind,
+  op_node_udp_get_fd,
   op_node_udp_join_multi_v4,
   op_node_udp_join_multi_v6,
   op_node_udp_join_source_specific,
   op_node_udp_leave_multi_v4,
   op_node_udp_leave_multi_v6,
   op_node_udp_leave_source_specific,
+  op_node_udp_open,
   op_node_udp_recv,
   op_node_udp_send,
   op_node_udp_set_broadcast,
@@ -49,7 +51,6 @@ import { GetAddrInfoReqWrap } from "ext:deno_node/internal_binding/cares_wrap.ts
 import { HandleWrap } from "ext:deno_node/internal_binding/handle_wrap.ts";
 import { ownerSymbol } from "ext:deno_node/internal_binding/symbols.ts";
 import { codeMap, errorMap } from "ext:deno_node/internal_binding/uv.ts";
-import { notImplemented } from "ext:deno_node/_utils.ts";
 import { Buffer } from "node:buffer";
 import type { ErrnoException } from "ext:deno_node/internal/errors.ts";
 import { isIP } from "ext:deno_node/internal/net.ts";
@@ -62,6 +63,20 @@ const AF_INET = 2;
 const AF_INET6 = 10;
 
 const UDP_DGRAM_MAXSIZE = 64 * 1024;
+
+const udpOwnersByFd = new Map<number, unknown>();
+
+function rememberUdpFd(handle: UDP) {
+  if (handle.fd >= 0) {
+    udpOwnersByFd.set(handle.fd, handle[ownerSymbol]);
+  }
+}
+
+function forgetUdpFd(handle: UDP) {
+  if (handle.fd >= 0) {
+    udpOwnersByFd.delete(handle.fd);
+  }
+}
 
 /** Validate that the address is a parseable IPv4 address. */
 function isValidIPv4Address(address: string): boolean {
@@ -109,6 +124,7 @@ export class UDP extends HandleWrap {
   #address?: string;
   #family?: string;
   #port?: number;
+  #fd = -1;
 
   #remoteAddress?: string;
   #remoteFamily?: string;
@@ -147,6 +163,10 @@ export class UDP extends HandleWrap {
 
   constructor() {
     super(providerType.UDPWRAP);
+  }
+
+  get fd(): number {
+    return this.#fd;
   }
 
   addMembership(multicastAddress: string, interfaceAddress?: string): number {
@@ -234,17 +254,27 @@ export class UDP extends HandleWrap {
     buffer: boolean,
     ctx: Record<string, string | number>,
   ): number | undefined {
+    const syscall = buffer ? "uv_recv_buffer_size" : "uv_send_buffer_size";
+
     if (!this.#address) {
       const err = isWindows ? "ENOTSOCK" : "EBADF";
       ctx.errno = codeMap.get(err)!;
       ctx.code = err;
       ctx.message = errorMap.get(ctx.errno)![1];
-      ctx.syscall = buffer ? "uv_recv_buffer_size" : "uv_send_buffer_size";
+      ctx.syscall = syscall;
 
       return;
     }
 
     if (size !== 0) {
+      if (size > 0x7fffffff) {
+        ctx.errno = codeMap.get("EINVAL")!;
+        ctx.code = "EINVAL";
+        ctx.message = errorMap.get(ctx.errno)![1];
+        ctx.syscall = syscall;
+        return;
+      }
+
       size = isLinux ? size * 2 : size;
 
       if (buffer) {
@@ -383,9 +413,29 @@ export class UDP extends HandleWrap {
    * @param fd The file descriptor to open.
    * @return An error status code.
    */
-  open(_fd: number): number {
-    // REF: https://github.com/denoland/deno/issues/6529
-    notImplemented("udp.UDP.prototype.open");
+  open(fd: number): number {
+    if ((udpOwnersByFd.get(fd) ?? null) !== null) {
+      return codeMap.get("EEXIST")!;
+    }
+
+    try {
+      const [rid, hostname, boundPort, isIpv6, openedFd] = op_node_udp_open(fd);
+      this.#rid = rid;
+      this.#address = hostname;
+      this.#port = boundPort;
+      this.#family = isIpv6 ? ("IPv6" as const) : ("IPv4" as const);
+      this.#fd = openedFd;
+      rememberUdpFd(this);
+      return 0;
+    } catch (e) {
+      const code = e &&
+          typeof e === "object" &&
+          "code" in e &&
+          typeof (e as { code?: unknown }).code === "string"
+        ? (e as { code: string }).code
+        : "UNKNOWN";
+      return codeMap.get(code) ?? codeMap.get("UNKNOWN")!;
+    }
   }
 
   /**
@@ -534,6 +584,8 @@ export class UDP extends HandleWrap {
       this.#family = family === AF_INET6
         ? ("IPv6" as const)
         : ("IPv4" as const);
+      this.#fd = op_node_udp_get_fd(rid);
+      rememberUdpFd(this);
       return 0;
     } catch (e) {
       if (e instanceof Deno.errors.NotCapable) {
@@ -691,9 +743,12 @@ export class UDP extends HandleWrap {
     this.#sendQueueCount = 0;
     this.#sendQueueSize = 0;
 
+    forgetUdpFd(this);
+
     this.#address = undefined;
     this.#port = undefined;
     this.#family = undefined;
+    this.#fd = -1;
 
     if (this.#rid !== undefined) {
       try {
