@@ -31,7 +31,37 @@ pub fn op_node_guess_handle_type(_state: &mut OpState, fd: u32) -> u32 {
 }
 
 #[cfg(unix)]
+fn guess_socket_type(fd: i32) -> Option<HandleType> {
+  let mut socket_type: libc::c_int = 0;
+  let mut socket_type_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+  // SAFETY: `getsockopt` is safe with a valid descriptor, a correctly-sized
+  // buffer, and a valid length pointer. It simply reports the socket type when
+  // `fd` is a socket and fails otherwise.
+  let result = unsafe {
+    libc::getsockopt(
+      fd,
+      libc::SOL_SOCKET,
+      libc::SO_TYPE,
+      &mut socket_type as *mut libc::c_int as *mut libc::c_void,
+      &mut socket_type_len,
+    )
+  };
+  if result != 0 {
+    return None;
+  }
+  match socket_type {
+    libc::SOCK_STREAM => Some(HandleType::Tcp),
+    libc::SOCK_DGRAM => Some(HandleType::Udp),
+    _ => None,
+  }
+}
+
+#[cfg(unix)]
 fn guess_handle_type(fd: i32) -> HandleType {
+  if let Some(socket_type) = guess_socket_type(fd) {
+    return socket_type;
+  }
+
   use deno_core::uv_compat;
   match uv_compat::uv_guess_handle(fd) {
     uv_compat::uv_handle_type::UV_TCP => HandleType::Tcp,
