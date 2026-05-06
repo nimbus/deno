@@ -49,7 +49,6 @@ import { GetAddrInfoReqWrap } from "ext:deno_node/internal_binding/cares_wrap.ts
 import { HandleWrap } from "ext:deno_node/internal_binding/handle_wrap.ts";
 import { ownerSymbol } from "ext:deno_node/internal_binding/symbols.ts";
 import { codeMap, errorMap } from "ext:deno_node/internal_binding/uv.ts";
-import { notImplemented } from "ext:deno_node/_utils.ts";
 import { Buffer } from "node:buffer";
 import type { ErrnoException } from "ext:deno_node/internal/errors.ts";
 import { isIP } from "ext:deno_node/internal/net.ts";
@@ -62,6 +61,23 @@ const AF_INET = 2;
 const AF_INET6 = 10;
 
 const UDP_DGRAM_MAXSIZE = 64 * 1024;
+
+type SharedUdpState = {
+  address: string;
+  family: "IPv4" | "IPv6";
+  fd: number;
+  port: number;
+  refCount: number;
+  rid: number;
+  socketOwnerCount: number;
+};
+
+const syntheticUdpHandles = new Map<number, SharedUdpState>();
+let nextSyntheticUdpFd = 10_000;
+
+export function isSyntheticUdpFd(fd: number): boolean {
+  return syntheticUdpHandles.has(fd);
+}
 
 /** Validate that the address is a parseable IPv4 address. */
 function isValidIPv4Address(address: string): boolean {
@@ -115,8 +131,12 @@ export class UDP extends HandleWrap {
   #remotePort?: number;
 
   #rid?: number;
+  #sharedState?: SharedUdpState;
   #receiving = false;
   #recvPromiseId?: number;
+  #sendQueueCount = 0;
+  #sendQueueSize = 0;
+  #isSocketBoundOwner = false;
   #unrefed = false;
 
   #recvBufferSize = UDP_DGRAM_MAXSIZE;
@@ -145,6 +165,10 @@ export class UDP extends HandleWrap {
 
   constructor() {
     super(providerType.UDPWRAP);
+  }
+
+  get fd(): number {
+    return this.#sharedState?.fd ?? -1;
   }
 
   addMembership(multicastAddress: string, interfaceAddress?: string): number {
@@ -253,6 +277,14 @@ export class UDP extends HandleWrap {
     }
 
     return buffer ? this.#recvBufferSize : this.#sendBufferSize;
+  }
+
+  getSendQueueCount(): number {
+    return this.#sendQueueCount;
+  }
+
+  getSendQueueSize(): number {
+    return this.#sendQueueSize;
   }
 
   connect(ip: string, port: number): number {
@@ -368,14 +400,29 @@ export class UDP extends HandleWrap {
     return 0;
   }
 
+  markSocketBoundOwner() {
+    if (this.#sharedState && !this.#isSocketBoundOwner) {
+      this.#sharedState.socketOwnerCount++;
+      this.#isSocketBoundOwner = true;
+    }
+  }
+
   /**
    * Opens a file descriptor.
    * @param fd The file descriptor to open.
    * @return An error status code.
    */
-  open(_fd: number): number {
-    // REF: https://github.com/denoland/deno/issues/6529
-    notImplemented("udp.UDP.prototype.open");
+  open(fd: number): number {
+    const sharedState = syntheticUdpHandles.get(fd);
+    if (!sharedState) {
+      return codeMap.get("EBADF")!;
+    }
+    if (sharedState.socketOwnerCount > 0) {
+      return codeMap.get("EEXIST")!;
+    }
+    sharedState.refCount++;
+    this.#attachSharedState(sharedState);
+    return 0;
   }
 
   /**
@@ -511,6 +558,13 @@ export class UDP extends HandleWrap {
   }
 
   #doBind(ip: string, port: number, flags: number, family: number): number {
+    if (
+      (family === AF_INET && isIP(ip) !== 4) ||
+      (family === AF_INET6 && isIP(ip) !== 6)
+    ) {
+      return codeMap.get("EINVAL")!;
+    }
+
     try {
       const [rid, hostname, boundPort] = op_node_udp_bind(
         ip,
@@ -518,18 +572,32 @@ export class UDP extends HandleWrap {
         (flags & os.UV_UDP_REUSEADDR) !== 0,
         (flags & os.UV_UDP_IPV6ONLY) !== 0,
       );
-      this.#rid = rid;
-      this.#address = hostname;
-      this.#port = boundPort;
-      this.#family = family === AF_INET6
+      const resolvedFamily = family === AF_INET6
         ? ("IPv6" as const)
         : ("IPv4" as const);
+      const sharedState = {
+        address: hostname,
+        family: resolvedFamily,
+        fd: nextSyntheticUdpFd++,
+        port: boundPort,
+        refCount: 1,
+        rid,
+        socketOwnerCount: 0,
+      };
+      syntheticUdpHandles.set(sharedState.fd, sharedState);
+      this.#attachSharedState(sharedState);
       return 0;
     } catch (e) {
       if (e instanceof Deno.errors.NotCapable) {
         throw e;
       }
-      return codeMap.get(e.code ?? "UNKNOWN") ?? codeMap.get("UNKNOWN")!;
+      const code = e &&
+          typeof e === "object" &&
+          "code" in e &&
+          typeof (e as { code?: unknown }).code === "string"
+        ? (e as { code: string }).code
+        : "UNKNOWN";
+      return codeMap.get(code) ?? codeMap.get("UNKNOWN")!;
     }
   }
 
@@ -571,6 +639,9 @@ export class UDP extends HandleWrap {
         }),
       ),
     );
+    const queuedBytes = payload.byteLength;
+    this.#sendQueueCount++;
+    this.#sendQueueSize += queuedBytes;
 
     (async () => {
       let sent: number;
@@ -596,6 +667,9 @@ export class UDP extends HandleWrap {
         }
 
         sent = 0;
+      } finally {
+        this.#sendQueueCount = Math.max(0, this.#sendQueueCount - 1);
+        this.#sendQueueSize = Math.max(0, this.#sendQueueSize - queuedBytes);
       }
 
       if (hasCallback) {
@@ -667,12 +741,37 @@ export class UDP extends HandleWrap {
   /** Handle socket closure. */
   override _onClose(): number {
     this.#receiving = false;
+    this.#sendQueueCount = 0;
+    this.#sendQueueSize = 0;
 
     this.#address = undefined;
     this.#port = undefined;
     this.#family = undefined;
+    this.#remoteAddress = undefined;
+    this.#remotePort = undefined;
+    this.#remoteFamily = undefined;
 
-    if (this.#rid !== undefined) {
+    if (this.#sharedState) {
+      const sharedState = this.#sharedState;
+      if (this.#isSocketBoundOwner) {
+        sharedState.socketOwnerCount = Math.max(
+          0,
+          sharedState.socketOwnerCount - 1,
+        );
+        this.#isSocketBoundOwner = false;
+      }
+      sharedState.refCount--;
+      if (sharedState.refCount <= 0) {
+        syntheticUdpHandles.delete(sharedState.fd);
+        try {
+          core.close(sharedState.rid);
+        } catch {
+          // already closed
+        }
+      }
+      this.#sharedState = undefined;
+      this.#rid = undefined;
+    } else if (this.#rid !== undefined) {
       try {
         core.close(this.#rid);
       } catch {
@@ -682,5 +781,13 @@ export class UDP extends HandleWrap {
     }
 
     return 0;
+  }
+
+  #attachSharedState(sharedState: SharedUdpState) {
+    this.#sharedState = sharedState;
+    this.#rid = sharedState.rid;
+    this.#address = sharedState.address;
+    this.#port = sharedState.port;
+    this.#family = sharedState.family;
   }
 }
