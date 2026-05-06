@@ -55,6 +55,7 @@ log.workspace = true
 node_resolver.workspace = true
 node_shim.workspace = true
 once_cell.workspace = true
+openssl = "0.10"
 rand.workspace = true
 rustls-tokio-stream.workspace = true
 # Pinned to the same major rustls 0.23.x uses internally so we can downcast

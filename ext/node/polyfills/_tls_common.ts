@@ -87,6 +87,87 @@ function normalizeCertValue(
   return toStringOrUndefined(val);
 }
 
+function toBinaryOrUndefined(val: any): Uint8Array | undefined {
+  if (val == null) return undefined;
+  if (typeof val === "string") return Buffer.from(val);
+  if (isArrayBufferView(val)) {
+    return Buffer.from(val.buffer, val.byteOffset, val.byteLength);
+  }
+  if (val instanceof globalThis.ArrayBuffer) {
+    return Buffer.from(val);
+  }
+  return undefined;
+}
+
+function validatePfxOption(val: any, name: string): void {
+  if (!val) return;
+  const validatePfxEntry = (entry: any) => {
+    if (!entry) return;
+    if (isValidKeyCertValue(entry)) return;
+    if (typeof entry === "object" && entry !== null) {
+      if (!isValidKeyCertValue(entry.buf)) {
+        throw new ERR_INVALID_ARG_TYPE(
+          name,
+          ["string", "Buffer", "TypedArray", "DataView"],
+          entry.buf,
+        );
+      }
+      if (entry.passphrase != null) {
+        validateString(entry.passphrase, `${name}.passphrase`);
+      }
+      return;
+    }
+    throw new ERR_INVALID_ARG_TYPE(
+      name,
+      ["string", "Buffer", "TypedArray", "DataView"],
+      entry,
+    );
+  };
+
+  if (globalThis.Array.isArray(val)) {
+    for (const entry of val) {
+      validatePfxEntry(entry);
+    }
+    return;
+  }
+
+  validatePfxEntry(val);
+}
+
+function normalizePfxOption(
+  val: any,
+  defaultPassphrase: string | undefined,
+): { data?: Uint8Array; passphrase?: string } {
+  const normalizePfxEntry = (
+    entry: any,
+  ): { data?: Uint8Array; passphrase?: string } => {
+    if (!entry) return {};
+    if (isValidKeyCertValue(entry)) {
+      return {
+        data: toBinaryOrUndefined(entry),
+        passphrase: defaultPassphrase,
+      };
+    }
+    if (typeof entry === "object" && entry !== null) {
+      return {
+        data: toBinaryOrUndefined(entry.buf),
+        passphrase: entry.passphrase ?? defaultPassphrase,
+      };
+    }
+    return {};
+  };
+
+  if (globalThis.Array.isArray(val)) {
+    for (const entry of val) {
+      const normalized = normalizePfxEntry(entry);
+      if (normalized.data) return normalized;
+    }
+    return {};
+  }
+
+  return normalizePfxEntry(val);
+}
+
 function normalizeTicketKeys(value: any): Buffer | undefined {
   if (value == null) return undefined;
   if (isArrayBufferView(value)) {
@@ -190,6 +271,8 @@ export class SecureContext {
     ca?: string | string[];
     cert?: string;
     key?: string;
+    pfx?: Uint8Array;
+    pfxPassphrase?: string;
     minVersion: string;
     maxVersion: string;
     ciphers?: string;
@@ -208,9 +291,10 @@ export class SecureContext {
       validateString(options.ciphers, "options.ciphers");
       validateCipherList(options.ciphers);
     }
-    if (options.key && options.passphrase != null) {
+    if ((options.key || options.pfx) && options.passphrase != null) {
       validateString(options.passphrase, "options.passphrase");
     }
+    validatePfxOption(options.pfx, "options.pfx");
     if (options.clientCertEngine != null) {
       validateString(options.clientCertEngine, "options.clientCertEngine");
     }
@@ -235,11 +319,14 @@ export class SecureContext {
 
     const initialTicketKeys = normalizeTicketKeys(options.ticketKeys) ??
       Buffer.alloc(48);
+    const normalizedPfx = normalizePfxOption(options.pfx, options.passphrase);
 
     this.context = {
       ca: normalizeCertValue(options.ca),
       cert: toStringOrUndefined(options.cert),
       key: toStringOrUndefined(options.key),
+      pfx: normalizedPfx.data,
+      pfxPassphrase: normalizedPfx.passphrase,
       minVersion,
       maxVersion,
       ciphers: options.ciphers,

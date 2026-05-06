@@ -50,6 +50,7 @@ use deno_node_crypto::x509::Certificate;
 use deno_node_crypto::x509::CertificateObject;
 use deno_tls::rustls;
 use deno_tls::rustls_pemfile;
+use openssl::pkcs12::Pkcs12;
 
 use crate::ops::handle_wrap::AsyncWrap;
 use crate::ops::handle_wrap::HandleWrap;
@@ -2739,6 +2740,39 @@ fn get_js_string(
   })
 }
 
+fn get_js_bytes(
+  scope: &mut v8::PinScope,
+  obj: v8::Local<v8::Object>,
+  key: &str,
+) -> Option<Vec<u8>> {
+  let k = v8::String::new(scope, key).unwrap();
+  obj.get(scope, k.into()).and_then(|v| {
+    if v.is_undefined() || v.is_null() {
+      return None;
+    }
+
+    if let Ok(buf) = v8::Local::<v8::Uint8Array>::try_from(v) {
+      let byte_length = buf.byte_length();
+      let byte_offset = buf.byte_offset();
+      let ab = buf.buffer(scope).unwrap();
+      let data_ptr = ab.data().unwrap().as_ptr() as *const u8;
+      let data = unsafe {
+        std::slice::from_raw_parts(data_ptr.add(byte_offset), byte_length)
+      };
+      return Some(data.to_vec());
+    }
+
+    if let Ok(ab) = v8::Local::<v8::ArrayBuffer>::try_from(v) {
+      let data_ptr = ab.data().unwrap().as_ptr() as *const u8;
+      let byte_length = ab.byte_length();
+      let data = unsafe { std::slice::from_raw_parts(data_ptr, byte_length) };
+      return Some(data.to_vec());
+    }
+
+    v.to_string(scope).map(|s| s.to_rust_string_lossy(scope).into_bytes())
+  })
+}
+
 fn get_js_bool(
   scope: &mut v8::PinScope,
   obj: v8::Local<v8::Object>,
@@ -2764,6 +2798,32 @@ enum ProtocolVersionSelection {
   Tls12Only,
   Tls13Only,
   Unsupported,
+}
+
+fn parse_pkcs12_identity(
+  pfx_der: &[u8],
+  passphrase: Option<&str>,
+) -> Option<deno_tls::TlsKey> {
+  let pkcs12 = Pkcs12::from_der(pfx_der).ok()?;
+  let parsed = pkcs12.parse2(passphrase.unwrap_or("")).ok()?;
+  let cert = parsed.cert?;
+  let pkey = parsed.pkey?;
+
+  let mut certs = vec![webpki::types::CertificateDer::from(cert.to_der().ok()?)];
+  if let Some(chain) = parsed.ca {
+    for cert in chain {
+      certs.push(webpki::types::CertificateDer::from(cert.to_der().ok()?));
+    }
+  }
+
+  let private_key_der = pkey.private_key_to_pkcs8().ok()?;
+  let private_key = webpki::types::PrivateKeyDer::try_from(
+    private_key_der.as_ref(),
+  )
+  .ok()?
+  .clone_key();
+
+  Some(deno_tls::TlsKey(certs, private_key))
 }
 
 fn protocol_version_number(version: &str) -> Option<i32> {
@@ -3301,6 +3361,9 @@ fn build_client_config(
   // Build client key/cert if provided
   let cert_str = get_js_string(scope, context, "cert");
   let key_str = get_js_string(scope, context, "key");
+  let pfx_bytes = get_js_bytes(scope, context, "pfx");
+  let pfx_passphrase = get_js_string(scope, context, "pfxPassphrase")
+    .or_else(|| get_js_string(scope, context, "passphrase"));
 
   let tls_keys = if let (Some(cert), Some(key)) = (cert_str, key_str) {
     let certs: Vec<_> =
@@ -3318,6 +3381,12 @@ fn build_client_config(
     } else {
       TlsKeysHolder::from(TlsKeys::Null)
     }
+  } else if let Some(pfx_der) = pfx_bytes.as_deref() {
+    TlsKeysHolder::from(
+      parse_pkcs12_identity(pfx_der, pfx_passphrase.as_deref())
+        .map(TlsKeys::Static)
+        .unwrap_or(TlsKeys::Null),
+    )
   } else {
     TlsKeysHolder::from(TlsKeys::Null)
   };
@@ -3510,29 +3579,34 @@ fn build_server_config(
     ProtocolVersionSelection::Tls13Only => &[&rustls::version::TLS13][..],
     ProtocolVersionSelection::Unsupported => return None,
   };
-  let cert_str = match get_js_string(scope, context, "cert") {
-    Some(value) => value,
-    None => {
-      return None;
-    }
-  };
-  let key_str = match get_js_string(scope, context, "key") {
-    Some(value) => value,
-    None => {
-      return None;
-    }
-  };
+  let cert_str = get_js_string(scope, context, "cert");
+  let key_str = get_js_string(scope, context, "key");
+  let pfx_bytes = get_js_bytes(scope, context, "pfx");
+  let pfx_passphrase = get_js_string(scope, context, "pfxPassphrase")
+    .or_else(|| get_js_string(scope, context, "passphrase"));
 
-  let certs: Vec<_> =
-    rustls_pemfile::certs(&mut std::io::BufReader::new(cert_str.as_bytes()))
-      .filter_map(|r| r.ok())
-      .collect();
+  let (certs, private_key) = if let (Some(cert_str), Some(key_str)) =
+    (cert_str, key_str)
+  {
+    let certs: Vec<_> =
+      rustls_pemfile::certs(&mut std::io::BufReader::new(cert_str.as_bytes()))
+        .filter_map(|r| r.ok())
+        .collect();
 
-  let private_key = rustls_pemfile::private_key(&mut std::io::BufReader::new(
-    key_str.as_bytes(),
-  ))
-  .ok()
-  .flatten()?;
+    let private_key = rustls_pemfile::private_key(
+      &mut std::io::BufReader::new(key_str.as_bytes()),
+    )
+    .ok()
+    .flatten()?;
+
+    (certs, private_key)
+  } else if let Some(pfx_der) = pfx_bytes.as_deref() {
+    let deno_tls::TlsKey(certs, private_key) =
+      parse_pkcs12_identity(pfx_der, pfx_passphrase.as_deref())?;
+    (certs, private_key)
+  } else {
+    return None;
+  };
 
   let request_cert = get_js_bool(scope, context, "requestCert", false);
   let reject_unauthorized =
