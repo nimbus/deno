@@ -1273,10 +1273,6 @@ function connect(...args) {
     options.singleUse = true;
   }
 
-  if (options.path == null && options.socketPath != null) {
-    options.path = options.socketPath;
-  }
-
   validateFunction(options.checkServerIdentity, "options.checkServerIdentity");
   validateNumber(options.minDHSize, "options.minDHSize", 1);
 
@@ -1296,9 +1292,13 @@ function connect(...args) {
     options.servername = options.host;
   }
 
+  const connectOptions = options.socketPath != null
+    ? { ...options, path: options.socketPath }
+    : options;
+
   const tlssock = new TLSSocket(options.socket, {
     allowHalfOpen: options.allowHalfOpen,
-    pipe: !!options.path,
+    pipe: !!connectOptions.path,
     secureContext: context,
     isServer: false,
     requestCert: true,
@@ -1313,7 +1313,7 @@ function connect(...args) {
 
   options.rejectUnauthorized = options.rejectUnauthorized !== false;
 
-  tlssock[kConnectOptions] = options;
+  tlssock[kConnectOptions] = connectOptions;
 
   if (cb) {
     tlssock.once("secureConnect", cb);
@@ -1323,7 +1323,7 @@ function connect(...args) {
     if (options.timeout) {
       tlssock.setTimeout(options.timeout);
     }
-    tlssock.connect(options, tlssock._start);
+    tlssock.connect(connectOptions, tlssock._start);
   }
 
   tlssock._releaseControl();
