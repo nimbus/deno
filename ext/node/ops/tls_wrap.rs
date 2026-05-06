@@ -1240,14 +1240,13 @@ impl TLSWrapInner {
         }
 
         // If shutdown was requested before handshake completed, execute
-        // the deferred close_notify + underlying shutdown now.
+        // the deferred close_notify now.
         if (*ptr).shutdown {
           if let Some(ref mut conn) = (*ptr).tls_conn {
             conn.send_close_notify();
           }
           let enc_action = (*ptr).enc_out_collect();
           TLSWrapInner::do_enc_out_action(ptr, enc_action);
-          (*ptr).underlying.shutdown();
         }
       }
 
@@ -2169,9 +2168,8 @@ impl TLSWrap {
         inner.tls_conn.as_ref().is_some_and(|c| c.is_handshaking());
 
       if handshaking {
-        // Handshake not yet complete — defer close_notify and underlying
-        // shutdown.  dispatch_clear_out_callbacks will check the shutdown
-        // flag once the handshake finishes and drive the close then.
+        // Handshake not yet complete — defer close_notify. The callback
+        // path will check the shutdown flag once the handshake finishes.
       } else {
         if let Some(ref mut conn) = inner.tls_conn {
           conn.send_close_notify();
@@ -2179,12 +2177,6 @@ impl TLSWrap {
         let enc_action = inner.enc_out_collect();
         let inner_ptr = inner as *mut TLSWrapInner;
         unsafe { TLSWrapInner::do_enc_out_action(inner_ptr, enc_action) };
-
-        // Forward shutdown to underlying stream, matching Node's
-        // TLSWrap::DoShutdown → underlying_stream()->DoShutdown().
-        // uv_shutdown defers until the write queue drains, so the
-        // close_notify (written by enc_out above) is sent first.
-        inner.underlying.shutdown();
       }
     }
 
