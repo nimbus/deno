@@ -929,19 +929,9 @@ function makeVerifyError(code) {
 }
 
 function onServerSocketSecure() {
-  console.error(
-    "TLS debug server secure",
-    this._requestCert,
-    this._rejectUnauthorized,
-  );
   if (this._requestCert) {
     const verifyError = makeVerifyError(this._handle.verifyError());
     if (verifyError) {
-      console.error(
-        "TLS debug server verifyError",
-        verifyError.code,
-        verifyError.message,
-      );
       this.authorizationError = verifyError.code;
 
       if (this._rejectUnauthorized) {
@@ -963,11 +953,6 @@ function onServerSocketSecure() {
 }
 
 function onSocketTLSError(err) {
-  console.error(
-    "TLS debug server tlsClientError",
-    err?.code,
-    err?.message,
-  );
   if (!this._controlReleased && !this[kErrorEmitted]) {
     this[kErrorEmitted] = true;
     debug("server emit tlsClientError:", err);
@@ -980,12 +965,6 @@ function onSocketKeylog(line) {
 }
 
 function onSocketClose(err) {
-  console.error(
-    "TLS debug server close",
-    err,
-    this._controlReleased,
-    this[kErrorEmitted],
-  );
   if (err) return;
   if (!this._controlReleased && !this[kErrorEmitted]) {
     this[kErrorEmitted] = true;
@@ -1012,11 +991,6 @@ function tlsConnectionListener(rawSocket) {
   // protocol).  Emit as tlsClientError like Node does for handshake
   // failures instead of letting it surface as an uncaught exception.
   if (socket._initError) {
-    console.error(
-      "TLS debug server initError",
-      socket._initError?.code,
-      socket._initError?.message,
-    );
     const err = socket._initError;
     socket._initError = null;
     this.emit("tlsClientError", err, rawSocket);
@@ -1218,12 +1192,6 @@ function onConnectSecure() {
   primeSyntheticSessionState(this, options);
 
   let verifyError = makeVerifyError(this._handle.verifyError());
-  console.error(
-    "TLS debug client secure start",
-    options.rejectUnauthorized,
-    options.servername,
-    options.host,
-  );
 
   // Verify that server's identity matches its certificate's names
   if (!verifyError && !this.isSessionReused()) {
@@ -1236,11 +1204,6 @@ function onConnectSecure() {
   }
 
   if (verifyError) {
-    console.error(
-      "TLS debug client verifyError",
-      verifyError.code,
-      verifyError.message,
-    );
     this.authorized = false;
     this.authorizationError = verifyError.code || verifyError.message;
 

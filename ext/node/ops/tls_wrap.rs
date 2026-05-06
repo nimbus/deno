@@ -51,6 +51,8 @@ use deno_node_crypto::x509::CertificateObject;
 use deno_tls::rustls;
 use deno_tls::rustls_pemfile;
 use openssl::pkcs12::Pkcs12;
+use openssl::x509::X509;
+use openssl::x509::X509VerifyResult;
 
 use crate::ops::handle_wrap::AsyncWrap;
 use crate::ops::handle_wrap::HandleWrap;
@@ -1163,10 +1165,6 @@ impl TLSWrapInner {
             }
           }
           Err(e) => {
-            eprintln!(
-              "TLSWrap {:?} process_new_packets error: {e:?}",
-              self.kind
-            );
             if total_consumed > 0 {
               self.enc_in.drain(..total_consumed);
             }
@@ -2831,13 +2829,16 @@ fn parse_pkcs12_identity(
   .ok()?
   .clone_key();
 
-  eprintln!(
-    "TLSWrap PKCS12 parsed: certs={}, key_der_len={}",
-    certs.len(),
-    private_key_der.len()
-  );
-
   Some(deno_tls::TlsKey(certs, private_key))
+}
+
+fn is_self_issued_cert(
+  cert_der: &rustls::pki_types::CertificateDer<'_>,
+) -> bool {
+  let Ok(cert) = X509::from_der(cert_der.as_ref()) else {
+    return false;
+  };
+  cert.issued(&cert) == X509VerifyResult::OK
 }
 
 fn protocol_version_number(version: &str) -> Option<i32> {
@@ -3542,7 +3543,14 @@ impl rustls::server::danger::ClientCertVerifier for NodeClientCertVerifier {
         // ECONNRESET on the client (clean close) rather than a TLS
         // fatal alert.
         let code = if let rustls::Error::InvalidCertificate(ref cert_err) = e {
-          cert_error_to_node_code(cert_err).to_string()
+          match cert_err {
+            rustls::CertificateError::UnknownIssuer
+              if is_self_issued_cert(end_entity) =>
+            {
+              "DEPTH_ZERO_SELF_SIGNED_CERT".to_string()
+            }
+            _ => cert_error_to_node_code(cert_err).to_string(),
+          }
         } else {
           format!("{e}")
         };
@@ -3679,7 +3687,13 @@ fn build_server_config(
     }
 
     let mut verifier_builder =
-      rustls::server::WebPkiClientVerifier::builder(Arc::new(root_cert_store));
+      rustls::server::WebPkiClientVerifier::builder(Arc::new(
+        if root_cert_ders.is_empty() && !reject_unauthorized {
+          deno_tls::create_default_root_cert_store()
+        } else {
+          root_cert_store
+        },
+      ));
     if !reject_unauthorized {
       verifier_builder = verifier_builder.allow_unauthenticated();
     }
