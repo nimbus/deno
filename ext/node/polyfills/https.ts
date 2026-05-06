@@ -241,28 +241,28 @@ Agent.prototype._evictSession = function _evictSession(
   delete this._sessionCache.map[key];
 };
 
-Agent.prototype.createConnection = function createConnection(
-  this: any,
-  options: any,
-  cb?: any,
-) {
-  if (typeof options === "number") {
-    // createConnection(port, host, options) signature
-    const args = arguments;
-    const opts: any = {};
-    if (args[0] !== null && typeof args[0] === "object") {
-      Object.assign(opts, args[0]);
-    } else if (args[1] !== null && typeof args[1] === "object") {
-      Object.assign(opts, args[1]);
-    } else if (args[2] !== null && typeof args[2] === "object") {
-      Object.assign(opts, args[2]);
-    }
-    if (typeof args[0] === "number") opts.port = args[0];
-    if (typeof args[1] === "string") opts.host = args[1];
-    if (typeof args[args.length - 1] === "function") {
-      cb = args[args.length - 1];
-    }
-    options = opts;
+Agent.prototype.createConnection = function createConnection(this: any, ...args: any[]) {
+  // Match Node's odd HTTPS signature: (options), (port, options),
+  // or (port, host, options), plus an optional callback as the final arg.
+  let options: any;
+  let cb: any;
+  if (args[0] !== null && typeof args[0] === "object") {
+    options = args[0];
+  } else if (args[1] !== null && typeof args[1] === "object") {
+    options = { ...args[1] };
+  } else if (args[2] === null || typeof args[2] !== "object") {
+    options = {};
+  } else {
+    options = { ...args[2] };
+  }
+  if (typeof args[0] === "number") {
+    options.port = args[0];
+  }
+  if (typeof args[1] === "string") {
+    options.host = args[1];
+  }
+  if (typeof args[args.length - 1] === "function") {
+    cb = args[args.length - 1];
   }
 
   // Look up cached TLS session for reuse
@@ -293,11 +293,15 @@ Agent.prototype.createConnection = function createConnection(
   return socket;
 };
 
-export const globalAgent = new Agent({
+export let globalAgent = new Agent({
   keepAlive: true,
   scheduling: "lifo",
   timeout: 5000,
 });
+
+export function setGlobalAgent(agent: any) {
+  globalAgent = agent;
+}
 
 /** Makes a request to an https server. */
 export function request(...args: any[]) {
@@ -332,6 +336,11 @@ export default {
   Server,
   createServer,
   get,
-  globalAgent,
+  get globalAgent() {
+    return globalAgent;
+  },
+  set globalAgent(agent) {
+    setGlobalAgent(agent);
+  },
   request,
 };
