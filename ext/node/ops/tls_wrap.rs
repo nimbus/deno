@@ -2809,15 +2809,19 @@ fn parse_pkcs12_identity(
   let cert = parsed.cert?;
   let pkey = parsed.pkey?;
 
-  let mut certs = vec![webpki::types::CertificateDer::from(cert.to_der().ok()?)];
+  let mut certs = vec![rustls::pki_types::CertificateDer::from(
+    cert.to_der().ok()?,
+  )];
   if let Some(chain) = parsed.ca {
     for cert in chain {
-      certs.push(webpki::types::CertificateDer::from(cert.to_der().ok()?));
+      certs.push(rustls::pki_types::CertificateDer::from(
+        cert.to_der().ok()?,
+      ));
     }
   }
 
   let private_key_der = pkey.private_key_to_pkcs8().ok()?;
-  let private_key = webpki::types::PrivateKeyDer::try_from(
+  let private_key = rustls::pki_types::PrivateKeyDer::try_from(
     private_key_der.as_ref(),
   )
   .ok()?
