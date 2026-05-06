@@ -123,7 +123,7 @@ import internalCryptoScrypt from "ext:deno_node/internal/crypto/scrypt.ts";
 import internalCryptoSig from "ext:deno_node/internal/crypto/sig.ts";
 import internalCryptoUtil from "ext:deno_node/internal/crypto/util.ts";
 import internalCryptoX509 from "ext:deno_node/internal/crypto/x509.ts";
-import * as internalDgram from "ext:deno_node/internal/dgram.ts";
+import internalDgram from "ext:deno_node/internal/dgram.ts";
 import internalDnsPromises from "ext:deno_node/internal/dns/promises.ts";
 import internalBuffer from "ext:deno_node/internal/buffer.mjs";
 import internalErrors from "ext:deno_node/internal/errors.ts";
