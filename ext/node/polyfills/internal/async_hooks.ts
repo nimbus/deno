@@ -323,10 +323,65 @@ function restoreActiveHooks() {
   active_hooks.tmp_fields = null;
 }
 
+// deno-lint-ignore no-explicit-any
+function trackPromise(promise: any, parent?: any) {
+  if (promise[async_id_symbol] !== undefined) {
+    return;
+  }
+
+  let triggerAsyncId = getDefaultTriggerAsyncId();
+  if (parent !== undefined) {
+    trackPromise(parent);
+    triggerAsyncId = parent[async_id_symbol];
+  }
+
+  promise[async_id_symbol] = newAsyncId();
+  promise[trigger_async_id_symbol] = triggerAsyncId;
+}
+
+// deno-lint-ignore no-explicit-any
+function promiseInitHook(promise: any, parent?: any) {
+  trackPromise(promise, parent);
+  emitInit(
+    promise[async_id_symbol],
+    "PROMISE",
+    promise[trigger_async_id_symbol],
+    promise,
+  );
+}
+
+// deno-lint-ignore no-explicit-any
+function promiseBeforeHook(promise: any) {
+  trackPromise(promise);
+  emitBefore(
+    promise[async_id_symbol],
+    promise[trigger_async_id_symbol],
+    promise,
+  );
+}
+
+// deno-lint-ignore no-explicit-any
+function promiseAfterHook(promise: any) {
+  trackPromise(promise);
+  emitAfter(promise[async_id_symbol]);
+}
+
+let promiseHooksInstalled = false;
+
 // deno-lint-ignore no-unused-vars
 let wantPromiseHook = false;
 function enableHooks() {
   async_hook_fields[kCheck] += 1;
+
+  if (!promiseHooksInstalled) {
+    core.setPromiseHooks(
+      promiseInitHook,
+      promiseBeforeHook,
+      promiseAfterHook,
+      undefined,
+    );
+    promiseHooksInstalled = true;
+  }
 
   // TODO(kt3k): Uncomment this
   // setCallbackTrampoline(callbackTrampoline);
