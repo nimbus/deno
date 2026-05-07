@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
+import { core, primordials } from "ext:core/mod.js";
 // deno-lint-ignore camelcase
 import * as async_wrap from "ext:deno_node/internal_binding/async_wrap.ts";
 import { ERR_ASYNC_CALLBACK } from "ext:deno_node/internal/errors.ts";
@@ -8,7 +9,7 @@ export {
   asyncIdSymbol,
   ownerSymbol,
 } from "ext:deno_node/internal_binding/symbols.ts";
-import { primordials } from "ext:core/mod.js";
+const { AsyncVariable, setAsyncContext } = core;
 const {
   ArrayPrototypeIncludes,
   ArrayPrototypeIndexOf,
@@ -70,16 +71,43 @@ const {
 } = async_wrap;
 export { newAsyncId };
 
-// Track execution context
+const topLevelResource = {};
+const executionAsyncResourceVariable = new AsyncVariable();
+const executionAsyncResourceRestoreStack: unknown[] = [];
 const executionAsyncIdStack: number[] = [0];
+const triggerAsyncIdStack: number[] = [0];
 
 export function executionAsyncId(): number {
   return executionAsyncIdStack[executionAsyncIdStack.length - 1] || 0;
 }
 
+export function triggerAsyncId(): number {
+  return triggerAsyncIdStack[triggerAsyncIdStack.length - 1] || 0;
+}
+
+export function executionAsyncResource() {
+  const resource = executionAsyncResourceVariable.get();
+  if (resource === undefined) {
+    return topLevelResource;
+  }
+  return lookupPublicResource(resource);
+}
+
 // Emit functions that work with the internal hook system
-export function emitBefore(asyncId: number): void {
+export function emitBefore(
+  asyncId: number,
+  triggerAsyncId = triggerAsyncIdStack[triggerAsyncIdStack.length - 1] || 0,
+  resource: unknown = topLevelResource,
+): void {
+  const publicResource = lookupPublicResource(resource);
   ArrayPrototypePush(executionAsyncIdStack, asyncId);
+  ArrayPrototypePush(triggerAsyncIdStack, triggerAsyncId);
+  async_id_fields[async_wrap.UidFields.kExecutionAsyncId] = asyncId;
+  async_id_fields[async_wrap.UidFields.kTriggerAsyncId] = triggerAsyncId;
+  ArrayPrototypePush(
+    executionAsyncResourceRestoreStack,
+    executionAsyncResourceVariable.enter(publicResource),
+  );
 
   // Call hooks if they exist
   const hooks = active_hooks.array;
@@ -95,6 +123,19 @@ export function emitBefore(asyncId: number): void {
     if (executionAsyncIdStack.length > 1) {
       ArrayPrototypePop(executionAsyncIdStack);
     }
+    if (triggerAsyncIdStack.length > 1) {
+      ArrayPrototypePop(triggerAsyncIdStack);
+    }
+    const previousContext = ArrayPrototypePop(
+      executionAsyncResourceRestoreStack,
+    );
+    if (previousContext !== undefined) {
+      setAsyncContext(previousContext);
+    }
+    async_id_fields[async_wrap.UidFields.kExecutionAsyncId] =
+      executionAsyncIdStack[executionAsyncIdStack.length - 1] || 0;
+    async_id_fields[async_wrap.UidFields.kTriggerAsyncId] =
+      triggerAsyncIdStack[triggerAsyncIdStack.length - 1] || 0;
     throw e;
   }
 }
@@ -114,6 +155,19 @@ export function emitAfter(asyncId: number): void {
     if (executionAsyncIdStack.length > 1) {
       ArrayPrototypePop(executionAsyncIdStack);
     }
+    if (triggerAsyncIdStack.length > 1) {
+      ArrayPrototypePop(triggerAsyncIdStack);
+    }
+    const previousContext = ArrayPrototypePop(
+      executionAsyncResourceRestoreStack,
+    );
+    if (previousContext !== undefined) {
+      setAsyncContext(previousContext);
+    }
+    async_id_fields[async_wrap.UidFields.kExecutionAsyncId] =
+      executionAsyncIdStack[executionAsyncIdStack.length - 1] || 0;
+    async_id_fields[async_wrap.UidFields.kTriggerAsyncId] =
+      triggerAsyncIdStack[triggerAsyncIdStack.length - 1] || 0;
   }
 }
 
@@ -334,8 +388,12 @@ export function enabledHooksExist() {
   return hasHooks(kCheck);
 }
 
+export function initHooksExist() {
+  return hasHooks(kInit);
+}
+
 export function hasAsyncIdStack() {
-  return hasHooks(kStackLength);
+  return executionAsyncIdStack.length > 1;
 }
 
 export { constants };
