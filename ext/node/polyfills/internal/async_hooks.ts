@@ -342,7 +342,7 @@ function trackPromise(promise: any, parent?: any) {
 // deno-lint-ignore no-explicit-any
 function promiseInitHook(promise: any, parent?: any) {
   trackPromise(promise, parent);
-  emitInit(
+  emitInitNative(
     promise[async_id_symbol],
     "PROMISE",
     promise[trigger_async_id_symbol],
