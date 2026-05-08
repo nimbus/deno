@@ -19,6 +19,8 @@ pub const PRIVATE_SYMBOL_NAME: v8::OneByteConst =
 /// An unbounded script that can be run in a context.
 pub struct ContextifyScript {
   script: v8::TracedReference<v8::UnboundScript>,
+  line_offset: i32,
+  column_offset: i32,
 }
 
 // SAFETY: we're sure this can be GCed
@@ -104,6 +106,17 @@ impl ContextifyScript {
       v8::script_compiler::NoCacheReason::NoReason,
     ) else {
       if !scope.has_terminated() {
+        if let (Some(exception), Some(message)) =
+          (scope.exception(), scope.message())
+        {
+          decorate_error_stack(
+            scope,
+            exception,
+            message,
+            line_offset,
+            column_offset,
+          );
+        }
         scope.rethrow();
       }
       return None;
@@ -116,7 +129,14 @@ impl ContextifyScript {
     };
 
     let script = v8::TracedReference::new(scope, unbound_script);
-    let this = deno_core::cppgc::make_cppgc_object(scope, Self { script });
+    let this = deno_core::cppgc::make_cppgc_object(
+      scope,
+      Self {
+        script,
+        line_offset,
+        column_offset,
+      },
+    );
 
     Some(CompileResult {
       value: serde_v8::Value {
@@ -176,7 +196,7 @@ impl ContextifyScript {
     scope: &mut v8::PinScope<'s, 'i>,
     context: v8::Local<'s, v8::Context>,
     timeout: i64,
-    _display_errors: bool,
+    display_errors: bool,
     _break_on_sigint: bool,
     microtask_queue: Option<&v8::MicrotaskQueue>,
   ) -> Option<v8::Local<'s, v8::Value>> {
@@ -249,6 +269,20 @@ impl ContextifyScript {
     }
 
     if scope.has_caught() {
+      if display_errors && !scope.has_terminated() {
+        if let (Some(exception), Some(message)) =
+          (scope.exception(), scope.message())
+        {
+          decorate_error_stack(
+            scope,
+            exception,
+            message,
+            self.line_offset,
+            self.column_offset,
+          );
+        }
+      }
+
       // If there was an exception thrown during script execution, re-throw it.
       if !scope.has_terminated() {
         scope.rethrow();
@@ -259,6 +293,81 @@ impl ContextifyScript {
 
     Some(scope.escape(result?))
   }
+}
+
+fn decorate_error_stack(
+  scope: &mut v8::PinScope<'_, '_>,
+  exception: v8::Local<'_, v8::Value>,
+  message: v8::Local<'_, v8::Message>,
+  line_offset: i32,
+  column_offset: i32,
+) {
+  let Ok(err_obj) = v8::Local::<v8::Object>::try_from(exception) else {
+    return;
+  };
+
+  let Some(source_line) = message.get_source_line(scope) else {
+    return;
+  };
+  let source_line = source_line.to_rust_string_lossy(scope);
+  if source_line.contains("node-do-not-add-exception-line") {
+    return;
+  }
+
+  let filename = message
+    .get_script_resource_name(scope)
+    .and_then(|value| value.to_string(scope))
+    .map(|value| value.to_rust_string_lossy(scope))
+    .unwrap_or_else(|| "<anonymous_script>".to_string());
+  let Some(line_number) = message.get_line_number(scope) else {
+    return;
+  };
+
+  let line_offset = line_offset.max(0) as usize;
+  let column_offset = column_offset.max(0) as usize;
+  let script_start = if line_number.saturating_sub(line_offset) == 1 {
+    column_offset
+  } else {
+    0
+  };
+
+  let mut start = message.get_start_column();
+  let mut end = message.get_end_column();
+  if start >= script_start && end >= script_start {
+    start -= script_start;
+    end -= script_start;
+  }
+
+  let mut arrow = format!("{filename}:{line_number}\n{source_line}\n");
+  if start <= end && end <= source_line.len() {
+    for byte in source_line.as_bytes().iter().take(start) {
+      arrow.push(if *byte == b'\t' { '\t' } else { ' ' });
+    }
+    for _ in start..end {
+      arrow.push('^');
+    }
+    arrow.push('\n');
+  }
+
+  let stack_key =
+    v8::String::new_external_onebyte_static(scope, b"stack").unwrap();
+  let Some(stack) = err_obj.get(scope, stack_key.into()) else {
+    return;
+  };
+  let Ok(stack) = v8::Local::<v8::String>::try_from(stack) else {
+    return;
+  };
+  let stack = stack.to_rust_string_lossy(scope);
+  let decorated_prefix = format!("{filename}:{line_number}\n");
+  if stack.starts_with(&decorated_prefix) {
+    return;
+  }
+
+  let decorated_stack = format!("{arrow}\n{stack}");
+  let Some(decorated_stack) = v8::String::new(scope, &decorated_stack) else {
+    return;
+  };
+  let _ = err_obj.set(scope, stack_key.into(), decorated_stack.into());
 }
 
 pub struct ContextifyContext {
@@ -1366,6 +1475,17 @@ pub fn op_vm_compile_function<'s>(
     v8::script_compiler::NoCacheReason::NoReason,
   ) else {
     if scope.has_caught() && !scope.has_terminated() {
+      if let (Some(exception), Some(message)) =
+        (scope.exception(), scope.message())
+      {
+        decorate_error_stack(
+          scope,
+          exception,
+          message,
+          line_offset,
+          column_offset,
+        );
+      }
       scope.rethrow();
     }
     return None;
