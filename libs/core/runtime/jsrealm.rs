@@ -337,7 +337,10 @@ impl JsRealmInner {
           std::ptr::null_mut(),
         );
       }
-      ctx.clear_all_slots();
+      // Do not eagerly clear context slots here. Dropping the ContextAnnex
+      // during teardown resets its internal weak handle before V8 finishes the
+      // context lifetime, which can trip weak-callback lifetime bugs on
+      // context-heavy paths like node:vm. Let V8 GC own slot teardown.
       // Expect that this context is dead (we only check this in debug mode)
       // TODO(bartlomieju): This check fails for some tests, will need to fix this
       // debug_assert_eq!(Rc::strong_count(&module_map), 1, "ModuleMap still in use.");
