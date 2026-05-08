@@ -1087,7 +1087,7 @@ const wrapper = [
 
 export let wrap = function (script) {
   script = script.replace(/^#!.*?\n/, "");
-  return `${Module.wrapper[0]}${script}${Module.wrapper[1]}`;
+  return `${Module.wrapper[0]}\n${script}${Module.wrapper[1]}`;
 };
 
 const wrapperProxyHandler = {
