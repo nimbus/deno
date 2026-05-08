@@ -1107,18 +1107,6 @@ const wrapperProxyHandler = {
   },
 };
 
-function syncWrapperFromValue(value) {
-  if (value == null) {
-    return;
-  }
-  if (value[0] !== undefined) {
-    wrapper[0] = value[0];
-  }
-  if (value[1] !== undefined) {
-    wrapper[1] = value[1];
-  }
-}
-
 let wrapperProxy = new Proxy(wrapper, wrapperProxyHandler);
 
 ObjectDefineProperty(Module, "wrap", {
@@ -1139,8 +1127,7 @@ ObjectDefineProperty(Module, "wrapper", {
 
   set(value) {
     patched = true;
-    syncWrapperFromValue(value);
-    wrapperProxy = new Proxy(wrapper, wrapperProxyHandler);
+    wrapperProxy = value;
   },
 });
 
