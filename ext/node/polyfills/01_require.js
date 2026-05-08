@@ -1095,7 +1095,7 @@ export let wrap = function (script) {
   return `${Module.wrapper[0]}${script}${Module.wrapper[1]}`;
 };
 
-let wrapperProxy = new Proxy(wrapper, {
+const wrapperProxyHandler = {
   set(target, property, value, receiver) {
     patched = true;
     return ReflectSet(target, property, value, receiver);
@@ -1105,7 +1105,21 @@ let wrapperProxy = new Proxy(wrapper, {
     patched = true;
     return ObjectDefineProperty(target, property, descriptor);
   },
-});
+};
+
+function syncWrapperFromValue(value) {
+  if (value == null) {
+    return;
+  }
+  if (value[0] !== undefined) {
+    wrapper[0] = value[0];
+  }
+  if (value[1] !== undefined) {
+    wrapper[1] = value[1];
+  }
+}
+
+let wrapperProxy = new Proxy(wrapper, wrapperProxyHandler);
 
 ObjectDefineProperty(Module, "wrap", {
   get() {
@@ -1125,7 +1139,8 @@ ObjectDefineProperty(Module, "wrapper", {
 
   set(value) {
     patched = true;
-    wrapperProxy = value;
+    syncWrapperFromValue(value);
+    wrapperProxy = new Proxy(wrapper, wrapperProxyHandler);
   },
 });
 
