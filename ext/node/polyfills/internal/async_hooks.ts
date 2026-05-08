@@ -74,8 +74,8 @@ export { newAsyncId };
 const topLevelResource = {};
 const executionAsyncResourceVariable = new AsyncVariable();
 const executionAsyncResourceRestoreStack: unknown[] = [];
-const executionAsyncIdStack: number[] = [0];
-const triggerAsyncIdStack: number[] = [0];
+const executionAsyncIdStack: number[] = [1];
+const triggerAsyncIdStack: number[] = [1];
 
 export function executionAsyncId(): number {
   return executionAsyncIdStack[executionAsyncIdStack.length - 1] || 0;
@@ -93,11 +93,10 @@ export function executionAsyncResource() {
   return lookupPublicResource(resource);
 }
 
-// Emit functions that work with the internal hook system
-export function emitBefore(
+function pushAsyncContext(
   asyncId: number,
-  triggerAsyncId = triggerAsyncIdStack[triggerAsyncIdStack.length - 1] || 0,
-  resource: unknown = topLevelResource,
+  triggerAsyncId: number,
+  resource: unknown,
 ): void {
   const publicResource = lookupPublicResource(resource);
   ArrayPrototypePush(executionAsyncIdStack, asyncId);
@@ -108,66 +107,71 @@ export function emitBefore(
     executionAsyncResourceRestoreStack,
     executionAsyncResourceVariable.enter(publicResource),
   );
+}
 
-  // Call hooks if they exist
-  const hooks = active_hooks.array;
+function popAsyncContext(asyncId: number): void {
+  if (
+    executionAsyncIdStack.length > 1 &&
+    executionAsyncIdStack[executionAsyncIdStack.length - 1] === asyncId
+  ) {
+    ArrayPrototypePop(executionAsyncIdStack);
+  }
+  if (triggerAsyncIdStack.length > 1) {
+    ArrayPrototypePop(triggerAsyncIdStack);
+  }
+  const previousContext = ArrayPrototypePop(executionAsyncResourceRestoreStack);
+  if (previousContext !== undefined) {
+    setAsyncContext(previousContext);
+  }
+  async_id_fields[async_wrap.UidFields.kExecutionAsyncId] =
+    executionAsyncIdStack[executionAsyncIdStack.length - 1] || 0;
+  async_id_fields[async_wrap.UidFields.kTriggerAsyncId] =
+    triggerAsyncIdStack[triggerAsyncIdStack.length - 1] || 0;
+}
+
+function emitHook(symbol: symbol, asyncId: number): void {
+  active_hooks.call_depth += 1;
   try {
+    const hooks = active_hooks.array;
     for (let i = 0; i < hooks.length; i++) {
       const hook = hooks[i];
-      if (hook[before_symbol]) {
-        hook[before_symbol](asyncId);
+      if (hook[symbol]) {
+        hook[symbol](asyncId);
       }
     }
+  } finally {
+    active_hooks.call_depth -= 1;
+  }
+
+  if (active_hooks.call_depth === 0 && active_hooks.tmp_array !== null) {
+    restoreActiveHooks();
+  }
+}
+
+// Emit functions that work with the internal hook system
+export function emitBefore(
+  asyncId: number,
+  triggerAsyncId = triggerAsyncIdStack[triggerAsyncIdStack.length - 1] || 0,
+  resource: unknown = topLevelResource,
+): void {
+  pushAsyncContext(asyncId, triggerAsyncId, resource);
+
+  // Call hooks if they exist
+  try {
+    emitHook(before_symbol, asyncId);
   } catch (e) {
     // Clean up stack corruption on hook errors (Node.js pattern)
-    if (executionAsyncIdStack.length > 1) {
-      ArrayPrototypePop(executionAsyncIdStack);
-    }
-    if (triggerAsyncIdStack.length > 1) {
-      ArrayPrototypePop(triggerAsyncIdStack);
-    }
-    const previousContext = ArrayPrototypePop(
-      executionAsyncResourceRestoreStack,
-    );
-    if (previousContext !== undefined) {
-      setAsyncContext(previousContext);
-    }
-    async_id_fields[async_wrap.UidFields.kExecutionAsyncId] =
-      executionAsyncIdStack[executionAsyncIdStack.length - 1] || 0;
-    async_id_fields[async_wrap.UidFields.kTriggerAsyncId] =
-      triggerAsyncIdStack[triggerAsyncIdStack.length - 1] || 0;
+    popAsyncContext(asyncId);
     throw e;
   }
 }
 
 export function emitAfter(asyncId: number): void {
-  // Call hooks if they exist
-  const hooks = active_hooks.array;
   try {
-    for (let i = 0; i < hooks.length; i++) {
-      const hook = hooks[i];
-      if (hook[after_symbol]) {
-        hook[after_symbol](asyncId);
-      }
-    }
+    emitHook(after_symbol, asyncId);
   } finally {
     // Always pop stack even if hooks throw (Node.js pattern)
-    if (executionAsyncIdStack.length > 1) {
-      ArrayPrototypePop(executionAsyncIdStack);
-    }
-    if (triggerAsyncIdStack.length > 1) {
-      ArrayPrototypePop(triggerAsyncIdStack);
-    }
-    const previousContext = ArrayPrototypePop(
-      executionAsyncResourceRestoreStack,
-    );
-    if (previousContext !== undefined) {
-      setAsyncContext(previousContext);
-    }
-    async_id_fields[async_wrap.UidFields.kExecutionAsyncId] =
-      executionAsyncIdStack[executionAsyncIdStack.length - 1] || 0;
-    async_id_fields[async_wrap.UidFields.kTriggerAsyncId] =
-      triggerAsyncIdStack[triggerAsyncIdStack.length - 1] || 0;
+    popAsyncContext(asyncId);
   }
 }
 
@@ -176,24 +180,11 @@ export function emitAfter(asyncId: number): void {
 // Use this narrow helper for those current-callback transitions without
 // touching the async context stack.
 export function emitAfterHooksOnly(asyncId: number): void {
-  const hooks = active_hooks.array;
-  for (let i = 0; i < hooks.length; i++) {
-    const hook = hooks[i];
-    if (hook[after_symbol]) {
-      hook[after_symbol](asyncId);
-    }
-  }
+  emitHook(after_symbol, asyncId);
 }
 
 export function emitDestroy(asyncId: number): void {
-  // Call hooks if they exist
-  const hooks = active_hooks.array;
-  for (let i = 0; i < hooks.length; i++) {
-    const hook = hooks[i];
-    if (hook[destroy_symbol]) {
-      hook[destroy_symbol](asyncId);
-    }
-  }
+  emitHook(destroy_symbol, asyncId);
 }
 const {
   kInit,
@@ -377,7 +368,19 @@ function promiseBeforeHook(promise: any) {
 // deno-lint-ignore no-explicit-any
 function promiseAfterHook(promise: any) {
   trackPromise(promise);
-  emitAfter(promise[async_id_symbol]);
+  const asyncId = promise[async_id_symbol];
+  if (hasHooks(kAfter)) {
+    emitAfterHooksOnly(asyncId);
+  }
+  if (asyncId === executionAsyncId()) {
+    popAsyncContext(asyncId);
+  }
+}
+
+// deno-lint-ignore no-explicit-any
+function promiseResolveHook(promise: any) {
+  trackPromise(promise);
+  emitHook(promise_resolve_symbol, promise[async_id_symbol]);
 }
 
 let promiseHooksInstalled = false;
@@ -392,7 +395,7 @@ function enableHooks() {
       promiseInitHook,
       promiseBeforeHook,
       promiseAfterHook,
-      undefined,
+      promiseResolveHook,
     );
     promiseHooksInstalled = true;
   }

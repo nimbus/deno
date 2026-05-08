@@ -73,6 +73,12 @@ export enum UidFields {
 
 const asyncIdFields = new Float64Array(Object.keys(UidFields).length);
 
+// Match Node's bootstrap execution context. Async ID 1 is reserved for the
+// initial top-level resource, and the default trigger falls back to that
+// execution context until a real async resource pushes a new one.
+asyncIdFields[UidFields.kExecutionAsyncId] = 1;
+asyncIdFields[UidFields.kTriggerAsyncId] = 1;
+
 // `kDefaultTriggerAsyncId` should be `-1`, this indicates that there is no
 // specified default value and it should fallback to the executionAsyncId.
 // 0 is not used as the magic value, because that indicates a missing
