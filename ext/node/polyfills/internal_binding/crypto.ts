@@ -13,3 +13,7 @@ export function getFipsCrypto(): boolean {
 export function setFipsCrypto(_fips: boolean) {
   throw new Error("FIPS mode is not supported in Deno.");
 }
+
+// Older Node LTS fixtures use internalBinding('crypto').ScryptJob as a
+// feature probe before calling the public crypto.scrypt() API.
+export function ScryptJob() {}

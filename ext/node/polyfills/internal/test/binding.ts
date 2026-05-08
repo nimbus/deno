@@ -21,7 +21,21 @@ function emitBindingWarning() {
 
 export function internalBinding(name: BindingName) {
   emitBindingWarning();
-  return getBinding(name);
+  const binding = getBinding(name);
+  if (
+    name === "crypto" &&
+    binding &&
+    typeof binding === "object" &&
+    typeof (binding as { ScryptJob?: unknown }).ScryptJob !== "function"
+  ) {
+    Object.defineProperty(binding, "ScryptJob", {
+      value: function ScryptJob() {},
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+  }
+  return binding;
 }
 
 // TODO(kt3k): export actual primordials

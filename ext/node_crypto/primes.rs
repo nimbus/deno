@@ -110,6 +110,21 @@ impl Prime {
       return Ok(Self(rng.gen_prime(n)));
     }
 
+    if safe && add_val.is_none() {
+      if n < 3 {
+        return Err(GeneratePrimeError::OutOfRange);
+      }
+
+      let one = num_bigint_dig::BigUint::one();
+      loop {
+        let q = rng.gen_prime(n - 1);
+        let candidate = (&q << 1usize) + &one;
+        if is_biguint_probably_prime(&candidate, 20) {
+          return Ok(Self(candidate));
+        }
+      }
+    }
+
     let min_val = num_bigint_dig::BigUint::from(1u32) << (n - 1);
     let max_val = num_bigint_dig::BigUint::from(1u32) << n;
     let range = &max_val - &min_val;

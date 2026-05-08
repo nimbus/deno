@@ -157,6 +157,54 @@ const cipherInfoTable: CipherInfoResult[] = [
     mode: "gcm",
   },
   {
+    name: "id-aes128-ccm",
+    nid: 896,
+    blockSize: 1,
+    ivLength: 12,
+    keyLength: 16,
+    mode: "ccm",
+  },
+  {
+    name: "id-aes192-ccm",
+    nid: 899,
+    blockSize: 1,
+    ivLength: 12,
+    keyLength: 24,
+    mode: "ccm",
+  },
+  {
+    name: "id-aes256-ccm",
+    nid: 902,
+    blockSize: 1,
+    ivLength: 12,
+    keyLength: 32,
+    mode: "ccm",
+  },
+  {
+    name: "aes-128-ocb",
+    nid: 958,
+    blockSize: 16,
+    ivLength: 12,
+    keyLength: 16,
+    mode: "ocb",
+  },
+  {
+    name: "aes-192-ocb",
+    nid: 959,
+    blockSize: 16,
+    ivLength: 12,
+    keyLength: 24,
+    mode: "ocb",
+  },
+  {
+    name: "aes-256-ocb",
+    nid: 960,
+    blockSize: 16,
+    ivLength: 12,
+    keyLength: 32,
+    mode: "ocb",
+  },
+  {
     name: "des-ede3-cbc",
     nid: 44,
     blockSize: 8,
@@ -196,6 +244,62 @@ const cipherInfoTable: CipherInfoResult[] = [
     keyLength: 32,
     mode: "",
   },
+  {
+    name: "id-aes128-wrap",
+    nid: 788,
+    blockSize: 8,
+    ivLength: 8,
+    keyLength: 16,
+    mode: "wrap",
+  },
+  {
+    name: "id-aes192-wrap",
+    nid: 789,
+    blockSize: 8,
+    ivLength: 8,
+    keyLength: 24,
+    mode: "wrap",
+  },
+  {
+    name: "id-aes256-wrap",
+    nid: 790,
+    blockSize: 8,
+    ivLength: 8,
+    keyLength: 32,
+    mode: "wrap",
+  },
+  {
+    name: "id-aes128-wrap-pad",
+    nid: 897,
+    blockSize: 8,
+    ivLength: 4,
+    keyLength: 16,
+    mode: "wrap",
+  },
+  {
+    name: "id-aes192-wrap-pad",
+    nid: 900,
+    blockSize: 8,
+    ivLength: 4,
+    keyLength: 24,
+    mode: "wrap",
+  },
+  {
+    name: "id-aes256-wrap-pad",
+    nid: 903,
+    blockSize: 8,
+    ivLength: 4,
+    keyLength: 32,
+    mode: "wrap",
+  },
+  {
+    name: "des3-wrap",
+    nid: 246,
+    blockSize: 8,
+    ivLength: 0,
+    keyLength: 24,
+    mode: "wrap",
+  },
 ];
 
 const cipherInfoByName = new Map<string, CipherInfoResult>();
@@ -210,21 +314,57 @@ for (const info of cipherInfoTable) {
 cipherInfoByName.set("aes128", cipherInfoByName.get("aes-128-cbc")!);
 cipherInfoByName.set("aes192", cipherInfoByName.get("aes-192-cbc")!);
 cipherInfoByName.set("aes256", cipherInfoByName.get("aes-256-cbc")!);
+cipherInfoByName.set("aes128-wrap", cipherInfoByName.get("id-aes128-wrap")!);
+cipherInfoByName.set("aes192-wrap", cipherInfoByName.get("id-aes192-wrap")!);
+cipherInfoByName.set("aes256-wrap", cipherInfoByName.get("id-aes256-wrap")!);
+cipherInfoByName.set(
+  "aes128-wrap-pad",
+  cipherInfoByName.get("id-aes128-wrap-pad")!,
+);
+cipherInfoByName.set(
+  "aes192-wrap-pad",
+  cipherInfoByName.get("id-aes192-wrap-pad")!,
+);
+cipherInfoByName.set(
+  "aes256-wrap-pad",
+  cipherInfoByName.get("id-aes256-wrap-pad")!,
+);
+cipherInfoByName.set("aes-128-ccm", cipherInfoByName.get("id-aes128-ccm")!);
+cipherInfoByName.set("aes-192-ccm", cipherInfoByName.get("id-aes192-ccm")!);
+cipherInfoByName.set("aes-256-ccm", cipherInfoByName.get("id-aes256-ccm")!);
 
 // Ciphers actually supported by the runtime (subset of cipherInfoTable).
 const supportedCiphers = [
   "aes-128-ecb",
   "aes-128-cbc",
+  "aes-192-cbc",
   "aes-192-ecb",
   "aes-256-ecb",
   "aes-256-cbc",
   "aes-128-gcm",
+  "aes-128-ccm",
   "aes-256-gcm",
+  "aes-192-ccm",
+  "aes-256-ccm",
   "aes-128-ctr",
   "aes-192-ctr",
   "aes-256-ctr",
+  "aes128-wrap",
+  "aes192-wrap",
+  "aes256-wrap",
+  "id-aes128-wrap-pad",
+  "id-aes192-wrap-pad",
+  "id-aes256-wrap-pad",
+  "aes128-wrap-pad",
+  "aes192-wrap-pad",
+  "aes256-wrap-pad",
+  "des3-wrap",
+  "aes-128-ocb",
+  "aes-192-ocb",
+  "aes-256-ocb",
   "des-ede3-cbc",
   "aes128",
+  "aes192",
   "aes256",
   "chacha20-poly1305",
 ];
@@ -304,11 +444,26 @@ export function getCipherInfo(
     return undefined;
   }
 
-  if (ivLength !== undefined && info.ivLength !== ivLength) {
-    return undefined;
+  if (ivLength !== undefined) {
+    const mode = info.mode;
+    if (mode === "ccm") {
+      if (ivLength < 7 || ivLength > 13) {
+        return undefined;
+      }
+    } else if (mode === "ocb") {
+      if (ivLength < 1 || ivLength > 15) {
+        return undefined;
+      }
+    } else if (info.ivLength !== ivLength) {
+      return undefined;
+    }
   }
 
-  return { ...info };
+  return {
+    ...info,
+    ...(keyLength !== undefined ? { keyLength } : {}),
+    ...(ivLength !== undefined ? { ivLength } : {}),
+  };
 }
 
 let defaultEncoding = "buffer";

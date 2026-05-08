@@ -66,6 +66,7 @@ const {
   StringPrototypeSlice,
   StringPrototypeSplit,
   StringPrototypeStartsWith,
+  SymbolFor,
   TypeError,
 } = primordials;
 
@@ -329,6 +330,7 @@ function pathResolve(...args) {
 }
 
 const nativeModulePolyfill = new SafeMap();
+const kRefreshRequireState = SymbolFor("nodejs.zlib.refreshRequireState");
 
 const relativeResolveCache = ObjectCreate(null);
 let requireDepth = 0;
@@ -1481,6 +1483,9 @@ function loadNativeModule(_id, request) {
   if (modExports) {
     const nodeMod = new Module(request);
     nodeMod.exports = modExports;
+    if (typeof modExports[kRefreshRequireState] === "function") {
+      modExports[kRefreshRequireState]();
+    }
     nodeMod.loaded = true;
     nativeModulePolyfill.set(request, nodeMod);
     return nodeMod;

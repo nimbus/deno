@@ -9,11 +9,13 @@ const {
   encode,
 } = core;
 const {
+  SafeSet,
   SymbolSpecies,
 } = primordials;
 import {
   op_node_cipheriv_encrypt,
   op_node_cipheriv_final,
+  op_node_cipheriv_final_key_wrap,
   op_node_cipheriv_set_aad,
   op_node_cipheriv_take,
   op_node_create_cipheriv,
@@ -21,6 +23,7 @@ import {
   op_node_decipheriv_auth_tag,
   op_node_decipheriv_decrypt,
   op_node_decipheriv_final,
+  op_node_decipheriv_final_key_wrap,
   op_node_decipheriv_set_aad,
   op_node_export_secret_key,
   op_node_private_decrypt,
@@ -44,12 +47,18 @@ import type {
   BinaryLike,
   Encoding,
 } from "ext:deno_node/internal/crypto/types.ts";
-import { getDefaultEncoding } from "ext:deno_node/internal/crypto/util.ts";
 import {
+  getCipherInfo,
+  getDefaultEncoding,
+} from "ext:deno_node/internal/crypto/util.ts";
+import {
+  ERR_CRYPTO_UNKNOWN_CIPHER,
   ERR_INVALID_ARG_VALUE,
   ERR_UNKNOWN_ENCODING,
   NodeError,
+  NodeTypeError,
 } from "ext:deno_node/internal/errors.ts";
+import { createHash } from "ext:deno_node/internal/crypto/hash.ts";
 
 import {
   isAnyArrayBuffer,
@@ -59,13 +68,77 @@ import { ERR_CRYPTO_INVALID_STATE } from "ext:deno_node/internal/errors.ts";
 import { StringDecoder } from "node:string_decoder";
 import assert from "node:assert";
 import { normalizeEncoding } from "ext:deno_node/internal/util.mjs";
+import { validateString } from "ext:deno_node/internal/validators.mjs";
 
 const FastBuffer = Buffer[SymbolSpecies];
 
-function opensslError(code: string, reason: string): NodeError {
+function opensslError(
+  code: string,
+  reason: string,
+  message: string = reason,
+): NodeError {
   const err = new NodeError(code, reason);
+  err.message = message;
   (err as any).reason = reason;
   return err;
+}
+
+function invalidAuthTagLengthError(length: number): NodeTypeError {
+  return new NodeTypeError(
+    "ERR_CRYPTO_INVALID_AUTH_TAG",
+    `Invalid authentication tag length: ${length}`,
+  );
+}
+
+const KEY_WRAP_CIPHERS = new SafeSet([
+  "aes128-wrap",
+  "aes192-wrap",
+  "aes256-wrap",
+  "id-aes128-wrap",
+  "id-aes192-wrap",
+  "id-aes256-wrap",
+  "id-aes128-wrap-pad",
+  "id-aes192-wrap-pad",
+  "id-aes256-wrap-pad",
+  "aes128-wrap-pad",
+  "aes192-wrap-pad",
+  "aes256-wrap-pad",
+  "des3-wrap",
+]);
+
+function isKeyWrapCipher(cipher: string): boolean {
+  return KEY_WRAP_CIPHERS.has(cipher);
+}
+
+const BUFFERED_AEAD_CIPHERS = new SafeSet([
+  "aes-128-ccm",
+  "aes-192-ccm",
+  "aes-256-ccm",
+  "aes-128-ocb",
+  "aes-192-ocb",
+  "aes-256-ocb",
+]);
+
+function isBufferedAeadCipher(cipher: string): boolean {
+  return BUFFERED_AEAD_CIPHERS.has(cipher);
+}
+
+function isCcmCipher(cipher: string): boolean {
+  return cipher === "aes-128-ccm" || cipher === "aes-192-ccm" ||
+    cipher === "aes-256-ccm";
+}
+
+function isOcbCipher(cipher: string): boolean {
+  return cipher === "aes-128-ocb" || cipher === "aes-192-ocb" ||
+    cipher === "aes-256-ocb";
+}
+
+function getCcmMaxMessageSize(ivLength: number): number {
+  const exponent = 8 * (15 - ivLength);
+  if (exponent >= 53) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return (2 ** exponent) - 1;
 }
 
 export function isStringOrBuffer(
@@ -187,6 +260,60 @@ function toU8(
   return typeof input === "string" ? encode(input) : input;
 }
 
+function deriveLegacyCipherKeyAndIv(
+  cipher: string,
+  password: BinaryLike,
+): { key: Buffer; iv: Buffer | null } {
+  validateString(cipher, "cipher");
+  const cipherInfo = getCipherInfo(cipher);
+  if (cipherInfo == null) {
+    throw new TypeError("Unknown cipher");
+  }
+
+  const passwordBytes = Buffer.from(getArrayBufferOrView(password, "password"));
+  const requiredLength = cipherInfo.keyLength + cipherInfo.ivLength;
+  const digests: Buffer[] = [];
+  let generatedLength = 0;
+  let previous = Buffer.alloc(0);
+
+  while (generatedLength < requiredLength) {
+    const hash = createHash("md5");
+    if (previous.length > 0) {
+      hash.update(previous);
+    }
+    hash.update(passwordBytes);
+    previous = hash.digest();
+    digests.push(previous);
+    generatedLength += previous.length;
+  }
+
+  const material = Buffer.concat(digests, generatedLength);
+  return {
+    key: material.subarray(0, cipherInfo.keyLength),
+    iv: cipherInfo.ivLength === 0
+      ? null
+      : material.subarray(cipherInfo.keyLength, requiredLength),
+  };
+}
+
+export function LegacyCipher(
+  cipher: string,
+  password: BinaryLike,
+  options?: TransformOptions,
+) {
+  if (!(this instanceof LegacyCipher)) {
+    return new LegacyCipher(cipher, password, options);
+  }
+
+  const { key, iv } = deriveLegacyCipherKeyAndIv(cipher, password);
+  const instance = Cipheriv(cipher, key, iv, options);
+  Object.setPrototypeOf(instance, LegacyCipher.prototype);
+  return instance;
+}
+
+Object.setPrototypeOf(LegacyCipher.prototype, Cipheriv.prototype);
+Object.setPrototypeOf(LegacyCipher, Cipheriv);
+
 export function Cipheriv(
   cipher: string,
   key: CipherKey,
@@ -197,7 +324,29 @@ export function Cipheriv(
     return new Cipheriv(cipher, key, iv, options);
   }
 
+  if (getCipherInfo(cipher) == null) {
+    throw new ERR_CRYPTO_UNKNOWN_CIPHER();
+  }
+
+  const cipherInfo = getCipherInfo(cipher)!;
+  const ivBytes = toU8(iv);
   const authTagLength = getUIntOption(options, "authTagLength");
+  if (cipherInfo.mode === "ccm" && (ivBytes.length < 7 || ivBytes.length > 13)) {
+    throw new TypeError("Invalid initialization vector");
+  }
+  if (cipherInfo.mode === "ocb" && (ivBytes.length < 1 || ivBytes.length > 15)) {
+    throw new TypeError("Invalid initialization vector");
+  }
+  if (
+    cipher === "chacha20-poly1305" &&
+    authTagLength !== -1 &&
+    (authTagLength < 1 || authTagLength > 16)
+  ) {
+    throw invalidAuthTagLengthError(authTagLength);
+  }
+  if ((isCcmCipher(cipher) || isOcbCipher(cipher)) && authTagLength === -1) {
+    throw new TypeError(`authTagLength required for ${cipher}`);
+  }
 
   Transform.call(this, {
     transform(chunk, encoding, cb) {
@@ -216,9 +365,17 @@ export function Cipheriv(
   this._context = op_node_create_cipheriv(
     cipher,
     toU8(key),
-    toU8(iv),
+    ivBytes,
     authTagLength,
   );
+  this._isKeyWrapMode = isKeyWrapCipher(cipher);
+  this._keyWrapDone = false;
+  this._isBufferedAeadMode = isBufferedAeadCipher(cipher);
+  this._isCcmMode = cipherInfo.mode === "ccm";
+  this._isOcbMode = cipherInfo.mode === "ocb";
+  this._ccmPlaintextLength = undefined;
+  this._ccmBytesSeen = 0;
+  this._ivLength = ivBytes.length;
   this._needsBlockCache =
     !(cipher == "aes-128-gcm" || cipher == "aes-256-gcm" ||
       cipher == "aes-128-ctr" || cipher == "aes-192-ctr" ||
@@ -229,7 +386,7 @@ export function Cipheriv(
   this._decoder = undefined;
 
   if (this._context == 0) {
-    throw new TypeError("Unknown cipher");
+    throw new ERR_CRYPTO_UNKNOWN_CIPHER();
   }
 }
 
@@ -243,7 +400,52 @@ Cipheriv.prototype.final = function (
     throw new ERR_CRYPTO_INVALID_STATE("final");
   }
 
-  _lazyInitCipherDecoder(this, encoding);
+  if (this._isKeyWrapMode) {
+    if (this._keyWrapDone) {
+      this._finalized = true;
+      return encoding === "buffer" ? Buffer.alloc(0) : "";
+    }
+    const output = op_node_cipheriv_final_key_wrap(
+      this._context,
+      this._cache.cache,
+    );
+    this._finalized = true;
+    if (encoding !== "buffer") {
+      _lazyInitCipherDecoder(this, encoding);
+      return this._decoder!.end(output);
+    }
+    return Buffer.from(output);
+  }
+
+  if (this._isBufferedAeadMode) {
+    if (
+      this._isCcmMode &&
+      this._ccmPlaintextLength === undefined &&
+      this._ccmBytesSeen === 0
+    ) {
+      throw opensslError(
+        "ERR_OSSL_TAG_NOT_SET",
+        "tag not set",
+        "error:1C80007A:Provider routines::tag not set",
+      );
+    }
+    const output = Buffer.allocUnsafe(this._cache.cache.byteLength);
+    const maybeTag = op_node_cipheriv_final(
+      this._context,
+      false,
+      this._cache.cache,
+      output,
+    );
+    if (maybeTag) {
+      this._authTag = Buffer.from(maybeTag);
+    }
+    this._finalized = true;
+    if (encoding !== "buffer") {
+      _lazyInitCipherDecoder(this, encoding);
+      return this._decoder!.end(output);
+    }
+    return Buffer.from(output);
+  }
 
   const bs = this._blockSize;
   const buf = new FastBuffer(bs);
@@ -259,8 +461,9 @@ Cipheriv.prototype.final = function (
 
   if (!this._autoPadding && this._cache.cache.byteLength != bs) {
     throw opensslError(
-      "ERR_OSSL_EVP_WRONG_FINAL_BLOCK_LENGTH",
+      "ERR_OSSL_WRONG_FINAL_BLOCK_LENGTH",
       "wrong final block length",
+      "error:1C80006B:Provider routines::wrong final block length",
     );
   }
   const maybeTag = op_node_cipheriv_final(
@@ -277,6 +480,7 @@ Cipheriv.prototype.final = function (
 
   this._finalized = true;
   if (encoding !== "buffer") {
+    _lazyInitCipherDecoder(this, encoding);
     return this._decoder!.end(buf);
   }
 
@@ -292,14 +496,25 @@ Cipheriv.prototype.getAuthTag = function (): Buffer {
 
 Cipheriv.prototype.setAAD = function (
   buffer: ArrayBufferView,
-  _options?: {
+  options?: {
     plaintextLength: number;
   },
 ) {
   if (this._finalized) {
     throw new ERR_CRYPTO_INVALID_STATE("setAAD");
   }
-  op_node_cipheriv_set_aad(this._context, buffer);
+  let plaintextLength = -1;
+  if (this._isCcmMode) {
+    plaintextLength = getUIntOption(options, "plaintextLength");
+    if (plaintextLength === -1) {
+      throw new TypeError("options.plaintextLength required for CCM mode with AAD");
+    }
+    if (plaintextLength > getCcmMaxMessageSize(this._ivLength)) {
+      throw new TypeError("Invalid message length");
+    }
+    this._ccmPlaintextLength = plaintextLength;
+  }
+  op_node_cipheriv_set_aad(this._context, buffer, plaintextLength);
   return this;
 };
 
@@ -326,6 +541,42 @@ Cipheriv.prototype.update = function (
   // Match Node.js/OpenSSL behavior: reject inputs >= INT_MAX bytes
   if (buf.length >= 2 ** 31 - 1) {
     throw new Error("Trying to add data in unsupported state");
+  }
+
+  if (this._isKeyWrapMode) {
+    if (this._keyWrapDone) {
+      throw new ERR_CRYPTO_INVALID_STATE("update");
+    }
+    _lazyInitCipherDecoder(this, outputEncoding);
+    const output = Buffer.from(op_node_cipheriv_final_key_wrap(
+      this._context,
+      buf,
+    ));
+    this._keyWrapDone = true;
+    if (outputEncoding !== "buffer") {
+      return this._decoder!.write(output);
+    }
+    return output;
+  }
+
+  if (this._isBufferedAeadMode) {
+    if (this._isCcmMode) {
+      const nextLength = this._ccmBytesSeen + buf.length;
+      if (
+        nextLength > getCcmMaxMessageSize(this._ivLength) ||
+        (this._ccmPlaintextLength !== undefined &&
+          nextLength > this._ccmPlaintextLength)
+      ) {
+        throw new TypeError("Invalid message length");
+      }
+      this._ccmBytesSeen = nextLength;
+    }
+    this._cache.add(buf);
+    const output = Buffer.alloc(0);
+    if (outputEncoding !== "buffer") {
+      return "";
+    }
+    return output;
   }
 
   _lazyInitCipherDecoder(this, outputEncoding);
@@ -448,7 +699,29 @@ export function Decipheriv(
     return new Decipheriv(cipher, key, iv, options);
   }
 
+  if (getCipherInfo(cipher) == null) {
+    throw new ERR_CRYPTO_UNKNOWN_CIPHER();
+  }
+
+  const cipherInfo = getCipherInfo(cipher)!;
+  const ivBytes = toU8(iv);
   const authTagLength = getUIntOption(options, "authTagLength");
+  if (cipherInfo.mode === "ccm" && (ivBytes.length < 7 || ivBytes.length > 13)) {
+    throw new TypeError("Invalid initialization vector");
+  }
+  if (cipherInfo.mode === "ocb" && (ivBytes.length < 1 || ivBytes.length > 15)) {
+    throw new TypeError("Invalid initialization vector");
+  }
+  if (
+    cipher === "chacha20-poly1305" &&
+    authTagLength !== -1 &&
+    (authTagLength < 1 || authTagLength > 16)
+  ) {
+    throw invalidAuthTagLengthError(authTagLength);
+  }
+  if ((isCcmCipher(cipher) || isOcbCipher(cipher)) && authTagLength === -1) {
+    throw new TypeError(`authTagLength required for ${cipher}`);
+  }
 
   Transform.call(this, {
     transform(chunk, encoding, cb) {
@@ -468,9 +741,17 @@ export function Decipheriv(
   this._context = op_node_create_decipheriv(
     cipher,
     toU8(key),
-    toU8(iv),
+    ivBytes,
     authTagLength,
   );
+  this._isKeyWrapMode = isKeyWrapCipher(cipher);
+  this._keyWrapDone = false;
+  this._isBufferedAeadMode = isBufferedAeadCipher(cipher);
+  this._isCcmMode = cipherInfo.mode === "ccm";
+  this._isOcbMode = cipherInfo.mode === "ocb";
+  this._ccmPlaintextLength = undefined;
+  this._ccmBytesSeen = 0;
+  this._ivLength = ivBytes.length;
   this._needsBlockCache =
     !(cipher == "aes-128-gcm" || cipher == "aes-256-gcm" ||
       cipher == "aes-128-ctr" || cipher == "aes-192-ctr" ||
@@ -483,12 +764,30 @@ export function Decipheriv(
   this._decoder = undefined;
 
   if (this._context == 0) {
-    throw new TypeError("Unknown cipher");
+    throw new ERR_CRYPTO_UNKNOWN_CIPHER();
   }
 }
 
 Object.setPrototypeOf(Decipheriv.prototype, Transform.prototype);
 Object.setPrototypeOf(Decipheriv, Transform);
+
+export function LegacyDecipher(
+  cipher: string,
+  password: BinaryLike,
+  options?: TransformOptions,
+) {
+  if (!(this instanceof LegacyDecipher)) {
+    return new LegacyDecipher(cipher, password, options);
+  }
+
+  const { key, iv } = deriveLegacyCipherKeyAndIv(cipher, password);
+  const instance = Decipheriv(cipher, key, iv, options);
+  Object.setPrototypeOf(instance, LegacyDecipher.prototype);
+  return instance;
+}
+
+Object.setPrototypeOf(LegacyDecipher.prototype, Decipheriv.prototype);
+Object.setPrototypeOf(LegacyDecipher, Decipheriv);
 
 Decipheriv.prototype.final = function (
   encoding: string = getDefaultEncoding(),
@@ -497,7 +796,42 @@ Decipheriv.prototype.final = function (
     throw new ERR_CRYPTO_INVALID_STATE("final");
   }
 
-  _lazyInitDecipherDecoder(this, encoding);
+  if (this._isKeyWrapMode) {
+    if (this._keyWrapDone) {
+      this._finalized = true;
+      return encoding === "buffer" ? Buffer.alloc(0) : "";
+    }
+    const output = op_node_decipheriv_final_key_wrap(
+      this._context,
+      this._cache.cache,
+    );
+    this._finalized = true;
+    if (encoding !== "buffer") {
+      _lazyInitDecipherDecoder(this, encoding);
+      return this._decoder!.end(output);
+    }
+    return Buffer.from(output);
+  }
+
+  if (this._isBufferedAeadMode) {
+    if (!this._authTag) {
+      throw new ERR_CRYPTO_INVALID_STATE("final");
+    }
+    const output = Buffer.allocUnsafe(this._cache.cache.byteLength);
+    op_node_decipheriv_final(
+      this._context,
+      false,
+      this._cache.cache,
+      output,
+      this._authTag,
+    );
+    this._finalized = true;
+    if (encoding !== "buffer") {
+      _lazyInitDecipherDecoder(this, encoding);
+      return this._decoder!.end(output);
+    }
+    return Buffer.from(output);
+  }
 
   const bs = this._blockSize;
   let buf = new FastBuffer(bs);
@@ -515,8 +849,9 @@ Decipheriv.prototype.final = function (
   }
   if (this._cache.cache.byteLength != bs) {
     throw opensslError(
-      "ERR_OSSL_EVP_WRONG_FINAL_BLOCK_LENGTH",
+      "ERR_OSSL_WRONG_FINAL_BLOCK_LENGTH",
       "wrong final block length",
+      "error:1C80006B:Provider routines::wrong final block length",
     );
   }
 
@@ -524,14 +859,16 @@ Decipheriv.prototype.final = function (
     const padLen = buf.at(-1);
     if (padLen === 0 || padLen > bs) {
       throw opensslError(
-        "ERR_OSSL_EVP_BAD_DECRYPT",
+        "ERR_OSSL_BAD_DECRYPT",
         "bad decrypt",
+        "error:1C800064:Provider routines::bad decrypt",
       );
     }
     buf = buf.subarray(0, bs - padLen); // Padded in Pkcs7 mode
   }
   this._finalized = true;
   if (encoding !== "buffer") {
+    _lazyInitDecipherDecoder(this, encoding);
     return this._decoder!.end(buf);
   }
 
@@ -540,18 +877,31 @@ Decipheriv.prototype.final = function (
 
 Decipheriv.prototype.setAAD = function (
   buffer: ArrayBufferView,
-  _options?: {
+  options?: {
     plaintextLength: number;
   },
 ) {
   if (this._finalized) {
     throw new ERR_CRYPTO_INVALID_STATE("setAAD");
   }
-  op_node_decipheriv_set_aad(this._context, buffer);
+  let plaintextLength = -1;
+  if (this._isCcmMode) {
+    plaintextLength = getUIntOption(options, "plaintextLength");
+    if (plaintextLength === -1) {
+      throw new TypeError("options.plaintextLength required for CCM mode with AAD");
+    }
+    if (plaintextLength > getCcmMaxMessageSize(this._ivLength)) {
+      throw new TypeError("Invalid message length");
+    }
+    this._ccmPlaintextLength = plaintextLength;
+  }
+  op_node_decipheriv_set_aad(this._context, buffer, plaintextLength);
   return this;
 };
 
 let gcmShortTagDeprecationEmitted = false;
+const gcmShortTagDeprecationSupported =
+  Number.parseInt(process.versions.node.split(".")[0], 10) >= 22;
 
 Decipheriv.prototype.setAuthTag = function (
   buffer: BinaryLike,
@@ -563,6 +913,7 @@ Decipheriv.prototype.setAuthTag = function (
   // DEP0182: warn once per process when using a short GCM auth tag without
   // an explicit `authTagLength` option at decipher creation time.
   if (
+    gcmShortTagDeprecationSupported &&
     this._isGcmMode && this._authTagLength === -1 &&
     buffer.byteLength !== 16 && !gcmShortTagDeprecationEmitted
   ) {
@@ -604,6 +955,44 @@ Decipheriv.prototype.update = function (
   // Match Node.js/OpenSSL behavior: reject inputs >= INT_MAX bytes
   if (buf.length >= 2 ** 31 - 1) {
     throw new Error("Trying to add data in unsupported state");
+  }
+
+  if (this._isKeyWrapMode) {
+    if (this._keyWrapDone) {
+      throw new ERR_CRYPTO_INVALID_STATE("update");
+    }
+    _lazyInitDecipherDecoder(this, outputEncoding);
+    const output = Buffer.from(op_node_decipheriv_final_key_wrap(
+      this._context,
+      buf,
+    ));
+    this._keyWrapDone = true;
+
+    if (outputEncoding !== "buffer") {
+      return this._decoder!.write(output);
+    }
+
+    return output;
+  }
+
+  if (this._isBufferedAeadMode) {
+    if (this._isCcmMode) {
+      const nextLength = this._ccmBytesSeen + buf.length;
+      if (
+        nextLength > getCcmMaxMessageSize(this._ivLength) ||
+        (this._ccmPlaintextLength !== undefined &&
+          nextLength > this._ccmPlaintextLength)
+      ) {
+        throw new TypeError("Invalid message length");
+      }
+      this._ccmBytesSeen = nextLength;
+    }
+    this._cache.add(buf);
+    const output = Buffer.alloc(0);
+    if (outputEncoding !== "buffer") {
+      return "";
+    }
+    return output;
   }
 
   _lazyInitDecipherDecoder(this, outputEncoding);

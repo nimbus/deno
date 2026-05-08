@@ -349,10 +349,27 @@ impl PartialEq for RsaPssPrivateKey {
   }
 }
 
+fn asn1_positive_int_bytes(bytes: &[u8]) -> Vec<u8> {
+  let mut encoded = bytes.to_vec();
+  if encoded.first().is_some_and(|b| b & 0x80 != 0) {
+    encoded.insert(0, 0x00);
+  }
+  encoded
+}
+
+fn dh_asn1_int_eq(a: &asn1::Int, b: &asn1::Int) -> bool {
+  num_bigint_dig::BigUint::from_bytes_be(a.as_bytes())
+    == num_bigint_dig::BigUint::from_bytes_be(b.as_bytes())
+}
+
 fn dh_params_eq(a: &DhParameter, b: &DhParameter) -> bool {
-  let a_der = a.to_der().unwrap_or_default();
-  let b_der = b.to_der().unwrap_or_default();
-  a_der == b_der
+  dh_asn1_int_eq(&a.prime, &b.prime)
+    && dh_asn1_int_eq(&a.base, &b.base)
+    && match (&a.private_value_length, &b.private_value_length) {
+      (Some(a), Some(b)) => dh_asn1_int_eq(a, b),
+      (None, None) => true,
+      _ => false,
+    }
 }
 
 impl PartialEq for DhPublicKey {
@@ -1969,6 +1986,7 @@ impl AsymmetricPublicKey {
           AsymmetricPublicKey::Dh(key) => {
             // The public key in SPKI for DH must be a DER-encoded INTEGER
             let raw_key = key.key.clone().into_vec();
+            let raw_key = asn1_positive_int_bytes(&raw_key);
             let public_key_int = asn1::Int::new(&raw_key).unwrap();
             let public_key_der = public_key_int
               .to_der()
@@ -2299,6 +2317,7 @@ impl AsymmetricPrivateKey {
           AsymmetricPrivateKey::Dh(key) => {
             // The private key in PKCS#8 for DH must be a DER-encoded INTEGER
             let raw_key = key.key.clone().into_vec();
+            let raw_key = asn1_positive_int_bytes(&raw_key);
             let private_key_int = asn1::Int::new(&raw_key).unwrap();
             let private_key_der = private_key_int
               .to_der()
@@ -3055,13 +3074,10 @@ fn dh_group_generate(
   };
   // MODULUS arrays are big-endian u32 words. Convert to big-endian bytes
   // for ASN.1, matching the prime used during key generation.
-  // Prepend 0x00 if MSB is set, since ASN.1 integers are signed.
-  let mut prime_bytes: Vec<u8> =
-    prime.iter().flat_map(|x| x.to_be_bytes()).collect();
-  if prime_bytes.first().is_some_and(|b| b & 0x80 != 0) {
-    prime_bytes.insert(0, 0x00);
-  }
-  let gen_bytes = [generator as u8];
+  let prime_bytes = asn1_positive_int_bytes(
+    &prime.iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<_>>(),
+  );
+  let gen_bytes = asn1_positive_int_bytes(&[generator as u8]);
   let params = DhParameter {
     prime: asn1::Int::new(&prime_bytes).unwrap(),
     base: asn1::Int::new(&gen_bytes).unwrap(),
@@ -3118,8 +3134,10 @@ fn dh_generate(
       .skip_while(|&b| b == 0)
       .collect()
   };
+  let prime_bytes = asn1_positive_int_bytes(&prime.0.to_bytes_be());
+  let gen_bytes = asn1_positive_int_bytes(&gen_bytes);
   let params = DhParameter {
-    prime: asn1::Int::new(&prime.0.to_bytes_be()).unwrap(),
+    prime: asn1::Int::new(&prime_bytes).unwrap(),
     base: asn1::Int::new(&gen_bytes).unwrap(),
     private_value_length: None,
   };

@@ -35,7 +35,7 @@ import {
   validateInteger,
   validateUint32,
 } from "ext:deno_node/internal/validators.mjs";
-import { ERR_INCOMPATIBLE_OPTION_PAIR } from "ext:deno_node/internal/errors.ts";
+import { ERR_CRYPTO_SCRYPT_INVALID_PARAMETER } from "ext:deno_node/internal/errors.ts";
 import { getArrayBufferOrView } from "ext:deno_node/internal/crypto/keys.ts";
 
 type Opts = Partial<{
@@ -48,6 +48,27 @@ type Opts = Partial<{
   maxmem: number;
 }>;
 
+function invalidScryptParamsMemoryLimitError() {
+  const error = new Error("Invalid scrypt params: memory limit exceeded");
+  (error as Error & { code: string }).code = "ERR_CRYPTO_INVALID_SCRYPT_PARAMS";
+  return error;
+}
+
+function exceedsScryptMemoryLimit(
+  N: number,
+  r: number,
+  p: number,
+  maxmem: number,
+) {
+  if (N >= 2 ** (r * 16)) {
+    return true;
+  }
+  if (p > (2 ** 30 - 1) / r) {
+    return true;
+  }
+  return (128 * N * r) + (128 * r * p) > maxmem;
+}
+
 export function scryptSync(
   password: HASH_DATA,
   salt: HASH_DATA,
@@ -56,23 +77,28 @@ export function scryptSync(
 ): Buffer {
   const options = check(password, salt, keylen, _opts);
   const { N, r, p, maxmem } = options;
-  const blen = p * 128 * r;
-
-  if (32 * r * (N + 2) * 4 + blen > maxmem) {
-    throw new Error("exceeds max memory");
+  if (keylen === 0) {
+    return Buffer.alloc(0);
+  }
+  if (exceedsScryptMemoryLimit(N, r, p, maxmem)) {
+    throw invalidScryptParamsMemoryLimitError();
   }
 
   const buf = Buffer.alloc(keylen);
-  op_node_scrypt_sync(
-    password,
-    salt,
-    keylen,
-    Math.log2(N),
-    r,
-    p,
-    maxmem,
-    buf.buffer,
-  );
+  try {
+    op_node_scrypt_sync(
+      password,
+      salt,
+      keylen,
+      Math.log2(N),
+      r,
+      p,
+      Math.min(maxmem, 0xffffffff),
+      buf.buffer,
+    );
+  } catch {
+    throw new ERR_CRYPTO_SCRYPT_INVALID_PARAMETER();
+  }
 
   return buf;
 }
@@ -94,10 +120,13 @@ export function scrypt(
   const { N, r, p, maxmem } = options;
 
   validateFunction(cb, "callback");
+  if (keylen === 0) {
+    cb(null, Buffer.alloc(0));
+    return;
+  }
 
-  const blen = p * 128 * r;
-  if (32 * r * (N + 2) * 4 + blen > maxmem) {
-    throw new Error("exceeds max memory");
+  if (exceedsScryptMemoryLimit(N, r, p, maxmem)) {
+    throw invalidScryptParamsMemoryLimitError();
   }
 
   op_node_scrypt_async(
@@ -107,12 +136,12 @@ export function scrypt(
     Math.log2(N),
     r,
     p,
-    maxmem,
+    Math.min(maxmem, 0xffffffff),
   ).then(
     (buf: Uint8Array) => {
       cb(null, Buffer.from(buf.buffer));
     },
-  ).catch((err: unknown) => cb(err));
+  ).catch(() => cb(new ERR_CRYPTO_SCRYPT_INVALID_PARAMETER()));
 }
 
 const defaults = {
@@ -135,7 +164,7 @@ function check(password, salt, keylen, options) {
       validateUint32(N, "N");
     }
     if (options.cost !== undefined) {
-      if (hasN) throw new ERR_INCOMPATIBLE_OPTION_PAIR("N", "cost");
+      if (hasN) throw new ERR_CRYPTO_SCRYPT_INVALID_PARAMETER();
       N = options.cost;
       validateUint32(N, "cost");
     }
@@ -145,7 +174,7 @@ function check(password, salt, keylen, options) {
       validateUint32(r, "r");
     }
     if (options.blockSize !== undefined) {
-      if (hasR) throw new ERR_INCOMPATIBLE_OPTION_PAIR("r", "blockSize");
+      if (hasR) throw new ERR_CRYPTO_SCRYPT_INVALID_PARAMETER();
       r = options.blockSize;
       validateUint32(r, "blockSize");
     }
@@ -155,7 +184,7 @@ function check(password, salt, keylen, options) {
       validateUint32(p, "p");
     }
     if (options.parallelization !== undefined) {
-      if (hasP) throw new ERR_INCOMPATIBLE_OPTION_PAIR("p", "parallelization");
+      if (hasP) throw new ERR_CRYPTO_SCRYPT_INVALID_PARAMETER();
       p = options.parallelization;
       validateUint32(p, "parallelization");
     }
@@ -170,9 +199,7 @@ function check(password, salt, keylen, options) {
   }
 
   if (N < 2 || (N & (N - 1)) !== 0) {
-    throw new Error(
-      "Invalid scrypt param: N must be a power of 2 and greater than 0",
-    );
+    throw new ERR_CRYPTO_SCRYPT_INVALID_PARAMETER();
   }
 
   return { password, salt, keylen, N, r, p, maxmem };

@@ -101,11 +101,27 @@ impl TTY {
     fd: i32,
     op_state: &mut deno_core::OpState,
   ) -> (Self, i32) {
+    let Some(loop_box) = op_state.try_borrow::<Box<uv_loop_t>>() else {
+      return (
+        Self {
+          base: LibUvStreamWrap::new(
+            HandleWrap::create(
+              AsyncWrap::create(op_state, ProviderType::TtyWrap as i32),
+              None,
+            ),
+            fd,
+            std::ptr::null(),
+          ),
+          handle: None,
+        },
+        UV_EINVAL,
+      );
+    };
+
     // todo: this should really not be a Box<uv_loop_t> because of uniqueness guarantees.
     // instead it should be a custom wrapper around a raw pointer
     // right now this is most likely ub
-    let loop_ = &**op_state.borrow::<Box<uv_loop_t>>() as *const uv_loop_t
-      as *mut uv_loop_t;
+    let loop_ = &**loop_box as *const uv_loop_t as *mut uv_loop_t;
 
     let tty = OwnedPtr::from_box(Box::<uv_tty_t>::new_uninit());
 

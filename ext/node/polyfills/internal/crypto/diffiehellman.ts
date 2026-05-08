@@ -5,6 +5,7 @@
 // deno-lint-ignore-file prefer-primordials
 
 import {
+  op_node_check_prime_bytes,
   op_node_dh_compute_secret,
   op_node_dh_keys_generate_and_export,
   op_node_diffie_hellman,
@@ -21,6 +22,8 @@ import {
 } from "ext:deno_node/internal/util/types.ts";
 import {
   ERR_CRYPTO_ECDH_INVALID_FORMAT,
+  ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY,
+  ERR_CRYPTO_INCOMPATIBLE_KEY,
   ERR_CRYPTO_UNKNOWN_DH_GROUP,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
@@ -51,8 +54,141 @@ import {
   KeyObject,
 } from "ext:deno_node/internal/crypto/keys.ts";
 import type { BufferEncoding } from "ext:deno_node/_global.d.ts";
+import { crypto as cryptoConstants } from "ext:deno_node/internal_binding/constants.ts";
 
 const DH_GENERATOR = 2;
+const DH_PRIME_CHECKS = 20;
+
+function isKnownDhGroupPrime(prime: Buffer): boolean {
+  return DH_GROUP_NAMES.some((name) => {
+    const words = DH_GROUPS[name].prime;
+    if (prime.length !== words.length * 4) {
+      return false;
+    }
+
+    for (let i = 0; i < words.length; i++) {
+      if (prime.readUInt32BE(i * 4) !== words[i]) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
+
+function bigintToUnsignedBuffer(value: bigint): Buffer {
+  if (value === 0n) {
+    return Buffer.from([0]);
+  }
+
+  let hex = value.toString(16);
+  if (hex.length % 2 !== 0) {
+    hex = `0${hex}`;
+  }
+  return Buffer.from(hex, "hex");
+}
+
+function computeDhVerifyError(prime: Buffer): number {
+  if (isKnownDhGroupPrime(prime)) {
+    return 0;
+  }
+
+  let verifyError = 0;
+  if (!op_node_check_prime_bytes(prime, DH_PRIME_CHECKS)) {
+    verifyError |= cryptoConstants.DH_CHECK_P_NOT_PRIME;
+  }
+
+  const primeHex = prime.toString("hex");
+  const primeValue = BigInt(`0x${primeHex.length === 0 ? "0" : primeHex}`);
+  if (primeValue <= 2n || (primeValue & 1n) === 0n) {
+    return verifyError | cryptoConstants.DH_CHECK_P_NOT_SAFE_PRIME;
+  }
+
+  const safePrimeValue = (primeValue - 1n) >> 1n;
+  return op_node_check_prime_bytes(
+    bigintToUnsignedBuffer(safePrimeValue),
+    DH_PRIME_CHECKS,
+  )
+    ? verifyError
+    : verifyError | cryptoConstants.DH_CHECK_P_NOT_SAFE_PRIME;
+}
+
+function normalizeDiffieHellmanError(error: unknown): Error {
+  if (error instanceof TypeError && error.message === "DH parameters mismatch") {
+    return new NodeError(
+      "ERR_OSSL_MISMATCHING_DOMAIN_PARAMETERS",
+      "error:1C8000CB:Provider routines::mismatching domain parameters",
+    );
+  }
+  return error as Error;
+}
+
+function encodeBuffer(
+  buffer: Buffer,
+  encoding?: BinaryToTextEncoding,
+): Buffer | string {
+  if (encoding && encoding !== "buffer") {
+    return buffer.toString(encoding);
+  }
+  return buffer;
+}
+
+function getEcdhFormat(format?: ECDHKeyFormat): {
+  compressed: boolean;
+  hybrid: boolean;
+} {
+  if (format === undefined || format === "uncompressed") {
+    return { compressed: false, hybrid: false };
+  }
+  if (format === "compressed") {
+    return { compressed: true, hybrid: false };
+  }
+  if (format === "hybrid") {
+    return { compressed: false, hybrid: true };
+  }
+  throw new ERR_CRYPTO_ECDH_INVALID_FORMAT(format);
+}
+
+function validateStatelessDiffieHellmanParameters(
+  privateKey: KeyObject,
+  publicKey: KeyObject,
+): void {
+  if (
+    privateKey.asymmetricKeyType === "x448" &&
+    publicKey.asymmetricKeyType === "x25519"
+  ) {
+    throw new ERR_CRYPTO_INCOMPATIBLE_KEY(
+      "key types for Diffie-Hellman",
+      "x448 and x25519",
+    );
+  }
+  if (
+    privateKey.asymmetricKeyType === "x25519" &&
+    publicKey.asymmetricKeyType === "x448"
+  ) {
+    throw new ERR_CRYPTO_INCOMPATIBLE_KEY(
+      "key types for Diffie-Hellman",
+      "x25519 and x448",
+    );
+  }
+  if (
+    privateKey.asymmetricKeyType === "ec" &&
+    publicKey.asymmetricKeyType === "ec"
+  ) {
+    const privateCurve = privateKey.asymmetricKeyDetails?.namedCurve;
+    const publicCurve = publicKey.asymmetricKeyDetails?.namedCurve;
+    if (
+      privateCurve !== undefined &&
+      publicCurve !== undefined &&
+      privateCurve !== publicCurve
+    ) {
+      throw new NodeError(
+        "ERR_OSSL_MISMATCHING_DOMAIN_PARAMETERS",
+        "error:1C8000CB:Provider routines::mismatching domain parameters",
+      );
+    }
+  }
+}
 
 export function DiffieHellman(
   sizeOrKey: number | string | ArrayBufferView,
@@ -136,8 +272,11 @@ export class DiffieHellmanImpl {
         );
       }
 
-      this.#prime = Buffer.from(
-        op_node_gen_prime(this.#primeLength, false, null, null).buffer,
+      const knownPrime = (!generator || generator === DH_GENERATOR)
+        ? getKnownDhGroupPrimeByBitLength(this.#primeLength)
+        : undefined;
+      this.#prime = knownPrime ?? Buffer.from(
+        op_node_gen_prime(this.#primeLength, true, null, null).buffer,
       );
     }
 
@@ -176,8 +315,7 @@ export class DiffieHellmanImpl {
 
     this.#checkGenerator();
 
-    // TODO(lev): actually implement this value
-    this.verifyError = 0;
+    this.verifyError = computeDhVerifyError(this.#prime);
   }
 
   #checkGenerator(): number {
@@ -1247,6 +1385,38 @@ const DH_GROUPS = {
   },
 };
 
+function getDhGroupPrimeBuffer(name: string): Buffer {
+  const words = DH_GROUPS[name].prime;
+  const buf = Buffer.alloc(words.length * 4);
+  for (let i = 0; i < words.length; i++) {
+    buf.writeUInt32BE(words[i], i * 4);
+  }
+  return buf;
+}
+
+function getKnownDhGroupPrimeByBitLength(bitLength: number): Buffer | undefined {
+  switch (bitLength) {
+    case 768:
+      return getDhGroupPrimeBuffer("modp1");
+    case 1024:
+      return getDhGroupPrimeBuffer("modp2");
+    case 1536:
+      return getDhGroupPrimeBuffer("modp5");
+    case 2048:
+      return getDhGroupPrimeBuffer("modp14");
+    case 3072:
+      return getDhGroupPrimeBuffer("modp15");
+    case 4096:
+      return getDhGroupPrimeBuffer("modp16");
+    case 6144:
+      return getDhGroupPrimeBuffer("modp17");
+    case 8192:
+      return getDhGroupPrimeBuffer("modp18");
+    default:
+      return undefined;
+  }
+}
+
 DiffieHellman.prototype = DiffieHellmanImpl.prototype;
 
 export function DiffieHellmanGroup(name: string) {
@@ -1261,16 +1431,11 @@ export class DiffieHellmanGroupImpl {
     if (!DH_GROUP_NAMES.includes(name)) {
       throw new ERR_CRYPTO_UNKNOWN_DH_GROUP();
     }
-    const words = DH_GROUPS[name].prime;
-    const buf = Buffer.alloc(words.length * 4);
-    for (let i = 0; i < words.length; i++) {
-      buf.writeUInt32BE(words[i], i * 4);
-    }
     this.#diffiehellman = new DiffieHellmanImpl(
-      buf,
+      getDhGroupPrimeBuffer(name),
       DH_GROUPS[name].generator,
     );
-    this.verifyError = 0;
+    this.verifyError = this.#diffiehellman.verifyError;
   }
 
   computeSecret(otherPublicKey: ArrayBufferView): Buffer;
@@ -1341,6 +1506,8 @@ export class ECDHImpl {
   #curve: EllipticCurve; // the selected curve
   #privbuf: Buffer; // the private key
   #pubbuf: Buffer; // the public key
+  #hasPrivateKey = false;
+  #hasPublicKey = false;
 
   constructor(curve: string) {
     validateString(curve, "curve");
@@ -1365,18 +1532,7 @@ export class ECDHImpl {
     validateString(curve, "curve");
     const buf = getArrayBufferOrView(key, "key", inputEncoding);
 
-    let compress: boolean;
-    if (format) {
-      if (format === "compressed") {
-        compress = true;
-      } else if (format === "hybrid" || format === "uncompressed") {
-        compress = false;
-      } else {
-        throw new ERR_CRYPTO_ECDH_INVALID_FORMAT(format);
-      }
-    } else {
-      compress = false;
-    }
+    const { compressed: compress, hybrid } = getEcdhFormat(format);
 
     let result;
     try {
@@ -1390,7 +1546,7 @@ export class ECDHImpl {
       throw new Error("Failed to convert Buffer to EC_POINT");
     }
 
-    if (format === "hybrid") {
+    if (hybrid) {
       // Hybrid format: same as uncompressed but first byte is 06 or 07
       // Get compressed form to determine parity
       const compressedBuf = Buffer.from(
@@ -1423,19 +1579,58 @@ export class ECDHImpl {
   ): string;
   computeSecret(
     otherPublicKey: ArrayBufferView | string,
-    _inputEncoding?: BinaryToTextEncoding,
-    _outputEncoding?: BinaryToTextEncoding,
+    inputEncoding?: BinaryToTextEncoding,
+    outputEncoding?: BinaryToTextEncoding,
   ): Buffer | string {
     const secretBuf = Buffer.alloc(this.#curve.sharedSecretSize);
-
-    op_node_ecdh_compute_secret(
-      this.#curve.name,
-      this.#privbuf,
+    const publicKey = getArrayBufferOrView(
       otherPublicKey,
-      secretBuf,
+      "key",
+      inputEncoding,
     );
 
-    return secretBuf;
+    if (this.#hasPrivateKey && this.#hasPublicKey) {
+      try {
+        const derivedPublicKey = Buffer.alloc(this.#curve.publicKeySize);
+        op_node_ecdh_compute_public_key(
+          this.#curve.name,
+          this.#privbuf,
+          derivedPublicKey,
+        );
+        const currentPublicKey = Buffer.from(op_node_ecdh_encode_pubkey(
+          this.#curve.name,
+          this.#pubbuf,
+          false,
+        ));
+        if (!derivedPublicKey.equals(currentPublicKey)) {
+          throw new Error("Invalid key pair");
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message === "Invalid key pair") {
+          throw error;
+        }
+        if (error instanceof TypeError && error.message === "bad private key") {
+          throw new Error("Invalid key pair");
+        }
+        throw error;
+      }
+    }
+
+    try {
+      op_node_ecdh_compute_secret(
+        this.#curve.name,
+        this.#privbuf,
+        publicKey,
+        secretBuf,
+      );
+    } catch (error) {
+      if (error instanceof TypeError && error.message === "bad public key") {
+        throw new ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY();
+      }
+      throw error;
+    }
+
+    return encodeBuffer(secretBuf, outputEncoding);
   }
 
   generateKeys(): Buffer;
@@ -1444,8 +1639,9 @@ export class ECDHImpl {
     encoding?: BinaryToTextEncoding,
     format: ECDHKeyFormat = "uncompressed",
   ): Buffer | string {
+    const { compressed } = getEcdhFormat(format);
     this.#pubbuf = Buffer.alloc(
-      format == "compressed"
+      compressed
         ? this.#curve.publicKeySizeCompressed
         : this.#curve.publicKeySize,
     );
@@ -1453,22 +1649,21 @@ export class ECDHImpl {
       this.#curve.name,
       this.#pubbuf,
       this.#privbuf,
-      format,
+      compressed ? "compressed" : "uncompressed",
     );
+    this.#hasPrivateKey = true;
+    this.#hasPublicKey = true;
 
-    if (encoding !== undefined) {
-      return this.#pubbuf.toString(encoding);
-    }
-    return this.#pubbuf;
+    return encodeBuffer(this.#pubbuf, encoding);
   }
 
   getPrivateKey(): Buffer;
   getPrivateKey(encoding: BinaryToTextEncoding): string;
   getPrivateKey(encoding?: BinaryToTextEncoding): Buffer | string {
-    if (encoding !== undefined) {
-      return this.#privbuf.toString(encoding);
+    if (!this.#hasPrivateKey) {
+      throw new Error("Failed to get ECDH private key");
     }
-    return this.#privbuf;
+    return encodeBuffer(this.#privbuf, encoding);
   }
 
   getPublicKey(): Buffer;
@@ -1477,12 +1672,16 @@ export class ECDHImpl {
     encoding?: BinaryToTextEncoding,
     format: ECDHKeyFormat = "uncompressed",
   ): Buffer | string {
+    if (!this.#hasPublicKey) {
+      throw new Error("Failed to get ECDH public key");
+    }
+    const { compressed, hybrid } = getEcdhFormat(format);
     const pubbuf = Buffer.from(op_node_ecdh_encode_pubkey(
       this.#curve.name,
       this.#pubbuf,
-      format === "compressed",
+      compressed,
     ));
-    if (format === "hybrid") {
+    if (hybrid) {
       const compressedBuf = Buffer.from(op_node_ecdh_encode_pubkey(
         this.#curve.name,
         this.#pubbuf,
@@ -1490,10 +1689,7 @@ export class ECDHImpl {
       ));
       pubbuf[0] = compressedBuf[0] + 4;
     }
-    if (encoding !== undefined) {
-      return pubbuf.toString(encoding);
-    }
-    return pubbuf;
+    return encodeBuffer(pubbuf, encoding);
   }
 
   setPrivateKey(privateKey: ArrayBufferView): void;
@@ -1502,21 +1698,30 @@ export class ECDHImpl {
     privateKey: ArrayBufferView | string,
     encoding?: BinaryToTextEncoding,
   ): Buffer | string {
-    this.#privbuf = typeof privateKey === "string"
+    const nextPrivateKey = typeof privateKey === "string"
       ? Buffer.from(privateKey, encoding)
       : Buffer.from(privateKey);
-    this.#pubbuf = Buffer.alloc(this.#curve.publicKeySize);
+    const nextPublicKey = Buffer.alloc(this.#curve.publicKeySize);
 
-    op_node_ecdh_compute_public_key(
-      this.#curve.name,
-      this.#privbuf,
-      this.#pubbuf,
-    );
-
-    if (encoding !== undefined) {
-      return this.#pubbuf.toString(encoding);
+    try {
+      op_node_ecdh_compute_public_key(
+        this.#curve.name,
+        nextPrivateKey,
+        nextPublicKey,
+      );
+    } catch (error) {
+      if (error instanceof TypeError && error.message === "bad private key") {
+        throw new Error("Private key is not valid for specified curve");
+      }
+      throw error;
     }
-    return this.#pubbuf;
+
+    this.#privbuf = nextPrivateKey;
+    this.#pubbuf = nextPublicKey;
+    this.#hasPrivateKey = true;
+    this.#hasPublicKey = true;
+
+    return encodeBuffer(this.#pubbuf, encoding);
   }
 
   setPublicKey(publicKey: ArrayBufferView): void;
@@ -1525,9 +1730,16 @@ export class ECDHImpl {
     publicKey: ArrayBufferView | string,
     encoding?: BinaryToTextEncoding,
   ): void {
-    this.#pubbuf = typeof publicKey === "string"
+    const nextPublicKey = typeof publicKey === "string"
       ? Buffer.from(publicKey, encoding)
       : Buffer.from(publicKey);
+    try {
+      op_node_ecdh_encode_pubkey(this.#curve.name, nextPublicKey, false);
+    } catch {
+      throw new Error("Failed to convert Buffer to EC_POINT");
+    }
+    this.#pubbuf = nextPublicKey;
+    this.#hasPublicKey = true;
   }
 }
 
@@ -1563,6 +1775,10 @@ export function diffieHellman(
 
   if (callback) {
     try {
+      validateStatelessDiffieHellmanParameters(
+        options.privateKey,
+        options.publicKey,
+      );
       const privateKey = getKeyObjectHandle(
         options.privateKey,
         kConsumePrivate,
@@ -1571,15 +1787,23 @@ export function diffieHellman(
       const bytes = op_node_diffie_hellman(privateKey, publicKey);
       callback(null, Buffer.from(bytes));
     } catch (err) {
-      callback(err as Error);
+      callback(normalizeDiffieHellmanError(err));
     }
     return;
   }
 
+  validateStatelessDiffieHellmanParameters(
+    options.privateKey,
+    options.publicKey,
+  );
   const privateKey = getKeyObjectHandle(options.privateKey, kConsumePrivate);
   const publicKey = getKeyObjectHandle(options.publicKey, kConsumePublic);
-  const bytes = op_node_diffie_hellman(privateKey, publicKey);
-  return Buffer.from(bytes);
+  try {
+    const bytes = op_node_diffie_hellman(privateKey, publicKey);
+    return Buffer.from(bytes);
+  } catch (err) {
+    throw normalizeDiffieHellmanError(err);
+  }
 }
 
 export default {

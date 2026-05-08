@@ -30,6 +30,7 @@ const {
 } = primordials;
 import {
   emitAfter,
+  emitAfterHooksOnly,
   emitBefore,
   emitDestroy,
   emitInit,
@@ -195,7 +196,22 @@ Timeout.prototype[createTimer] = function () {
       const oldContext = getAsyncContext();
       try {
         setAsyncContext(asyncContext);
-        return invokeCallback();
+        const hooksEnabledAtStart = enabledHooksExist();
+        if (hooksEnabledAtStart) {
+          emitBefore(asyncId, triggerAsyncId, self);
+        }
+        const ret = invokeCallback();
+        const hooksEnabledAtEnd = enabledHooksExist();
+        if (hooksEnabledAtStart) {
+          emitAfter(asyncId);
+        } else if (hooksEnabledAtEnd) {
+          emitAfterHooksOnly(asyncId);
+        }
+        if (!self._repeat && !self._asyncDestroyed && hooksEnabledAtEnd) {
+          self._asyncDestroyed = true;
+          emitDestroy(asyncId);
+        }
+        return ret;
       } finally {
         setAsyncContext(oldContext);
       }

@@ -32,6 +32,20 @@ const {
 let optionsMap: Map<string, { value: string }>;
 const dummyOptions = new SafeMap<string, { value: string }>();
 let warnOnAllowUnauthorized = true;
+let cachedNodeOptions: string | undefined;
+
+function getCurrentNodeOptions() {
+  let nodeOptions = globalThis.process?.env?.NODE_OPTIONS;
+  if (nodeOptions == null) {
+    try {
+      nodeOptions = Deno.env.get("NODE_OPTIONS") ?? nodeOptions;
+    } catch {
+      // Embedded runtimes may not expose Deno.env consistently; fall back to
+      // the Node-style process env view in that case.
+    }
+  }
+  return nodeOptions;
+}
 
 function getOptionsFromBinding() {
   // If Deno.build is not defined, this is in warmup phase.
@@ -39,8 +53,10 @@ function getOptionsFromBinding() {
     return dummyOptions;
   }
 
-  if (!optionsMap) {
+  const currentNodeOptions = getCurrentNodeOptions();
+  if (!optionsMap || cachedNodeOptions !== currentNodeOptions) {
     ({ options: optionsMap } = getOptions());
+    cachedNodeOptions = currentNodeOptions;
   }
 
   return optionsMap;

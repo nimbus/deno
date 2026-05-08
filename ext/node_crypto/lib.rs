@@ -63,6 +63,7 @@ deno_core::extension!(
     op_node_check_prime,
     op_node_cipheriv_encrypt,
     op_node_cipheriv_final,
+    op_node_cipheriv_final_key_wrap,
     op_node_cipheriv_set_aad,
     op_node_cipheriv_take,
     op_node_create_cipheriv,
@@ -70,6 +71,7 @@ deno_core::extension!(
     op_node_create_hash,
     op_node_decipheriv_decrypt,
     op_node_decipheriv_final,
+    op_node_decipheriv_final_key_wrap,
     op_node_decipheriv_set_aad,
     op_node_decipheriv_auth_tag,
     op_node_dh_compute_secret,
@@ -558,12 +560,18 @@ pub fn op_node_cipheriv_set_aad(
   state: &mut OpState,
   #[smi] rid: u32,
   #[buffer] aad: &[u8],
+  #[smi] plaintext_length: i32,
 ) -> bool {
   let context = match state.resource_table.get::<cipher::CipherContext>(rid) {
     Ok(context) => context,
     Err(_) => return false,
   };
-  context.set_aad(aad);
+  let plaintext_length = if plaintext_length == -1 {
+    None
+  } else {
+    Some(plaintext_length as usize)
+  };
+  context.set_aad(aad, plaintext_length);
   true
 }
 
@@ -609,6 +617,19 @@ pub fn op_node_cipheriv_take(
   Ok(context.take_tag().map(Into::into))
 }
 
+#[op2]
+#[buffer]
+pub fn op_node_cipheriv_final_key_wrap(
+  state: &mut OpState,
+  #[smi] rid: u32,
+  #[buffer] input: &[u8],
+) -> Result<Box<[u8]>, cipher::CipherContextError> {
+  let context = state.resource_table.take::<cipher::CipherContext>(rid)?;
+  let context = Rc::try_unwrap(context)
+    .map_err(|_| cipher::CipherContextError::ContextInUse)?;
+  context.final_key_wrap(input).map(Into::into)
+}
+
 #[op2(fast)]
 #[smi]
 pub fn op_node_create_decipheriv(
@@ -644,12 +665,18 @@ pub fn op_node_decipheriv_set_aad(
   state: &mut OpState,
   #[smi] rid: u32,
   #[buffer] aad: &[u8],
+  #[smi] plaintext_length: i32,
 ) -> bool {
   let context = match state.resource_table.get::<cipher::DecipherContext>(rid) {
     Ok(context) => context,
     Err(_) => return false,
   };
-  context.set_aad(aad);
+  let plaintext_length = if plaintext_length == -1 {
+    None
+  } else {
+    Some(plaintext_length as usize)
+  };
+  context.set_aad(aad, plaintext_length);
   true
 }
 
@@ -681,6 +708,19 @@ pub fn op_node_decipheriv_final(
   let context = Rc::try_unwrap(context)
     .map_err(|_| cipher::DecipherContextError::ContextInUse)?;
   context.r#final(auto_pad, input, output, auth_tag)
+}
+
+#[op2]
+#[buffer]
+pub fn op_node_decipheriv_final_key_wrap(
+  state: &mut OpState,
+  #[smi] rid: u32,
+  #[buffer] input: &[u8],
+) -> Result<Box<[u8]>, cipher::DecipherContextError> {
+  let context = state.resource_table.take::<cipher::DecipherContext>(rid)?;
+  let context = Rc::try_unwrap(context)
+    .map_err(|_| cipher::DecipherContextError::ContextInUse)?;
+  context.final_key_wrap(input).map(Into::into)
 }
 
 #[op2]
@@ -950,12 +990,13 @@ fn scrypt(
   _maxmem: u32,
   output_buffer: &mut [u8],
 ) -> Result<(), JsErrorBox> {
+  let params_output_len = keylen.clamp(10, 64) as usize;
   // Construct Params
   let params = scrypt::Params::new(
     cost as u8,
     block_size,
     parallelization,
-    keylen as usize,
+    params_output_len,
   )
   .map_err(|_| JsErrorBox::generic("Invalid scrypt param"))?;
 
@@ -1196,12 +1237,13 @@ pub fn op_node_ecdh_compute_secret(
         elliptic_curve::PublicKey::<k256::Secp256k1>::from_sec1_bytes(
           their_pub,
         )
-        .expect("bad public key");
+        .map_err(|_| JsErrorBox::type_error("bad public key"))?;
       let this_private_key =
         elliptic_curve::SecretKey::<k256::Secp256k1>::from_slice(
-          &this_priv.expect("must supply private key"),
+          &this_priv
+            .ok_or_else(|| JsErrorBox::type_error("must supply private key"))?,
         )
-        .expect("bad private key");
+        .map_err(|_| JsErrorBox::type_error("bad private key"))?;
       let shared_secret = elliptic_curve::ecdh::diffie_hellman(
         this_private_key.to_nonzero_scalar(),
         their_public_key.as_affine(),
@@ -1211,11 +1253,12 @@ pub fn op_node_ecdh_compute_secret(
     "prime256v1" | "secp256r1" => {
       let their_public_key =
         elliptic_curve::PublicKey::<NistP256>::from_sec1_bytes(their_pub)
-          .expect("bad public key");
+          .map_err(|_| JsErrorBox::type_error("bad public key"))?;
       let this_private_key = elliptic_curve::SecretKey::<NistP256>::from_slice(
-        &this_priv.expect("must supply private key"),
+        &this_priv
+          .ok_or_else(|| JsErrorBox::type_error("must supply private key"))?,
       )
-      .expect("bad private key");
+      .map_err(|_| JsErrorBox::type_error("bad private key"))?;
       let shared_secret = elliptic_curve::ecdh::diffie_hellman(
         this_private_key.to_nonzero_scalar(),
         their_public_key.as_affine(),
@@ -1225,11 +1268,12 @@ pub fn op_node_ecdh_compute_secret(
     "secp384r1" => {
       let their_public_key =
         elliptic_curve::PublicKey::<NistP384>::from_sec1_bytes(their_pub)
-          .expect("bad public key");
+          .map_err(|_| JsErrorBox::type_error("bad public key"))?;
       let this_private_key = elliptic_curve::SecretKey::<NistP384>::from_slice(
-        &this_priv.expect("must supply private key"),
+        &this_priv
+          .ok_or_else(|| JsErrorBox::type_error("must supply private key"))?,
       )
-      .expect("bad private key");
+      .map_err(|_| JsErrorBox::type_error("bad private key"))?;
       let shared_secret = elliptic_curve::ecdh::diffie_hellman(
         this_private_key.to_nonzero_scalar(),
         their_public_key.as_affine(),
@@ -1254,11 +1298,12 @@ pub fn op_node_ecdh_compute_secret(
     "secp224r1" => {
       let their_public_key =
         elliptic_curve::PublicKey::<NistP224>::from_sec1_bytes(their_pub)
-          .expect("bad public key");
+          .map_err(|_| JsErrorBox::type_error("bad public key"))?;
       let this_private_key = elliptic_curve::SecretKey::<NistP224>::from_slice(
-        &this_priv.expect("must supply private key"),
+        &this_priv
+          .ok_or_else(|| JsErrorBox::type_error("must supply private key"))?,
       )
-      .expect("bad private key");
+      .map_err(|_| JsErrorBox::type_error("bad private key"))?;
       let shared_secret = elliptic_curve::ecdh::diffie_hellman(
         this_private_key.to_nonzero_scalar(),
         their_public_key.as_affine(),
@@ -1275,45 +1320,46 @@ pub fn op_node_ecdh_compute_public_key(
   #[string] curve: &str,
   #[buffer] privkey: &[u8],
   #[buffer] pubkey: &mut [u8],
-) {
+) -> Result<(), JsErrorBox> {
   match curve {
     "secp256k1" => {
       let this_private_key =
         elliptic_curve::SecretKey::<k256::Secp256k1>::from_slice(privkey)
-          .expect("bad private key");
+          .map_err(|_| JsErrorBox::type_error("bad private key"))?;
       let public_key = this_private_key.public_key();
       pubkey.copy_from_slice(public_key.to_encoded_point(false).as_ref());
     }
     "prime256v1" | "secp256r1" => {
       let this_private_key =
         elliptic_curve::SecretKey::<NistP256>::from_slice(privkey)
-          .expect("bad private key");
+          .map_err(|_| JsErrorBox::type_error("bad private key"))?;
       let public_key = this_private_key.public_key();
       pubkey.copy_from_slice(public_key.to_encoded_point(false).as_ref());
     }
     "secp384r1" => {
       let this_private_key =
         elliptic_curve::SecretKey::<NistP384>::from_slice(privkey)
-          .expect("bad private key");
+          .map_err(|_| JsErrorBox::type_error("bad private key"))?;
       let public_key = this_private_key.public_key();
       pubkey.copy_from_slice(public_key.to_encoded_point(false).as_ref());
     }
     "secp521r1" => {
       let this_private_key =
         elliptic_curve::SecretKey::<NistP521>::from_slice(privkey)
-          .expect("bad private key");
+          .map_err(|_| JsErrorBox::type_error("bad private key"))?;
       let public_key = this_private_key.public_key();
       pubkey.copy_from_slice(public_key.to_encoded_point(false).as_ref());
     }
     "secp224r1" => {
       let this_private_key =
         elliptic_curve::SecretKey::<NistP224>::from_slice(privkey)
-          .expect("bad private key");
+          .map_err(|_| JsErrorBox::type_error("bad private key"))?;
       let public_key = this_private_key.public_key();
       pubkey.copy_from_slice(public_key.to_encoded_point(false).as_ref());
     }
     &_ => todo!(),
   }
+  Ok(())
 }
 
 #[inline]
@@ -1463,6 +1509,18 @@ pub fn op_node_diffie_hellman(
       .to_bytes()
       .into_iter()
       .collect(),
+    (
+      AsymmetricPrivateKey::X448(private),
+      AsymmetricPublicKey::X448(public),
+    ) => {
+      let mut scalar_bytes = [0u8; 57];
+      scalar_bytes[..56].copy_from_slice(&private[..56]);
+      let scalar = ed448_goldilocks::EdwardsScalar::from_bytes_mod_order(
+        &scalar_bytes.into(),
+      );
+      let point = ed448_goldilocks::MontgomeryPoint(*public);
+      (&point * &scalar).0.into_iter().collect()
+    }
     (AsymmetricPrivateKey::Dh(private), AsymmetricPublicKey::Dh(public)) => {
       // Compare DH parameters by integer value, not byte encoding,
       // since different generation paths may produce different ASN.1
@@ -1483,8 +1541,15 @@ pub fn op_node_diffie_hellman(
       let private_key = private.key.clone().into_vec();
       let private_key = BigUint::from_bytes_be(&private_key);
       let shared_secret = pubkey.modpow(&private_key, &priv_prime);
+      let mut shared_secret = shared_secret.to_bytes_be();
+      let prime_len = priv_prime.to_bytes_be().len();
+      if shared_secret.len() < prime_len {
+        let mut padded = vec![0; prime_len - shared_secret.len()];
+        padded.extend_from_slice(&shared_secret);
+        shared_secret = padded;
+      }
 
-      shared_secret.to_bytes_be().into()
+      shared_secret.into_boxed_slice()
     }
     _ => {
       return Err(

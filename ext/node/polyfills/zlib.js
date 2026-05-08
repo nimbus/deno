@@ -37,6 +37,7 @@ const {
   ObjectSetPrototypeOf,
   ReflectApply,
   Symbol,
+  SymbolFor,
   Uint32Array,
 } = primordials;
 
@@ -66,7 +67,7 @@ import * as binding from "ext:deno_node/_zlib_binding.mjs";
 const { crc32: crc32Native } = binding;
 
 import assert from "ext:deno_node/internal/assert.mjs";
-import { Buffer, kMaxLength } from "node:buffer";
+import bufferModule from "node:buffer";
 import { ownerSymbol as owner_symbol } from "ext:deno_node/internal_binding/symbols.ts";
 import {
   checkRangesOrGetDefault,
@@ -78,6 +79,13 @@ import { zlib as zlibConstants } from "ext:deno_node/internal_binding/constants.
 
 const kFlushFlag = Symbol("kFlushFlag");
 const kError = Symbol("kError");
+const { Buffer } = bufferModule;
+const kRefreshModuleState = SymbolFor("nodejs.zlib.refreshRequireState");
+let moduleBufferMaxLength = bufferModule.kMaxLength;
+
+function refreshModuleStateForRequire() {
+  moduleBufferMaxLength = bufferModule.kMaxLength;
+}
 
 const {
   // Zlib flush levels
@@ -252,7 +260,7 @@ const FLUSH_BOUND_IDX_ZSTD = 2;
 // The base class for all Zlib-style streams.
 function ZlibBase(opts, mode, handle, { flush, finishFlush, fullFlush }) {
   let chunkSize = Z_DEFAULT_CHUNK;
-  let maxOutputLength = kMaxLength;
+  let maxOutputLength = moduleBufferMaxLength;
   // The ZlibBase class is not exported to user land, the mode should only be
   // passed in by us.
   assert(typeof mode === "number");
@@ -299,8 +307,8 @@ function ZlibBase(opts, mode, handle, { flush, finishFlush, fullFlush }) {
       opts.maxOutputLength,
       "options.maxOutputLength",
       1,
-      kMaxLength,
-      kMaxLength,
+      moduleBufferMaxLength,
+      moduleBufferMaxLength,
     );
 
     if (opts.encoding || opts.objectMode || opts.writableObjectMode) {
@@ -593,6 +601,18 @@ function processChunk(self, chunk, flushFlag, cb) {
   }
 }
 
+function clearHandleReferences(handle) {
+  handle.buffer = null;
+  handle.cb = null;
+  handle.onerror = null;
+  handle._callbackPending = false;
+  handle[owner_symbol] = null;
+}
+
+function deferHandleCleanup(handle) {
+  setImmediate(() => clearHandleReferences(handle));
+}
+
 function processCallback() {
   // This callback's context (`this`) is the `_handle` (ZCtx) object. It is
   // important to null out the values once they are no longer needed since
@@ -605,6 +625,7 @@ function processCallback() {
   if (self.destroyed) {
     this.buffer = null;
     this.cb();
+    deferHandleCleanup(this);
     return;
   }
 
@@ -614,6 +635,7 @@ function processCallback() {
     // destroy scheduled in zlibOnError.
     this.buffer = null;
     this.cb();
+    deferHandleCleanup(this);
     return;
   }
 
@@ -733,8 +755,12 @@ function processCallback() {
  */
 function _close(engine) {
   // Caller may invoke .close after a zlib error (which will null _handle)
-  engine._handle?.close();
+  const handle = engine._handle;
+  handle?.close();
   engine._handle = null;
+  if (handle) {
+    deferHandleCleanup(handle);
+  }
 }
 
 const zlibDefaultOpts = {
@@ -1269,5 +1295,13 @@ const zlib = {
 
   ...deprecatedConstants,
 };
+
+ObjectDefineProperty(zlib, kRefreshModuleState, {
+  __proto__: null,
+  configurable: false,
+  enumerable: false,
+  value: refreshModuleStateForRequire,
+  writable: false,
+});
 
 export default Object.freeze(zlib);

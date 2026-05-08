@@ -227,6 +227,9 @@ impl From<ProviderType> for i32 {
 pub use deno_core::uv_compat::AsyncId;
 
 fn next_async_id(state: &mut OpState) -> i64 {
+  if state.try_borrow::<AsyncId>().is_none() {
+    state.put(AsyncId::default());
+  }
   state.borrow_mut::<AsyncId>().next()
 }
 

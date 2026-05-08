@@ -84,6 +84,8 @@ import {
   ECDH,
 } from "ext:deno_node/internal/crypto/diffiehellman.ts";
 import {
+  LegacyCipher,
+  LegacyDecipher,
   Cipheriv,
   Decipheriv,
   privateDecrypt,
@@ -166,7 +168,10 @@ import type {
 } from "ext:deno_node/_stream.d.ts";
 import { normalizeEncoding } from "ext:deno_node/internal/util.mjs";
 import { isArrayBufferView } from "ext:deno_node/internal/util/types.ts";
-import { validateString } from "ext:deno_node/internal/validators.mjs";
+import {
+  validateObject,
+  validateString,
+} from "ext:deno_node/internal/validators.mjs";
 import { crypto as webcrypto } from "ext:deno_crypto/00_crypto.js";
 import { deprecate } from "node:util";
 
@@ -206,15 +211,28 @@ function hash(
     ], data);
   }
 
-  let outputEncoding: string;
+  let outputEncoding: string | undefined;
   let outputLength: number | undefined;
 
-  if (typeof outputEncodingOrOptions === "object") {
+  if (typeof outputEncodingOrOptions === "string") {
+    outputEncoding = outputEncodingOrOptions;
+  } else if (outputEncodingOrOptions !== undefined) {
+    validateObject(outputEncodingOrOptions, "options");
+    if (
+      !("outputEncoding" in outputEncodingOrOptions) &&
+      !("outputLength" in outputEncodingOrOptions)
+    ) {
+      throw new ERR_INVALID_ARG_TYPE(
+        "options",
+        "Object",
+        outputEncodingOrOptions,
+      );
+    }
     outputEncoding = outputEncodingOrOptions.outputEncoding ?? "hex";
     outputLength = outputEncodingOrOptions.outputLength;
-  } else {
-    outputEncoding = outputEncodingOrOptions;
   }
+
+  outputEncoding ??= "hex";
 
   let normalized = outputEncoding;
   // Fast case: if it's 'hex', we don't need to validate it further.
@@ -257,7 +275,7 @@ function hash(
     return normalized === "buffer" ? globalThis.Buffer.alloc(0) : "";
   }
 
-  return h.digest(outputEncoding);
+  return h.digest(normalized === "buffer" ? normalized : outputEncoding);
 }
 
 function validateCipherivArgs(
@@ -327,6 +345,15 @@ function createCipheriv(
   return Cipheriv(cipher, key, iv, options);
 }
 
+function createCipher(
+  cipher: string,
+  password: BinaryLike,
+  options?: TransformOptions,
+): Cipher {
+  validateString(cipher, "cipher");
+  return new LegacyCipher(cipher, password, options);
+}
+
 function createDecipheriv(
   algorithm: CipherCCMTypes,
   key: CipherKey,
@@ -353,6 +380,15 @@ function createDecipheriv(
 ): Decipher {
   validateCipherivArgs(algorithm, key, iv);
   return Decipheriv(algorithm, key, iv, options);
+}
+
+function createDecipher(
+  cipher: string,
+  password: BinaryLike,
+  options?: TransformOptions,
+): Decipher {
+  validateString(cipher, "cipher");
+  return new LegacyDecipher(cipher, password, options);
 }
 
 function createDiffieHellman(
@@ -442,11 +478,15 @@ const pseudoRandomBytes = randomBytes;
 
 const defaultExport = {
   Certificate,
+  Cipher: LegacyCipher,
   checkPrime,
   checkPrimeSync,
+  createCipher,
   Cipheriv,
   constants,
   createCipheriv,
+  createDecipher,
+  Decipher: LegacyDecipher,
   createDecipheriv,
   createDiffieHellman,
   createDiffieHellmanGroup,

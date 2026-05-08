@@ -57,7 +57,15 @@ export function getOptions() {
     ["--title", { value: "" }],
   ]);
 
-  const nodeOptions = Deno.env.get("NODE_OPTIONS");
+  let nodeOptions = globalThis.process?.env?.NODE_OPTIONS;
+  if (nodeOptions == null) {
+    try {
+      nodeOptions = Deno.env.get("NODE_OPTIONS") ?? nodeOptions;
+    } catch {
+      // Embedded runtimes may not expose Deno.env consistently; fall back to
+      // the Node-style process env view in that case.
+    }
+  }
   const args = nodeOptions ? splitNodeOptions(nodeOptions) : [];
   ArrayPrototypeForEach(args, (arg) => {
     if (StringPrototypeStartsWith(arg, "--title=")) {

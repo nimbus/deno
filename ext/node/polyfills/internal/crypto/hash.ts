@@ -43,12 +43,12 @@ import {
   NodeError,
 } from "ext:deno_node/internal/errors.ts";
 import LazyTransform from "ext:deno_node/internal/streams/lazy_transform.js";
-import process from "node:process";
 import {
   getDefaultEncoding,
   getHashBlockSize,
   toBuf,
 } from "ext:deno_node/internal/crypto/util.ts";
+import { getOptionValue } from "ext:deno_node/internal/options.ts";
 import {
   isAnyArrayBuffer,
   isArrayBufferView,
@@ -61,6 +61,47 @@ function unwrapErr(ok: boolean) {
 }
 
 const kHandle = Symbol("kHandle");
+const kFinalized = Symbol("kFinalized");
+const kStreamDigest = Symbol("kStreamDigest");
+let emittedShakeOutputLengthDeprecation = false;
+
+function maybeEmitShakeOutputLengthDeprecation(algorithm: string) {
+  if (
+    emittedShakeOutputLengthDeprecation ||
+    !getOptionValue("--pending-deprecation")
+  ) {
+    return;
+  }
+  const normalized = algorithm.toLowerCase();
+  if (normalized !== "shake128" && normalized !== "shake256") {
+    return;
+  }
+  emittedShakeOutputLengthDeprecation = true;
+  globalThis.process?.emitWarning?.(
+    "Creating SHAKE128/256 digests without an explicit options.outputLength is deprecated.",
+    "DeprecationWarning",
+    "DEP0198",
+  );
+}
+
+function encodeDigest(
+  digest: Uint8Array,
+  outputEncoding: string | undefined,
+): string | Buffer {
+  switch (outputEncoding) {
+    case "binary":
+      return String.fromCharCode(...digest);
+    case "base64":
+      return encodeToBase64(digest);
+    case "base64url":
+      return encodeToBase64Url(digest);
+    case undefined:
+    case "buffer":
+      return Buffer.from(digest);
+    default:
+      return Buffer.from(digest).toString(outputEncoding);
+  }
+}
 
 export function Hash(
   this: Hash,
@@ -82,17 +123,8 @@ export function Hash(
   }
 
   const algoLower = isCopy ? undefined : algorithm.toLowerCase();
-
-  if (
-    !isCopy && xofLen === undefined &&
-    (algoLower === "shake128" ||
-      algoLower === "shake256")
-  ) {
-    process.emitWarning(
-      "Creating SHAKE128/256 digests without an explicit options.outputLength is deprecated.",
-      "DeprecationWarning",
-      "DEP0198",
-    );
+  if (!isCopy && xofLen === undefined) {
+    maybeEmitShakeOutputLengthDeprecation(algorithm);
   }
 
   try {
@@ -112,12 +144,16 @@ export function Hash(
   }
 
   if (this[kHandle] === null) throw new ERR_CRYPTO_HASH_FINALIZED();
+  this[kFinalized] = false;
+  this[kStreamDigest] = null;
 
   ReflectApply(LazyTransform, this, [options]);
 }
 
 interface Hash {
   [kHandle]: object;
+  [kFinalized]: boolean;
+  [kStreamDigest]: Uint8Array | null;
 }
 
 ObjectSetPrototypeOf(Hash.prototype, LazyTransform.prototype);
@@ -137,7 +173,10 @@ Hash.prototype._transform = function _transform(
 };
 
 Hash.prototype._flush = function _flush(callback: () => void) {
-  this.push(this.digest());
+  const digest = op_node_hash_digest(this[kHandle]);
+  if (digest === null) throw new ERR_CRYPTO_HASH_FINALIZED();
+  this[kStreamDigest] = digest;
+  this.push(Buffer.from(digest));
   callback();
 };
 
@@ -145,6 +184,9 @@ Hash.prototype.update = function update(
   data: string | Buffer,
   encoding: Encoding | "buffer",
 ) {
+  if (this[kFinalized]) {
+    throw new ERR_CRYPTO_HASH_FINALIZED();
+  }
   encoding = encoding || getDefaultEncoding();
 
   if (typeof data === "string") {
@@ -169,32 +211,33 @@ Hash.prototype.update = function update(
 };
 
 Hash.prototype.digest = function digest(outputEncoding: Encoding | "buffer") {
-  outputEncoding = outputEncoding || getDefaultEncoding();
-  outputEncoding = `${outputEncoding}`;
+  if (this[kFinalized]) {
+    throw new ERR_CRYPTO_HASH_FINALIZED();
+  }
+  let resolvedOutputEncoding;
+  resolvedOutputEncoding = outputEncoding
+    ? outputEncoding.toString()
+    : getDefaultEncoding();
 
-  if (outputEncoding === "hex") {
+  const cachedDigest = this[kStreamDigest];
+  if (cachedDigest !== null) {
+    this[kStreamDigest] = null;
+    this[kFinalized] = true;
+    return encodeDigest(cachedDigest, resolvedOutputEncoding);
+  }
+
+  if (resolvedOutputEncoding === "hex") {
     const result = op_node_hash_digest_hex(this[kHandle]);
     if (result === null) throw new ERR_CRYPTO_HASH_FINALIZED();
+    this[kFinalized] = true;
     return result;
   }
 
   const digest = op_node_hash_digest(this[kHandle]);
   if (digest === null) throw new ERR_CRYPTO_HASH_FINALIZED();
+  this[kFinalized] = true;
 
-  // TODO(@littedivy): Fast paths for below encodings.
-  switch (outputEncoding) {
-    case "binary":
-      return String.fromCharCode(...digest);
-    case "base64":
-      return encodeToBase64(digest);
-    case "base64url":
-      return encodeToBase64Url(digest);
-    case undefined:
-    case "buffer":
-      return Buffer.from(digest);
-    default:
-      return Buffer.from(digest).toString(outputEncoding);
-  }
+  return encodeDigest(digest, resolvedOutputEncoding);
 };
 
 export function Hmac(

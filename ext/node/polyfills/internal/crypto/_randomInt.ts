@@ -1,13 +1,20 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-import { op_node_random_int } from "ext:core/ops";
 import { primordials } from "ext:core/mod.js";
+import { Buffer } from "node:buffer";
+import process from "node:process";
 import {
   ERR_INVALID_ARG_TYPE,
   ERR_OUT_OF_RANGE,
 } from "ext:deno_node/internal/errors.ts";
+import randomFill, {
+  randomFillSync,
+} from "ext:deno_node/internal/crypto/_randomFill.mjs";
 import { validateFunction } from "ext:deno_node/internal/validators.mjs";
 const {
+  ArrayPrototypePush,
+  ArrayPrototypeSplice,
+  ArrayPrototypeForEach,
   MathCeil,
   MathFloor,
   NumberIsSafeInteger,
@@ -16,6 +23,14 @@ const {
 // Largest integer that can be expressed in 6 bytes, mirrors Node's RAND_MAX
 // in lib/internal/crypto/random.js.
 const RAND_MAX = 0xFFFF_FFFF_FFFF;
+const randomCache = Buffer.allocUnsafe(6 * 1024);
+let randomCacheOffset = randomCache.length;
+let asyncCacheFillInProgress = false;
+const asyncCachePendingTasks: Array<{
+  min: number;
+  max: number;
+  callback: (err: Error | null, n?: number) => void;
+}> = [];
 
 export default function randomInt(max: number): number;
 export default function randomInt(min: number, max: number): number;
@@ -76,12 +91,54 @@ export default function randomInt(
   }
 
   min = MathCeil(min);
-  const result = op_node_random_int(min, MathFloor(max as number));
+  const flooredMax = MathFloor(max as number);
+  const randLimit = RAND_MAX - (RAND_MAX % range);
 
-  if (!isSync) {
-    callback!(null, result);
+  while (isSync || randomCacheOffset < randomCache.length) {
+    if (randomCacheOffset === randomCache.length) {
+      randomFillSync(randomCache);
+      randomCacheOffset = 0;
+    }
+
+    const x = randomCache.readUIntBE(randomCacheOffset, 6);
+    randomCacheOffset += 6;
+
+    if (x < randLimit) {
+      const result = (x % range) + min;
+      if (isSync) {
+        return result;
+      }
+      process.nextTick(callback!, undefined, result);
+      return;
+    }
+  }
+
+  ArrayPrototypePush(asyncCachePendingTasks, {
+    min,
+    max: flooredMax,
+    callback: callback!,
+  });
+  asyncRefillRandomIntCache();
+}
+
+function asyncRefillRandomIntCache() {
+  if (asyncCacheFillInProgress) {
     return;
   }
 
-  return result;
+  asyncCacheFillInProgress = true;
+  randomFill(randomCache, (err) => {
+    asyncCacheFillInProgress = false;
+    const tasks = ArrayPrototypeSplice(asyncCachePendingTasks, 0);
+    if (!err) {
+      randomCacheOffset = 0;
+    }
+    ArrayPrototypeForEach(tasks, (task) => {
+      if (err) {
+        task.callback(err);
+        return;
+      }
+      randomInt(task.min, task.max, task.callback);
+    });
+  });
 }

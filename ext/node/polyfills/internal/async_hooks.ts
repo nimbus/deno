@@ -171,6 +171,20 @@ export function emitAfter(asyncId: number): void {
   }
 }
 
+// When hooks are enabled during a callback that did not enter through
+// emitBefore(), Node still exposes the callback's `after` event on exit.
+// Use this narrow helper for those current-callback transitions without
+// touching the async context stack.
+export function emitAfterHooksOnly(asyncId: number): void {
+  const hooks = active_hooks.array;
+  for (let i = 0; i < hooks.length; i++) {
+    const hook = hooks[i];
+    if (hook[after_symbol]) {
+      hook[after_symbol](asyncId);
+    }
+  }
+}
+
 export function emitDestroy(asyncId: number): void {
   // Call hooks if they exist
   const hooks = active_hooks.array;

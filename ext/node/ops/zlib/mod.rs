@@ -347,6 +347,23 @@ impl Zlib {
   }
 
   #[fast]
+  pub fn close_if_pending(&self) -> Result<(), ZlibError> {
+    let pending_close = {
+      let mut zlib = self.inner.borrow_mut();
+      let zlib = zlib.as_mut().ok_or(ZlibError::NotInitialized)?;
+
+      zlib.write_in_progress = false;
+      zlib.pending_close
+    };
+
+    if pending_close && let Some(mut res) = self.inner.borrow_mut().take() {
+      let _ = res.close();
+    }
+
+    Ok(())
+  }
+
+  #[fast]
   #[smi]
   pub fn reset(&self) -> Result<i32, ZlibError> {
     let mut zlib = self.inner.borrow_mut();
@@ -420,7 +437,6 @@ impl Zlib {
 
     zlib.result_buffer = Some(write_result.as_mut_ptr());
     zlib.callback = Some(callback);
-
     Ok(zlib.err)
   }
 
