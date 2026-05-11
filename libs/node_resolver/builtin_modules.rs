@@ -3,6 +3,14 @@
 pub trait IsBuiltInNodeModuleChecker: std::fmt::Debug {
   /// e.g. `is_builtin_node_module("assert")`
   fn is_builtin_node_module(&self, module_name: &str) -> bool;
+
+  /// e.g. `is_builtin_node_module_without_scheme("assert")`
+  fn is_builtin_node_module_without_scheme(
+    &self,
+    module_name: &str,
+  ) -> bool {
+    self.is_builtin_node_module(module_name)
+  }
 }
 
 /// An implementation of IsBuiltInNodeModuleChecker that uses
@@ -18,7 +26,25 @@ impl IsBuiltInNodeModuleChecker for DenoIsBuiltInNodeModuleChecker {
       .binary_search(&module_name)
       .is_ok()
   }
+
+  #[inline(always)]
+  fn is_builtin_node_module_without_scheme(&self, module_name: &str) -> bool {
+    self.is_builtin_node_module(module_name)
+      && DENO_SCHEME_ONLY_BUILTIN_NODE_MODULES
+        .binary_search(&module_name)
+        .is_err()
+  }
 }
+
+/// Built-in node modules that must use the `node:` scheme in user code.
+pub static DENO_SCHEME_ONLY_BUILTIN_NODE_MODULES: &[&str] = &[
+  // NOTE(bartlomieju): keep this list in sync with
+  // `ext/node/polyfills/01_require.js`.
+  "sea",
+  "sqlite",
+  "test",
+  "test/reporters",
+];
 
 /// Collection of built-in node_modules supported by Deno.
 pub static DENO_SUPPORTED_BUILTIN_NODE_MODULES: &[&str] = &[
@@ -77,6 +103,7 @@ pub static DENO_SUPPORTED_BUILTIN_NODE_MODULES: &[&str] = &[
   "string_decoder",
   "sys",
   "test",
+  "test/reporters",
   "timers",
   "timers/promises",
   "tls",
@@ -100,5 +127,12 @@ mod test {
     let mut builtins_list = DENO_SUPPORTED_BUILTIN_NODE_MODULES.to_vec();
     builtins_list.sort();
     assert_eq!(DENO_SUPPORTED_BUILTIN_NODE_MODULES, builtins_list);
+  }
+
+  #[test]
+  fn test_scheme_only_builtins_are_sorted() {
+    let mut builtins_list = DENO_SCHEME_ONLY_BUILTIN_NODE_MODULES.to_vec();
+    builtins_list.sort();
+    assert_eq!(DENO_SCHEME_ONLY_BUILTIN_NODE_MODULES, builtins_list);
   }
 }

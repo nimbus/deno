@@ -13,6 +13,7 @@ import {
   op_getegid,
   op_geteuid,
   op_getgroups,
+  op_inspector_close,
   op_node_load_env_file,
   op_node_process_constrained_memory,
   op_node_process_kill,
@@ -77,6 +78,7 @@ import {
 import { WriteStream as TTYWriteStream } from "ext:deno_node/internal/tty.js";
 import { enableNextTick } from "ext:deno_node/_next_tick.ts";
 import { isAndroid, isWindows } from "ext:deno_node/_util/os.ts";
+import { executionAsyncResource } from "ext:deno_node/internal/async_hooks.ts";
 import * as io from "ext:deno_io/12_io.js";
 import * as denoOs from "ext:deno_os/30_os.js";
 
@@ -875,6 +877,10 @@ Object.defineProperty(process, "debugPort", {
   configurable: true,
 });
 
+process._debugEnd = () => {
+  op_inspector_close();
+};
+
 /** https://nodejs.org/api/process.html#process_process_chdir_directory */
 process.chdir = chdir;
 
@@ -1489,50 +1495,51 @@ function dispatchProcessExitEvent() {
 function synchronizeListeners() {
   // Install special "unhandledrejection" handler, that will be called
   // last.
-  if (
-    unhandledRejectionListenerCount > 0 ||
-    uncaughtExceptionListenerCount > 0 ||
-    _uncaughtExceptionCaptureFn !== null
-  ) {
-    internals.nodeProcessUnhandledRejectionCallback = (event) => {
-      if (process.listenerCount("unhandledRejection") === 0) {
-        // The Node.js default behavior is to raise an uncaught exception if
-        // an unhandled rejection occurs and there are no unhandledRejection
-        // listeners.
+  internals.nodeProcessUnhandledRejectionCallback = (event) => {
+    const domain = event.promise?.domain ??
+      executionAsyncResource()?.domain ??
+      process.domain;
 
-        event.preventDefault();
+    if (process.listenerCount("unhandledRejection") === 0) {
+      // The Node.js default behavior is to raise an uncaught exception if
+      // an unhandled rejection occurs and there are no unhandledRejection
+      // listeners.
 
-        let reason = event.reason;
-        // If the rejection reason is not an Error, wrap it in an
-        // ERR_UNHANDLED_REJECTION error, matching Node.js behavior.
-        if (!(reason instanceof Error)) {
-          const message = "This error originated either by throwing " +
-            "inside of an async function without a catch block, or by rejecting a " +
-            "promise which was not handled with .catch(). The promise rejected with the" +
-            ` reason "${reason}".`;
-          const err = new Error(message);
-          // deno-lint-ignore no-explicit-any
-          (err as any).code = "ERR_UNHANDLED_REJECTION";
-          // deno-lint-ignore no-explicit-any
-          (err as any).reason = event.reason;
-          Object.defineProperty(err, "name", {
-            value: "UnhandledPromiseRejection",
-            writable: true,
-            configurable: true,
-          });
-          reason = err;
-        }
+      event.preventDefault();
 
-        uncaughtExceptionHandler(reason, "unhandledRejection");
+      if (domain !== null && domain !== undefined) {
+        domain.emit("error", event.reason);
         return;
       }
 
-      event.preventDefault();
-      process.emit("unhandledRejection", event.reason, event.promise);
-    };
-  } else {
-    internals.nodeProcessUnhandledRejectionCallback = undefined;
-  }
+      let reason = event.reason;
+      // If the rejection reason is not an Error, wrap it in an
+      // ERR_UNHANDLED_REJECTION error, matching Node.js behavior.
+      if (!(reason instanceof Error)) {
+        const message = "This error originated either by throwing " +
+          "inside of an async function without a catch block, or by rejecting a " +
+          "promise which was not handled with .catch(). The promise rejected with the" +
+          ` reason "${reason}".`;
+        const err = new Error(message);
+        // deno-lint-ignore no-explicit-any
+        (err as any).code = "ERR_UNHANDLED_REJECTION";
+        // deno-lint-ignore no-explicit-any
+        (err as any).reason = event.reason;
+        Object.defineProperty(err, "name", {
+          value: "UnhandledPromiseRejection",
+          writable: true,
+          configurable: true,
+        });
+        reason = err;
+      }
+
+      uncaughtExceptionHandler(reason, "unhandledRejection");
+      return;
+    }
+
+    event.preventDefault();
+    process.emit("unhandledRejection", event.reason, event.promise);
+  };
 
   // Install special "handledrejection" handler, that will be called
   // last.

@@ -26,6 +26,10 @@ import {
   validateString,
 } from "ext:deno_node/internal/validators.mjs";
 import {
+  startInspectorTracing,
+  stopInspectorTracing,
+} from "ext:deno_node/internal_binding/trace_events.ts";
+import {
   ERR_INSPECTOR_ALREADY_ACTIVATED,
   ERR_INSPECTOR_ALREADY_CONNECTED,
   ERR_INSPECTOR_CLOSED,
@@ -63,6 +67,7 @@ class Session extends EventEmitter {
   #pendingMessages = [];
   #drainScheduled = false;
   #isDraining = false;
+  #nodeTracingSessionId = null;
 
   connect() {
     if (this.#connection) {
@@ -152,6 +157,45 @@ class Session extends EventEmitter {
     if (!this.#connection) {
       throw new ERR_INSPECTOR_NOT_CONNECTED();
     }
+
+    if (method === "NodeTracing.start") {
+      const includedCategories = Array.isArray(params?.traceConfig?.includedCategories)
+        ? params.traceConfig.includedCategories.filter((category) =>
+          typeof category === "string" && category.length > 0
+        )
+        : [];
+      if (this.#nodeTracingSessionId !== null) {
+        stopInspectorTracing(this.#nodeTracingSessionId);
+      }
+      this.#nodeTracingSessionId = startInspectorTracing(includedCategories);
+      if (callback) {
+        process.nextTick(callback, null, {});
+      }
+      return;
+    }
+
+    if (method === "NodeTracing.stop") {
+      const traceSessionId = this.#nodeTracingSessionId;
+      this.#nodeTracingSessionId = null;
+      const events = traceSessionId === null ? [] : stopInspectorTracing(traceSessionId);
+      process.nextTick(() => {
+        this.emit("NodeTracing.dataCollected", {
+          method: "NodeTracing.dataCollected",
+          params: { value: events },
+        });
+        this.emit("NodeTracing.dataCollected", {
+          method: "NodeTracing.dataCollected",
+          params: { value: [] },
+        });
+        this.emit("NodeTracing.tracingComplete", {
+          method: "NodeTracing.tracingComplete",
+          params: {},
+        });
+        callback?.(null, {});
+      });
+      return;
+    }
+
     const id = this.#nextId++;
     const message = { id, method };
     if (params) {
@@ -166,6 +210,10 @@ class Session extends EventEmitter {
   disconnect() {
     if (!this.#connection) {
       return;
+    }
+    if (this.#nodeTracingSessionId !== null) {
+      stopInspectorTracing(this.#nodeTracingSessionId);
+      this.#nodeTracingSessionId = null;
     }
     op_inspector_disconnect(this.#connection);
     this.#connection = null;

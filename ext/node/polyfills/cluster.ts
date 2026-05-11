@@ -3,7 +3,7 @@
 
 import { internals, primordials } from "ext:core/mod.js";
 import { EventEmitter } from "node:events";
-import { fork as childProcessFork } from "node:child_process";
+import childProcess from "node:child_process";
 import process from "node:process";
 import { nextTick } from "ext:deno_node/_next_tick.ts";
 import { isWindows } from "ext:deno_node/_util/os.ts";
@@ -15,6 +15,7 @@ const {
   ObjectAssign,
   ObjectDefineProperty,
   ObjectKeys,
+  ObjectSetPrototypeOf,
   SafeArrayIterator,
   String,
 } = primordials;
@@ -44,7 +45,7 @@ export let isMaster = true;
 
 /** A reference to the current worker object. Not available in the primary
  * process. */
-export let worker: Worker | undefined = undefined;
+export let worker: ClusterWorker | undefined = undefined;
 
 /** The scheduling policy, either cluster.SCHED_RR for round-robin or
  * cluster.SCHED_NONE to leave it to the operating system. Matches Node:
@@ -53,38 +54,92 @@ export let schedulingPolicy: number | undefined = isWindows
   ? SCHED_NONE
   : SCHED_RR;
 
+function maybeInitializeWorkerStateFromEnv() {
+  const uniqueId = process.env?.NODE_UNIQUE_ID;
+  if (!isPrimary || typeof uniqueId !== "string" || uniqueId.length === 0) {
+    return;
+  }
+  initializeWorkerState(uniqueId, process.env?.NODE_CLUSTER_SCHED_POLICY);
+}
+
+function initializeWorkerState(
+  uniqueId: string,
+  schedPolicyEnv: string | undefined,
+) {
+  const parsedId = Number(uniqueId);
+  if (NumberIsNaN(parsedId)) {
+    return;
+  }
+
+  if (typeof schedPolicyEnv === "string" && schedPolicyEnv.length > 0) {
+    const n = Number(schedPolicyEnv);
+    if (!NumberIsNaN(n)) schedulingPolicy = n;
+  }
+
+  if (isWorker && worker?.id === parsedId) {
+    return;
+  }
+
+  isPrimary = false;
+  isWorker = true;
+  isMaster = false;
+
+  worker = new ClusterWorker({ process, id: parsedId });
+  worker.state = "online";
+  workers[String(worker.id)] = worker;
+
+  process.once("disconnect", () => {
+    worker?.emit("disconnect");
+    if (!worker?.exitedAfterDisconnect) {
+      process.exit(0);
+    }
+  });
+}
+
 /** A Worker object contains all public information and method about a worker.
  * In the primary it can be obtained using cluster.workers. In a worker it can
  * be obtained using cluster.worker.
  */
-export class Worker extends EventEmitter {
+class ClusterWorker extends EventEmitter {
   id: number;
   // deno-lint-ignore no-explicit-any
   process: any;
-  exitedAfterDisconnect = false;
+  exitedAfterDisconnect = undefined;
   state = "none";
 
   // deno-lint-ignore no-explicit-any
-  constructor(child: any, id: number) {
+  constructor(options: any = undefined) {
     super();
-    this.id = id;
-    this.process = child;
 
-    if (child !== process) {
-      child.on("error", (err: Error) => this.emit("error", err));
-      child.on("exit", (code: number | null, signal: string | null) => {
-        this.emit("exit", code, signal);
-        delete workers[String(this.id)];
-        cluster.emit("exit", this, code, signal);
-      });
-      child.on("disconnect", () => {
-        this.emit("disconnect");
-        cluster.emit("disconnect", this);
-      });
-      // deno-lint-ignore no-explicit-any
-      child.on("message", (msg: any, handle: unknown) => {
+    if (options === null || typeof options !== "object") {
+      options = {};
+    }
+
+    this.id = options.id | 0;
+    this.process = options.process;
+    this.state = options.state || "none";
+
+    const processLike = this.process;
+    if (processLike) {
+      processLike.on("error", (err: Error) => this.emit("error", err));
+      processLike.on("message", (msg: any, handle: unknown) => {
         this.emit("message", msg, handle);
-        cluster.emit("message", this, msg, handle);
+        if (processLike !== process) {
+          cluster.emit("message", this, msg, handle);
+        }
+      });
+      processLike.on("disconnect", () => {
+        this.emit("disconnect");
+        if (processLike !== process) {
+          cluster.emit("disconnect", this);
+        }
+      });
+      processLike.on("exit", (code: number | null, signal: string | null) => {
+        this.emit("exit", code, signal);
+        if (processLike !== process) {
+          delete workers[String(this.id)];
+          cluster.emit("exit", this, code, signal);
+        }
       });
     }
   }
@@ -134,10 +189,20 @@ export class Worker extends EventEmitter {
   }
 
   isDead(): boolean {
-    if (this.process === process) return false;
+    if (!this.process || this.process === process) return false;
     return this.process.exitCode !== null || this.process.signalCode !== null;
   }
 }
+
+// deno-lint-ignore no-explicit-any
+export function Worker(options?: any): ClusterWorker {
+  if (new.target) {
+    return new ClusterWorker(options);
+  }
+  return new ClusterWorker(options);
+}
+Worker.prototype = ClusterWorker.prototype;
+ObjectSetPrototypeOf(Worker, EventEmitter);
 
 let nextWorkerId = 0;
 
@@ -161,7 +226,8 @@ export function disconnect(cb?: () => void) {
 
 /** Spawn a new worker process. */
 // deno-lint-ignore no-explicit-any
-export function fork(env?: Record<string, any>): Worker {
+export function fork(env?: Record<string, any>): ClusterWorker {
+  maybeInitializeWorkerStateFromEnv();
   if (!isPrimary) {
     throw new Error("cluster.fork() can only be called from the primary");
   }
@@ -182,18 +248,31 @@ export function fork(env?: Record<string, any>): Worker {
     childEnv.NODE_CLUSTER_SCHED_POLICY = String(schedulingPolicy);
   }
 
-  const child = childProcessFork(script, [], {
+  const child = childProcess.fork(script, [], {
     env: childEnv,
     silent: false,
   });
-  const w = new Worker(child, id);
+  const w = new ClusterWorker({ process: child, id });
   w.state = "online";
   workers[String(id)] = w;
   cluster.emit("fork", w);
-  // Emit "online" on next tick so handlers attached after fork() see it.
-  nextTick(() => {
+  let onlineEmitted = false;
+  const emitOnline = () => {
+    if (onlineEmitted) return;
+    onlineEmitted = true;
     w.emit("online");
     cluster.emit("online", w);
+  };
+  if (typeof child.once === "function") {
+    child.once("online", emitOnline);
+  }
+  // Real child processes already have a pid immediately; the emulated
+  // node_compat fork child leaves pid at 0 until its staged module is loaded
+  // and it emits its synthetic online event.
+  nextTick(() => {
+    if (child.pid !== 0) {
+      emitOnline();
+    }
   });
   return w;
 }
@@ -222,7 +301,7 @@ const cluster = new EventEmitter() as EventEmitter & {
   isMaster: boolean;
   isPrimary: boolean;
   Worker: typeof Worker;
-  worker?: Worker;
+  worker?: ClusterWorker;
   workers: Record<string, unknown>;
   settings: Record<string, unknown>;
   schedulingPolicy: number | undefined;
@@ -250,37 +329,60 @@ cluster.SCHED_RR = SCHED_RR;
 // frozen at module-load (snapshot) time.
 ObjectDefineProperty(cluster, "isPrimary", {
   __proto__: null,
-  get: () => isPrimary,
+  get: () => {
+    maybeInitializeWorkerStateFromEnv();
+    return isPrimary;
+  },
   enumerable: true,
   configurable: true,
 });
 ObjectDefineProperty(cluster, "isWorker", {
   __proto__: null,
-  get: () => isWorker,
+  get: () => {
+    maybeInitializeWorkerStateFromEnv();
+    return isWorker;
+  },
   enumerable: true,
   configurable: true,
 });
 ObjectDefineProperty(cluster, "isMaster", {
   __proto__: null,
-  get: () => isMaster,
+  get: () => {
+    maybeInitializeWorkerStateFromEnv();
+    return isMaster;
+  },
   enumerable: true,
   configurable: true,
 });
 ObjectDefineProperty(cluster, "worker", {
   __proto__: null,
-  get: () => worker,
+  get: () => {
+    maybeInitializeWorkerStateFromEnv();
+    return worker;
+  },
   enumerable: true,
   configurable: true,
 });
 ObjectDefineProperty(cluster, "schedulingPolicy", {
   __proto__: null,
-  get: () => schedulingPolicy,
+  get: () => {
+    maybeInitializeWorkerStateFromEnv();
+    return schedulingPolicy;
+  },
   set: (v: number | undefined) => {
     schedulingPolicy = v;
   },
   enumerable: true,
   configurable: true,
 });
+
+const initialClusterUniqueId = process.env?.NODE_UNIQUE_ID;
+if (typeof initialClusterUniqueId === "string" && initialClusterUniqueId.length > 0) {
+  initializeWorkerState(
+    initialClusterUniqueId,
+    process.env?.NODE_CLUSTER_SCHED_POLICY,
+  );
+}
 
 // Called from `02_init.js` only when NODE_UNIQUE_ID is present in the
 // environment, so plain `deno run` never enters this path and never touches
@@ -290,18 +392,7 @@ internals.__initCluster = (
   uniqueId: string,
   schedPolicyEnv: string | undefined,
 ) => {
-  isPrimary = false;
-  isWorker = true;
-  isMaster = false;
-
-  if (typeof schedPolicyEnv === "string" && schedPolicyEnv.length > 0) {
-    const n = Number(schedPolicyEnv);
-    if (!NumberIsNaN(n)) schedulingPolicy = n;
-  }
-
-  worker = new Worker(process, Number(uniqueId));
-  worker.state = "online";
-  workers[String(worker.id)] = worker;
+  initializeWorkerState(uniqueId, schedPolicyEnv);
 };
 
 export default cluster;

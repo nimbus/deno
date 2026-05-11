@@ -803,7 +803,8 @@ pub fn get_resolution_error_bare_node_specifier(
   error: &ResolutionError,
 ) -> Option<&str> {
   get_resolution_error_bare_specifier(error).filter(|specifier| {
-    DenoIsBuiltInNodeModuleChecker.is_builtin_node_module(specifier)
+    DenoIsBuiltInNodeModuleChecker
+      .is_builtin_node_module_without_scheme(specifier)
   })
 }
 

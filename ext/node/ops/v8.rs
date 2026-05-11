@@ -111,6 +111,21 @@ impl SerializerDelegate {
   }
 }
 
+fn is_node_host_object<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  object: v8::Local<'s, v8::Object>,
+) -> bool {
+  if object.is_array_buffer_view() {
+    return true;
+  }
+
+  let key = FastString::from_static("__node_internal_js_stream_host_object__")
+    .v8_string(scope)
+    .unwrap()
+    .into();
+  object.get(scope, key).is_some_and(|value| value.is_true())
+}
+
 impl v8::ValueSerializerImpl for SerializerDelegate {
   fn get_shared_array_buffer_id<'s>(
     &self,
@@ -132,7 +147,7 @@ impl v8::ValueSerializerImpl for SerializerDelegate {
     None
   }
   fn has_custom_host_object(&self, _isolate: &v8::Isolate) -> bool {
-    false
+    true
   }
   fn throw_data_clone_error<'s>(
     &self,
@@ -180,11 +195,10 @@ impl v8::ValueSerializerImpl for SerializerDelegate {
 
   fn is_host_object<'s>(
     &self,
-    _scope: &mut v8::PinScope<'s, '_>,
+    scope: &mut v8::PinScope<'s, '_>,
     _object: v8::Local<'s, v8::Object>,
   ) -> Option<bool> {
-    // should never be called because has_custom_host_object returns false
-    None
+    Some(is_node_host_object(scope, _object))
   }
 }
 

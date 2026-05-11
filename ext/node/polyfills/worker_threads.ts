@@ -8,6 +8,7 @@ import {
   op_host_post_message,
   op_host_post_message_raw,
   op_host_recv_ctrl,
+  op_host_recv_ctrl_sync,
   op_host_recv_message,
   op_host_recv_message_sync,
   op_host_terminate_worker,
@@ -43,6 +44,13 @@ import {
   validateArray,
   validateObject,
 } from "ext:deno_node/internal/validators.mjs";
+import {
+  emitDestroy as emitAsyncDestroy,
+  emitInit as emitAsyncInit,
+  getDefaultTriggerAsyncId,
+  newAsyncId,
+} from "ext:deno_node/internal/async_hooks.ts";
+import { CustomEvent } from "ext:deno_web/02_event.js";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 import {
@@ -51,10 +59,11 @@ import {
 } from "ext:deno_web/01_broadcast_channel.js";
 import { untransferableSymbol } from "ext:deno_node/internal_binding/util.ts";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
 const {
+  ArrayFrom,
   ArrayIsArray,
   Error,
   EvalError,
@@ -206,6 +215,12 @@ export interface WorkerOptions {
 }
 
 const privateWorkerRef = Symbol("privateWorkerRef");
+const privateNodeMessagePortRef = Symbol("privateNodeMessagePortRef");
+const privateNodeMessagePortListeners = Symbol("privateNodeMessagePortListeners");
+const privateNodeMessagePortQueue = Symbol("privateNodeMessagePortQueue");
+const privateNodeMessagePortPumpInstalled = Symbol(
+  "privateNodeMessagePortPumpInstalled",
+);
 class NodeWorker extends EventEmitter {
   #id = 0;
   #name = "";
@@ -213,8 +228,20 @@ class NodeWorker extends EventEmitter {
   #messagePromise = undefined;
   #controlPromise = undefined;
   #messageLoopPromise = undefined;
+  #controlSyncPollScheduled = false;
+  #pendingMessages: unknown[] = [];
   #workerOnline = false;
   #exited = false;
+  #asyncResourceHandle:
+    | {
+      hasRef: () => boolean | undefined;
+      ref: () => unknown;
+      unref: () => unknown;
+    }
+    | null = null;
+  #asyncResourceId = 0;
+  #asyncResourceRefState: boolean | undefined = undefined;
+  #asyncResourceCleanupScheduled = false;
   // "RUNNING" | "CLOSED" | "TERMINATED"
   // "TERMINATED" means that any controls or messages received will be
   // discarded. "CLOSED" means that we have received a control
@@ -235,6 +262,11 @@ class NodeWorker extends EventEmitter {
 
   constructor(specifier: URL | string, options?: WorkerOptions) {
     super();
+
+    const isUrlSpecifier = specifier instanceof URL;
+    if (typeof specifier !== "string" && !isUrlSpecifier) {
+      throw new ERR_INVALID_ARG_TYPE("filename", ["string", "URL"], specifier);
+    }
 
     if (options?.execArgv) {
       validateArray(options.execArgv, "options.execArgv");
@@ -295,7 +327,7 @@ class NodeWorker extends EventEmitter {
       }
     }
 
-    if (typeof specifier === "object") {
+    if (isUrlSpecifier) {
       if (
         !(specifier.protocol === "data:" || specifier.protocol === "file:")
       ) {
@@ -342,6 +374,14 @@ class NodeWorker extends EventEmitter {
     // See https://github.com/denoland/deno/issues/23522.
     let env_ = undefined;
     const envOpt = options?.env;
+    if (envOpt === SHARE_ENV) {
+      const installSharedEnv = (globalThis as typeof globalThis & {
+        __neovexInstallSharedWorkerEnvProxy?: () => void;
+      }).__neovexInstallSharedWorkerEnvProxy;
+      if (typeof installSharedEnv === "function") {
+        installSharedEnv();
+      }
+    }
     if (envOpt != null && envOpt !== SHARE_ENV) {
       if (typeof envOpt !== "object") {
         throw new ERR_INVALID_ARG_TYPE(
@@ -402,6 +442,7 @@ class NodeWorker extends EventEmitter {
       workerData: options?.workerData,
       environmentData: environmentData,
       env: env_,
+      shareEnv: envOpt === SHARE_ENV,
       argv: argv_,
       execArgv: options?.execArgv ?? [],
       name: this.#name,
@@ -436,11 +477,20 @@ class NodeWorker extends EventEmitter {
         code;
       hasSourceCode = true;
       specifier = `data:text/javascript,`;
-    } else if (
-      !(typeof specifier === "object" && specifier.protocol === "data:")
-    ) {
+    } else if (!(isUrlSpecifier && specifier.protocol === "data:")) {
       // deno-lint-ignore prefer-primordials
       specifier = specifier.toString();
+      if (
+        StringPrototypeStartsWith(specifier, "./") ||
+        StringPrototypeStartsWith(specifier, "../") ||
+        StringPrototypeStartsWith(specifier, ".\\") ||
+        StringPrototypeStartsWith(specifier, "..\\")
+      ) {
+        specifier = new URL(
+          specifier,
+          pathToFileURL(process.cwd() + "/"),
+        );
+      }
       specifier = op_worker_threads_filename(specifier) ?? specifier;
     }
 
@@ -468,6 +518,7 @@ class NodeWorker extends EventEmitter {
     );
     this.#id = id;
     this.threadId = id;
+    this.#installAsyncResourceHandle();
 
     if (resourceLimits_) {
       this.resourceLimits = { ...resourceLimits_ };
@@ -506,12 +557,57 @@ class NodeWorker extends EventEmitter {
     process.nextTick(() => process.emit("worker", this));
   }
 
+  #installAsyncResourceHandle() {
+    this.#asyncResourceRefState = true;
+    const handle = {
+      hasRef: () => this.#asyncResourceRefState,
+      ref: () => {
+        this.ref();
+        return handle;
+      },
+      unref: () => {
+        this.unref();
+        return handle;
+      },
+    };
+    this.#asyncResourceHandle = handle;
+    this.#asyncResourceId = newAsyncId();
+    emitAsyncInit(
+      this.#asyncResourceId,
+      "WORKER",
+      getDefaultTriggerAsyncId(),
+      handle,
+    );
+  }
+
+  #scheduleAsyncResourceCleanup() {
+    if (this.#asyncResourceCleanupScheduled || this.#asyncResourceHandle === null) {
+      return;
+    }
+    this.#asyncResourceCleanupScheduled = true;
+    const asyncId = this.#asyncResourceId;
+    setTimeout(() => {
+      this.#asyncResourceRefState = undefined;
+      emitAsyncDestroy(asyncId);
+    }, 0);
+  }
+
+  #drainPendingMessages() {
+    while (this.#pendingMessages.length > 0 && this.listenerCount("message") > 0) {
+      this.emit("message", this.#pendingMessages.shift());
+    }
+  }
+
+  #shouldUnrefParentOps() {
+    return !this.#refed && this.#workerOnline;
+  }
+
   [privateWorkerRef](ref) {
     if (ref === this.#refed) {
       return;
     }
     this.#refed = ref;
-
+    this.#asyncResourceRefState = ref;
     if (ref) {
       if (this.#controlPromise) {
         core.refOpPromise(this.#controlPromise);
@@ -519,7 +615,8 @@ class NodeWorker extends EventEmitter {
       if (this.#messagePromise) {
         core.refOpPromise(this.#messagePromise);
       }
-    } else {
+      this.#scheduleControlSyncPoll();
+    } else if (this.#shouldUnrefParentOps()) {
       if (this.#controlPromise) {
         core.unrefOpPromise(this.#controlPromise);
       }
@@ -542,73 +639,93 @@ class NodeWorker extends EventEmitter {
     }
   }
 
+  async #handleControlEvent(type, data) {
+    switch (type) {
+      case 1: { // TerminalError
+        this.#status = "CLOSED";
+        this.#closeStdio();
+        if (this.listenerCount("error") > 0) {
+          const errMsg = data.errorMessage ?? data.message;
+          const errName = data.name;
+          let err;
+          if (errName === "ERR_WORKER_OUT_OF_MEMORY") {
+            err = new Error(errMsg);
+            err.code = errName;
+            err.name = "Error";
+          } else {
+            const Ctor = nativeErrorConstructors[errName] ?? Error;
+            err = new Ctor(errMsg);
+          }
+          err.stack = undefined;
+          this.emit("error", err);
+        }
+        await this.#messageLoopPromise;
+        this.resourceLimits = {};
+        if (!this.#exited) {
+          this.#exited = true;
+          this.#scheduleAsyncResourceCleanup();
+          this.emit("exit", data.exitCode ?? 1);
+        }
+        return true;
+      }
+      case 2: { // Error
+        this.#handleError(data);
+        return false;
+      }
+      case 3: { // Close
+        debugWT(`Host got "close" message from worker: ${this.#name}`);
+        this.#status = "CLOSED";
+        this.#closeStdio();
+        await this.#messageLoopPromise;
+        this.resourceLimits = {};
+        if (!this.#exited) {
+          this.#exited = true;
+          this.#scheduleAsyncResourceCleanup();
+          this.emit("exit", data ?? 0);
+        }
+        return true;
+      }
+      default: {
+        throw new Error(`Unknown worker event: "${type}"`);
+      }
+    }
+  }
+
+  #scheduleControlSyncPoll() {
+    if (this.#controlSyncPollScheduled || this.#status !== "RUNNING" || !this.#refed) {
+      return;
+    }
+    this.#controlSyncPollScheduled = true;
+    setTimeout(async () => {
+      this.#controlSyncPollScheduled = false;
+      if (this.#status !== "RUNNING" || !this.#refed) {
+        return;
+      }
+      const controlEvent = op_host_recv_ctrl_sync(this.#id);
+      if (controlEvent !== null) {
+        const { 0: type, 1: data } = controlEvent;
+        await this.#handleControlEvent(type, data);
+      }
+      if (this.#status === "RUNNING" && this.#refed) {
+        this.#scheduleControlSyncPoll();
+      }
+    }, 0);
+  }
+
   #pollControl = async () => {
     while (this.#status === "RUNNING") {
       this.#controlPromise = op_host_recv_ctrl(this.#id);
-      if (!this.#refed) {
+      if (this.#shouldUnrefParentOps()) {
         core.unrefOpPromise(this.#controlPromise);
       }
       const { 0: type, 1: data } = await this.#controlPromise;
 
-      // If terminate was called then we ignore all messages
-      if (this.#status === "TERMINATED") {
+      if (this.#status !== "RUNNING") {
         return;
       }
 
-      switch (type) {
-        case 1: { // TerminalError
-          this.#status = "CLOSED";
-          this.#closeStdio();
-          if (this.listenerCount("error") > 0) {
-            const errMsg = data.errorMessage ?? data.message;
-            const errName = data.name;
-            let err;
-            if (errName === "ERR_WORKER_OUT_OF_MEMORY") {
-              err = new Error(errMsg);
-              err.code = errName;
-              err.name = "Error";
-            } else {
-              // Use the correct native error constructor so that
-              // err.constructor matches (e.g. SyntaxError, TypeError).
-              const Ctor = nativeErrorConstructors[errName] ?? Error;
-              err = new Ctor(errMsg);
-            }
-            // Stack is unavailable from the worker context (e.g. prepareStackTrace
-            // may have thrown). Match Node.js behavior of setting stack to undefined.
-            err.stack = undefined;
-            this.emit("error", err);
-          }
-          // Drain pending messages before emitting exit so that
-          // all 'message' events fire before 'exit' (Node.js behavior).
-          await this.#messageLoopPromise;
-          this.resourceLimits = {};
-          if (!this.#exited) {
-            this.#exited = true;
-            this.emit("exit", data.exitCode ?? 1);
-          }
-          return;
-        }
-        case 2: { // Error
-          this.#handleError(data);
-          break;
-        }
-        case 3: { // Close
-          debugWT(`Host got "close" message from worker: ${this.#name}`);
-          this.#status = "CLOSED";
-          this.#closeStdio();
-          // Drain pending messages before emitting exit so that
-          // all 'message' events fire before 'exit' (Node.js behavior).
-          await this.#messageLoopPromise;
-          this.resourceLimits = {};
-          if (!this.#exited) {
-            this.#exited = true;
-            this.emit("exit", data ?? 0);
-          }
-          return;
-        }
-        default: {
-          throw new Error(`Unknown worker event: "${type}"`);
-        }
+      if (await this.#handleControlEvent(type, data)) {
+        return;
       }
     }
   };
@@ -630,6 +747,14 @@ class NodeWorker extends EventEmitter {
       !this.#workerOnline && isWorkerOnlineMsg(message)
     ) {
       this.#workerOnline = true;
+      if (!this.#refed) {
+        if (this.#controlPromise) {
+          core.unrefOpPromise(this.#controlPromise);
+        }
+        if (this.#messagePromise) {
+          core.unrefOpPromise(this.#messagePromise);
+        }
+      }
       this.emit("online");
     } else if (isWorkerStdoutMsg(message)) {
       FunctionPrototypeCall(
@@ -644,7 +769,11 @@ class NodeWorker extends EventEmitter {
         message.data,
       );
     } else {
-      this.emit("message", message);
+      if (this.listenerCount("message") === 0) {
+        this.#pendingMessages.push(message);
+      } else {
+        this.emit("message", message);
+      }
     }
     return true;
   }
@@ -652,11 +781,24 @@ class NodeWorker extends EventEmitter {
   #pollMessages = async () => {
     while (this.#status !== "TERMINATED") {
       this.#messagePromise = op_host_recv_message(this.#id);
-      if (!this.#refed) {
+      if (this.#shouldUnrefParentOps()) {
         core.unrefOpPromise(this.#messagePromise);
       }
       const data = await this.#messagePromise;
-      if (this.#status === "TERMINATED" || data === null) {
+      if (data === null) {
+        if (this.#status === "RUNNING") {
+          this.#status = "CLOSED";
+          this.#closeStdio();
+          this.resourceLimits = {};
+          if (!this.#exited) {
+            this.#exited = true;
+            this.#scheduleAsyncResourceCleanup();
+            this.emit("exit", 0);
+          }
+        }
+        return;
+      }
+      if (this.#status === "TERMINATED") {
         return;
       }
       if (!this.#dispatchWorkerThreadMessage(data)) return;
@@ -720,11 +862,18 @@ class NodeWorker extends EventEmitter {
     }
 
     this.#status = "TERMINATED";
+    if (this.#controlPromise) {
+      core.unrefOpPromise(this.#controlPromise);
+    }
+    if (this.#messagePromise) {
+      core.unrefOpPromise(this.#messagePromise);
+    }
     op_host_terminate_worker(this.#id);
     this.#closeStdio();
 
     if (!this.#exited) {
       this.#exited = true;
+      this.#scheduleAsyncResourceCleanup();
       this.emit("exit", 1);
       return PromiseResolve(1);
     }
@@ -736,6 +885,29 @@ class NodeWorker extends EventEmitter {
 
   async [SymbolAsyncDispose]() {
     await this.terminate();
+  }
+
+  addListener(
+    eventName: string | symbol,
+    listener: (...args: unknown[]) => unknown,
+  ) {
+    super.addListener(eventName, listener);
+    if (eventName === "message") {
+      this.#drainPendingMessages();
+    }
+    return this;
+  }
+
+  on(eventName: string | symbol, listener: (...args: unknown[]) => unknown) {
+    return this.addListener(eventName, listener);
+  }
+
+  once(eventName: string | symbol, listener: (...args: unknown[]) => unknown) {
+    super.once(eventName, listener);
+    if (eventName === "message") {
+      this.#drainPendingMessages();
+    }
+    return this;
   }
 
   ref() {
@@ -1004,6 +1176,18 @@ internals.__initWorkerThreads = (
       const env = metadata.env;
       if (env) {
         process.env = env;
+        if (globalThis.process && typeof globalThis.process === "object") {
+          globalThis.process.env = env;
+        }
+        if (
+          internals.nodeGlobals?.process &&
+          typeof internals.nodeGlobals.process === "object"
+        ) {
+          internals.nodeGlobals.process.env = env;
+        }
+      }
+      if (globalThis.process !== process) {
+        globalThis.process = process;
       }
 
       // Get resolved resource limits from the Rust side (includes V8
@@ -1253,15 +1437,15 @@ class NodeMessageChannel {
     const origClose1 = FunctionPrototypeBind(port1.close, port1);
     const origClose2 = FunctionPrototypeBind(port2.close, port2);
 
-    port1.close = () => {
-      origClose1();
+    port1.close = (...args) => {
+      origClose1(...args);
       if (!port2[nodeWorkerThreadCloseCbInvoked]) {
         port2[nodeWorkerThreadCloseCbInvoked] = true;
         port2.dispatchEvent(new Event("close"));
       }
     };
-    port2.close = () => {
-      origClose2();
+    port2.close = (...args) => {
+      origClose2(...args);
       if (!port1[nodeWorkerThreadCloseCbInvoked]) {
         port1[nodeWorkerThreadCloseCbInvoked] = true;
         port1.dispatchEvent(new Event("close"));
@@ -1276,19 +1460,216 @@ const listeners = new SafeWeakMap<
   // deno-lint-ignore no-explicit-any
   (ev: any) => any
 >();
-function webMessagePortToNodeMessagePort(port: MessagePort) {
-  port.on = port.addListener = function (this: MessagePort, name, listener) {
-    // deno-lint-ignore no-explicit-any
-    const _listener = (ev: any) => {
-      patchMessagePortIfFound(ev.data);
-      listener(ev.data);
+
+function createNodeMessagePortArgTypeError(message: string) {
+  const err = new TypeError(message);
+  err.code = "ERR_INVALID_ARG_TYPE";
+  return err;
+}
+
+function normalizeNodeMessagePortTransferArg(transferOrOptions) {
+  if (transferOrOptions === undefined || transferOrOptions === null) {
+    return {
+      argument: transferOrOptions,
+      transferList: [],
     };
-    if (name == "message") {
-      if (port.onmessage === null) {
-        port.onmessage = _listener;
-      } else {
-        port.addEventListener("message", _listener);
+  }
+
+  if (ArrayIsArray(transferOrOptions)) {
+    return {
+      argument: transferOrOptions,
+      transferList: transferOrOptions,
+    };
+  }
+
+  if (typeof transferOrOptions !== "object") {
+    throw createNodeMessagePortArgTypeError(
+      "Optional transferList argument must be an iterable",
+    );
+  }
+
+  const iterator = transferOrOptions[SymbolIterator];
+  if (iterator !== undefined) {
+    if (typeof iterator !== "function") {
+      throw createNodeMessagePortArgTypeError(
+        "Optional transferList argument must be an iterable",
+      );
+    }
+    try {
+      const transferList = ArrayFrom(transferOrOptions);
+      return {
+        argument: transferList,
+        transferList,
+      };
+    } catch {
+      throw createNodeMessagePortArgTypeError(
+        "Optional transferList argument must be an iterable",
+      );
+    }
+  }
+
+  const transfer = transferOrOptions.transfer;
+  if (transfer === undefined) {
+    return {
+      argument: transferOrOptions,
+      transferList: [],
+    };
+  }
+  if (transfer === null || typeof transfer !== "object") {
+    throw createNodeMessagePortArgTypeError(
+      "Optional options.transfer argument must be an iterable",
+    );
+  }
+  const transferIterator = transfer[SymbolIterator];
+  if (typeof transferIterator !== "function") {
+    throw createNodeMessagePortArgTypeError(
+      "Optional options.transfer argument must be an iterable",
+    );
+  }
+  try {
+    const transferList = ArrayFrom(transfer);
+    return {
+      argument: { transfer: transferList },
+      transferList,
+    };
+  } catch {
+    throw createNodeMessagePortArgTypeError(
+      "Optional options.transfer argument must be an iterable",
+    );
+  }
+}
+
+function ensureNodeMessagePortMessagePump(port: MessagePort) {
+  if (port[privateNodeMessagePortPumpInstalled] === true) {
+    return;
+  }
+
+  port[privateNodeMessagePortListeners] = [];
+  port[privateNodeMessagePortQueue] = [];
+  port.addEventListener("message", (ev) => {
+    patchMessagePortIfFound(ev.data);
+    const listeners = port[privateNodeMessagePortListeners];
+    if (!ArrayIsArray(listeners) || listeners.length === 0) {
+      port[privateNodeMessagePortQueue].push(ev.data);
+      return;
+    }
+
+    for (let i = 0; i < listeners.length; i++) {
+      listeners[i](ev.data);
+    }
+  });
+  port.start();
+  port[privateNodeMessagePortPumpInstalled] = true;
+}
+
+function drainNodeMessagePortQueue(port: MessagePort) {
+  const listeners = port[privateNodeMessagePortListeners];
+  const queue = port[privateNodeMessagePortQueue];
+  if (!ArrayIsArray(listeners) || listeners.length === 0 || !ArrayIsArray(queue)) {
+    return;
+  }
+
+  while (queue.length > 0) {
+    const message = queue.shift();
+    for (let i = 0; i < listeners.length; i++) {
+      listeners[i](message);
+    }
+  }
+}
+
+if (!ObjectHasOwn(MessagePortPrototype, "ref")) {
+  ObjectDefineProperty(MessagePortPrototype, "ref", {
+    __proto__: null,
+    value: function ref(this: MessagePort) {
+      this[privateNodeMessagePortRef] = true;
+      this[refMessagePort](true);
+      return this;
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+if (!ObjectHasOwn(MessagePortPrototype, "unref")) {
+  ObjectDefineProperty(MessagePortPrototype, "unref", {
+    __proto__: null,
+    value: function unref(this: MessagePort) {
+      this[privateNodeMessagePortRef] = false;
+      this[refMessagePort](false);
+      return this;
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+if (!ObjectHasOwn(MessagePortPrototype, "hasRef")) {
+  ObjectDefineProperty(MessagePortPrototype, "hasRef", {
+    __proto__: null,
+    value: function hasRef(this: MessagePort) {
+      return this[privateNodeMessagePortRef] !== false;
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+delete MessagePortPrototype.addEventListener;
+delete MessagePortPrototype.removeEventListener;
+
+function webMessagePortToNodeMessagePort(port: MessagePort) {
+  const nativeAddEventListener = FunctionPrototypeBind(
+    port.addEventListener,
+    port,
+  );
+  const nativeRemoveEventListener = FunctionPrototypeBind(
+    port.removeEventListener,
+    port,
+  );
+  ObjectDefineProperty(port, "addEventListener", {
+    __proto__: null,
+    value: (name, listener, options?) => {
+      nativeAddEventListener(name, listener, options);
+      if (name === "message" || name === "messageerror") {
+        port.start();
       }
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  ObjectDefineProperty(port, "removeEventListener", {
+    __proto__: null,
+    value: (name, listener, options?) => {
+      nativeRemoveEventListener(name, listener, options);
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  port.on = port.addListener = function (this: MessagePort, name, listener) {
+    const _listener = name === "message"
+      ? (message) => listener(message)
+      // deno-lint-ignore no-explicit-any
+      : (ev: any) => {
+        if (name === "messageerror") {
+          patchMessagePortIfFound(ev.data);
+          listener(ev.data);
+          return;
+        }
+        if (name === "close") {
+          listener();
+          return;
+        }
+        listener(ev.detail);
+      };
+    if (name == "message") {
+      ensureNodeMessagePortMessagePump(port);
+      port[privateNodeMessagePortListeners].push(_listener);
+      drainNodeMessagePortQueue(port);
     } else if (name == "messageerror") {
       if (port.onmessageerror === null) {
         port.onmessageerror = _listener;
@@ -1298,7 +1679,7 @@ function webMessagePortToNodeMessagePort(port: MessagePort) {
     } else if (name == "close") {
       port.addEventListener("close", _listener);
     } else {
-      throw new Error(`Unknown event: "${name}"`);
+      port.addEventListener(name, _listener);
     }
     listeners.set(listener, _listener);
     return this;
@@ -1308,14 +1689,25 @@ function webMessagePortToNodeMessagePort(port: MessagePort) {
     name,
     listener,
   ) {
+    const mappedListener = listeners.get(listener)!;
     if (name == "message") {
-      port.removeEventListener("message", listeners.get(listener)!);
+      const nodeMessageListeners = port[privateNodeMessagePortListeners];
+      if (ArrayIsArray(nodeMessageListeners)) {
+        const index = nodeMessageListeners.indexOf(mappedListener);
+        if (index !== -1) {
+          nodeMessageListeners.splice(index, 1);
+        }
+      }
     } else if (name == "messageerror") {
-      port.removeEventListener("messageerror", listeners.get(listener)!);
+      if (port.onmessageerror === mappedListener) {
+        port.onmessageerror = null;
+      } else {
+        port.removeEventListener("messageerror", mappedListener);
+      }
     } else if (name == "close") {
-      port.removeEventListener("close", listeners.get(listener)!);
+      port.removeEventListener("close", mappedListener);
     } else {
-      throw new Error(`Unknown event: "${name}"`);
+      port.removeEventListener(name, mappedListener);
     }
     listeners.delete(listener);
     return this;
@@ -1323,16 +1715,21 @@ function webMessagePortToNodeMessagePort(port: MessagePort) {
   port[nodeWorkerThreadCloseCb] = () => {
     port.dispatchEvent(new Event("close"));
   };
-  port.unref = () => {
-    port[refMessagePort](false);
-  };
-  port.ref = () => {
-    port[refMessagePort](true);
+  const webClose = FunctionPrototypeBind(port.close, port);
+  port.close = (callback?) => {
+    const result = webClose();
+    if (callback !== undefined) {
+      callback();
+    }
+    return result;
   };
   const webPostMessage = port.postMessage;
   port.postMessage = (message, transferList) => {
-    for (let i = 0; i < transferList?.length; i++) {
-      const item = transferList[i];
+    const normalizedTransfer = normalizeNodeMessagePortTransferArg(
+      transferList,
+    );
+    for (let i = 0; i < normalizedTransfer.transferList.length; i++) {
+      const item = normalizedTransfer.transferList[i];
       if (item[untransferableSymbol] === true) {
         throw new DOMException("Value not transferable", "DataCloneError");
       }
@@ -1342,15 +1739,41 @@ function webMessagePortToNodeMessagePort(port: MessagePort) {
       webPostMessage,
       port,
       message,
-      transferList,
+      normalizedTransfer.argument,
     );
   };
   port.once = (name: string | symbol, listener) => {
-    const fn = (event) => {
-      port.off(name, fn);
-      return listener(event);
+    if (name === "message") {
+      ensureNodeMessagePortMessagePump(port);
+      const wrapped = (message) => {
+        port.off(name, listener);
+        listener(message);
+      };
+      listeners.set(listener, wrapped);
+      port[privateNodeMessagePortListeners].push(wrapped);
+      drainNodeMessagePortQueue(port);
+      return port;
+    }
+    // deno-lint-ignore no-explicit-any
+    const _listener = (ev: any) => {
+      listeners.delete(listener);
+      if (name === "messageerror") {
+        patchMessagePortIfFound(ev.data);
+        listener(ev.data);
+        return;
+      }
+      if (name === "close") {
+        listener();
+        return;
+      }
+      listener(ev.detail);
     };
-    port.on(name, fn);
+    listeners.set(listener, _listener);
+    port.addEventListener(name, _listener, { once: true });
+    return port;
+  };
+  port.emit = function (this: MessagePort, name, value) {
+    return this.dispatchEvent(new CustomEvent(name, { detail: value }));
   };
   return port;
 }

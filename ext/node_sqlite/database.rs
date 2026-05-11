@@ -7,7 +7,7 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::ffi::c_char;
 use std::ffi::c_void;
-use std::path::Path;
+use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::ptr::null;
 use std::rc::Rc;
@@ -552,14 +552,45 @@ fn set_db_config(
   }
 }
 
+fn permission_check_path(location: &str) -> PathBuf {
+  if let Some(file_url_path) = location.strip_prefix("file:") {
+    let file_url_path = file_url_path
+      .strip_prefix("//")
+      .unwrap_or(file_url_path);
+    let trimmed = file_url_path
+      .split_once('?')
+      .map(|(path, _)| path)
+      .unwrap_or(file_url_path)
+      .split_once('#')
+      .map(|(path, _)| path)
+      .unwrap_or(file_url_path);
+    return PathBuf::from(trimmed);
+  }
+
+  PathBuf::from(location)
+}
+
+fn sqlite_open_flags(read_only: bool) -> rusqlite::OpenFlags {
+  let mut flags = if read_only {
+    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+  } else {
+    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE |
+      rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+  };
+
+  flags |= rusqlite::OpenFlags::SQLITE_OPEN_URI;
+  flags
+}
+
 fn open_db(
   state: &mut OpState,
   location: &str,
   options: &DatabaseSyncOptions,
 ) -> Result<rusqlite::Connection, SqliteError> {
   let perms = state.borrow::<PermissionsContainer>();
+  let permission_path = permission_check_path(location);
   let disable_attach = perms
-    .check_has_all_permissions(Path::new(location))
+    .check_has_all_permissions(permission_path.as_path())
     .is_err();
 
   if location == ":memory:" {
@@ -592,22 +623,18 @@ fn open_db(
     return Ok(conn);
   }
 
-  let location = perms
-    .check_open(
-      Cow::Borrowed(Path::new(location)),
-      match options.read_only {
-        true => OpenAccessKind::ReadNoFollow,
-        false => OpenAccessKind::ReadWriteNoFollow,
-      },
-      Some("node:sqlite"),
-    )?
-    .into_path();
+  perms.check_open(
+    Cow::Owned(permission_path),
+    match options.read_only {
+      true => OpenAccessKind::ReadNoFollow,
+      false => OpenAccessKind::ReadWriteNoFollow,
+    },
+    Some("node:sqlite"),
+  )?;
 
   if options.read_only {
-    let conn = rusqlite::Connection::open_with_flags(
-      location,
-      rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let open_flags = sqlite_open_flags(true);
+    let conn = rusqlite::Connection::open_with_flags(location, open_flags)?;
     if disable_attach {
       assert!(set_db_config(
         &conn,
@@ -636,7 +663,8 @@ fn open_db(
     return Ok(conn);
   }
 
-  let conn = rusqlite::Connection::open(location)?;
+  let open_flags = sqlite_open_flags(false);
+  let conn = rusqlite::Connection::open_with_flags(location, open_flags)?;
   conn.busy_timeout(std::time::Duration::from_millis(options.timeout))?;
 
   if options.allow_extension {

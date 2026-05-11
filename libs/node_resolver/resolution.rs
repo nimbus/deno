@@ -377,6 +377,16 @@ impl<
       .is_builtin_node_module(specifier)
   }
 
+  #[inline(always)]
+  pub fn is_builtin_node_module_without_scheme(
+    &self,
+    specifier: &str,
+  ) -> bool {
+    self
+      .is_built_in_node_module_checker
+      .is_builtin_node_module_without_scheme(specifier)
+  }
+
   /// This function is an implementation of `defaultResolve` in
   /// `lib/internal/modules/esm/resolve.js` from Node.
   pub fn resolve(
@@ -389,7 +399,7 @@ impl<
     // Note: if we are here, then the referrer is an esm module
     // TODO(bartlomieju): skipped "policy" part as we don't plan to support it
 
-    if self.is_builtin_node_module(specifier) {
+    if self.is_builtin_node_module_without_scheme(specifier) {
       return Ok(NodeResolution::BuiltIn(specifier.to_string()));
     }
 
@@ -1208,7 +1218,7 @@ impl<
               Err(err) => {
                 if self
                   .is_built_in_node_module_checker
-                  .is_builtin_node_module(target)
+                  .is_builtin_node_module_without_scheme(target)
                 {
                   Ok(MaybeTypesResolvedUrl(LocalUrlOrPath::Url(
                     Url::parse(&format!("node:{}", target)).unwrap(),

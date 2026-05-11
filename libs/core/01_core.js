@@ -392,6 +392,9 @@
           // then continuing the drain loop.
           reportExceptionCallback(e);
         } finally {
+          tock.callback = undefined;
+          tock.args = undefined;
+          tock.snapshot = undefined;
           emitDestroy(asyncId);
         }
 

@@ -2,12 +2,14 @@
 
 // Based on: https://github.com/nodejs/node/blob/0646eda/lib/constants.js
 
+import { primordials } from "ext:core/mod.js";
+const { ObjectFreeze } = primordials;
 import { constants as fsConstants } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { constants as cryptoConstants } from "node:crypto";
 import { constants as zlibConstants } from "node:zlib";
 
-export default {
+const constants = ObjectFreeze({
   ...fsConstants,
   ...osConstants.dlopen,
   ...osConstants.errno,
@@ -15,7 +17,9 @@ export default {
   ...osConstants.priority,
   ...cryptoConstants,
   ...zlibConstants,
-};
+});
+
+export default constants;
 
 export const {
   F_OK,

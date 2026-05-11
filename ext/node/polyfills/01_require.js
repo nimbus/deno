@@ -10,7 +10,6 @@ import {
   op_require_as_file_path,
   op_require_break_on_next_statement,
   op_require_can_parse_as_esm,
-  op_require_init_paths,
   op_require_is_deno_dir_package,
   op_require_is_maybe_cjs,
   op_require_is_request_relative,
@@ -154,6 +153,7 @@ import querystring from "node:querystring";
 import readline from "node:readline";
 import readlinePromises from "node:readline/promises";
 import repl from "node:repl";
+import sea from "node:sea";
 import sqlite from "node:sqlite";
 import stream from "node:stream";
 import streamConsumers from "node:stream/consumers";
@@ -162,6 +162,7 @@ import streamWeb from "node:stream/web";
 import stringDecoder from "node:string_decoder";
 import sys from "node:sys";
 import test from "node:test";
+import testReporters from "node:test/reporters";
 import timers from "node:timers";
 import timersPromises from "node:timers/promises";
 import tls from "node:tls";
@@ -178,6 +179,14 @@ import zlib from "node:zlib";
 
 const nativeModuleExports = ObjectCreate(null);
 const builtinModules = [];
+// Match Node's schemelessBlockList: these modules can only be imported
+// via the `node:` scheme (see lib/internal/bootstrap/realm.js).
+const schemelessBlockList = new SafeSet([
+  "sea",
+  "sqlite",
+  "test",
+  "test/reporters",
+]);
 
 // NOTE(bartlomieju): keep this list in sync with `ext/node/lib.rs`
 function setupBuiltinModules() {
@@ -269,6 +278,7 @@ function setupBuiltinModules() {
     readline,
     "readline/promises": readlinePromises,
     repl,
+    sea,
     sqlite,
     stream,
     "stream/consumers": streamConsumers,
@@ -277,6 +287,7 @@ function setupBuiltinModules() {
     string_decoder: stringDecoder,
     sys,
     test,
+    "test/reporters": testReporters,
     timers,
     "timers/promises": timersPromises,
     tls,
@@ -291,15 +302,6 @@ function setupBuiltinModules() {
     worker_threads: workerThreads,
     zlib,
   };
-  // Match Node's schemelessBlockList: these modules can only be imported
-  // via the `node:` scheme (see lib/internal/bootstrap/realm.js), so they
-  // appear in `builtinModules` as `node:<name>` rather than `<name>`.
-  const schemelessBlockList = new SafeSet([
-    "sea",
-    "sqlite",
-    "test",
-    "test/reporters",
-  ]);
   for (const [name, moduleExports] of ObjectEntries(nodeModules)) {
     nativeModuleExports[name] = moduleExports;
     // `internal/*` modules are only exposed under --expose-internals, so
@@ -709,10 +711,7 @@ Module._resolveLookupPaths = function (request, parent) {
   const normalizedRequest = StringPrototypeStartsWith(request, "node:")
     ? StringPrototypeSlice(request, 5)
     : request;
-  if (
-    isBuiltin(request) ||
-    normalizedRequest in nativeModuleExports
-  ) {
+  if (isBuiltin(request) || nativeModuleCanBeRequiredByUsers(normalizedRequest)) {
     return null;
   }
 
@@ -737,9 +736,16 @@ Module._resolveLookupPaths = function (request, parent) {
       ArrayPrototypePush(paths, denoDirPath);
     }
   }
+  const combinedPaths = [];
+  if (parent?.paths?.length > 0) {
+    ArrayPrototypePush(combinedPaths, ...new SafeArrayIterator(parent.paths));
+  }
+  if (modulePaths.length > 0) {
+    ArrayPrototypePush(combinedPaths, ...new SafeArrayIterator(modulePaths));
+  }
   const lookupPathsResult = op_require_resolve_lookup_paths(
     request,
-    parent?.paths,
+    combinedPaths.length > 0 ? combinedPaths : undefined,
     parent?.filename ?? "",
   );
   if (lookupPathsResult) {
@@ -793,7 +799,9 @@ Module._load = function (request, parent, isMain) {
     return cachedModule.exports;
   }
 
-  const mod = loadNativeModule(filename, request);
+  const mod = SetPrototypeHas(schemelessBlockList, request)
+    ? undefined
+    : loadNativeModule(filename, request);
   if (
     mod
   ) {
@@ -866,10 +874,10 @@ Module._resolveFilename = function (
 
   if (StringPrototypeStartsWith(request, "node:")) {
     const id = StringPrototypeSlice(request, 5);
-    if (nativeModuleExports[id]) {
+    if (nativeModuleIsAvailable(id)) {
       return request;
     }
-    const err = new Error(`Cannot find module '${request}'`);
+    const err = new Error(`No such built-in module: ${request}`);
     err.code = "MODULE_NOT_FOUND";
     throw err;
   }
@@ -1307,21 +1315,116 @@ function napiAsyncHooksEmitDestroy(asyncId) {
   internalAsyncHooksEmitDestroy(asyncId);
 }
 
+function matchesNativeAddonMagic(header, bytesRead) {
+  switch (process.platform) {
+    case "darwin": {
+      if (bytesRead < 4) {
+        return false;
+      }
+      const magic = [
+        header[0],
+        header[1],
+        header[2],
+        header[3],
+      ];
+      return [
+        [0xfe, 0xed, 0xfa, 0xce],
+        [0xce, 0xfa, 0xed, 0xfe],
+        [0xfe, 0xed, 0xfa, 0xcf],
+        [0xcf, 0xfa, 0xed, 0xfe],
+        [0xca, 0xfe, 0xba, 0xbe],
+        [0xbe, 0xba, 0xfe, 0xca],
+        [0xca, 0xfe, 0xba, 0xbf],
+        [0xbf, 0xba, 0xfe, 0xca],
+      ].some((candidate) =>
+        magic[0] === candidate[0] &&
+        magic[1] === candidate[1] &&
+        magic[2] === candidate[2] &&
+        magic[3] === candidate[3]
+      );
+    }
+    case "linux": {
+      return bytesRead >= 4 &&
+        header[0] === 0x7f &&
+        header[1] === 0x45 &&
+        header[2] === 0x4c &&
+        header[3] === 0x46;
+    }
+    case "sunos": {
+      return bytesRead >= 4 &&
+        header[0] === 0x7f &&
+        header[1] === 0x45 &&
+        header[2] === 0x4c &&
+        header[3] === 0x46;
+    }
+    case "win32": {
+      return bytesRead >= 2 &&
+        header[0] === 0x4d &&
+        header[1] === 0x5a;
+    }
+    default:
+      return true;
+  }
+}
+
+function maybeInvalidNativeAddonErrorMessage(filename) {
+  let fd;
+  try {
+    fd = fs.openSync(filename, "r");
+    const header = buffer.Buffer.alloc(8);
+    const bytesRead = fs.readSync(fd, header, 0, header.length, 0);
+    if (matchesNativeAddonMagic(header, bytesRead)) {
+      return undefined;
+    }
+    switch (process.platform) {
+      case "darwin":
+        return bytesRead < 4 ? "file too short" : "not a mach-o file";
+      case "linux":
+        return bytesRead < 4 ? "file too short" : "Exec format error";
+      case "sunos":
+        return bytesRead < 4 ? "unknown file type" : "not an ELF file";
+      case "win32":
+        return "is not a valid Win32 application";
+      default:
+        return undefined;
+    }
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+  }
+}
+
 // Native extension for .node
 Module._extensions[".node"] = function (module, filename) {
   if (filename.endsWith("cpufeatures.node")) {
     throw new Error("Using cpu-features module is currently not supported");
   }
-  module.exports = op_napi_open(
-    filename,
-    globalThis,
-    buffer.Buffer.from,
-    reportError,
-    napiAsyncHooksEmitInit,
-    napiAsyncHooksEmitBefore,
-    napiAsyncHooksEmitAfter,
-    napiAsyncHooksEmitDestroy,
-  );
+  try {
+    module.exports = op_napi_open(
+      filename,
+      globalThis,
+      buffer.Buffer.from,
+      reportError,
+      napiAsyncHooksEmitInit,
+      napiAsyncHooksEmitBefore,
+      napiAsyncHooksEmitAfter,
+      napiAsyncHooksEmitDestroy,
+    );
+  } catch (error) {
+    if (
+      typeof error?.message === "string" &&
+      StringPrototypeIncludes(error.message, "Requires ffi access")
+    ) {
+      const invalidAddonMessage = maybeInvalidNativeAddonErrorMessage(filename);
+      if (invalidAddonMessage !== undefined) {
+        throw new Error(invalidAddonMessage);
+      }
+    }
+    throw error;
+  }
 };
 
 function createRequireFromPath(filename) {
@@ -1418,9 +1521,7 @@ function isBuiltin(moduleName) {
 
   if (StringPrototypeStartsWith(moduleName, "node:")) {
     moduleName = StringPrototypeSlice(moduleName, 5);
-  } else if (moduleName === "test") {
-    // test is only a builtin if it has the "node:" scheme
-    // see https://github.com/nodejs/node/blob/73025c4dec042e344eeea7912ed39f7b7c4a3991/test/parallel/test-module-isBuiltin.js#L14
+  } else if (SetPrototypeHas(schemelessBlockList, moduleName)) {
     return false;
   }
 
@@ -1454,7 +1555,37 @@ Module.isBuiltin = isBuiltin;
 Module.createRequire = createRequire;
 
 Module._initPaths = function () {
-  const paths = op_require_init_paths();
+  const isWindows = process.platform === "win32";
+  const homeDir = isWindows
+    ? (process.env.USERPROFILE ?? "")
+    : (process.env.HOME ?? "");
+  const nodePath = process.env.NODE_PATH ?? "";
+  let paths = [];
+
+  if (typeof process.execPath === "string" && process.execPath.length > 0) {
+    const prefixDir = isWindows
+      ? pathDirname(process.execPath)
+      : pathDirname(pathDirname(process.execPath));
+    ArrayPrototypePush(paths, pathResolve(prefixDir, "lib", "node"));
+  }
+
+  if (homeDir.length > 0) {
+    const homePaths = [
+      pathResolve(homeDir, ".node_modules"),
+      pathResolve(homeDir, ".node_libraries"),
+    ];
+    ArrayPrototypePush(homePaths, ...new SafeArrayIterator(paths));
+    paths = homePaths;
+  }
+
+  if (nodePath.length > 0) {
+    const delimiter = isWindows ? ";" : ":";
+    const nodePaths = StringPrototypeSplit(nodePath, delimiter)
+      .filter((entry) => entry.length > 0);
+    ArrayPrototypePush(nodePaths, ...new SafeArrayIterator(paths));
+    paths = nodePaths;
+  }
+
   modulePaths = paths;
   Module.globalPaths = ArrayPrototypeSlice(modulePaths);
 };
@@ -1473,6 +1604,9 @@ Module.Module = Module;
 nativeModuleExports.module = Module;
 
 function loadNativeModule(_id, request) {
+  if (!nativeModuleIsAvailable(request)) {
+    return undefined;
+  }
   if (nativeModulePolyfill.has(request)) {
     return nativeModulePolyfill.get(request);
   }
@@ -1490,8 +1624,20 @@ function loadNativeModule(_id, request) {
   return undefined;
 }
 
+function nativeModuleDisabledByExecArgv(request) {
+  return request === "sqlite" &&
+    ArrayIsArray(process.execArgv) &&
+    ArrayPrototypeIncludes(process.execArgv, "--no-experimental-sqlite");
+}
+
+function nativeModuleIsAvailable(request) {
+  return !!nativeModuleExports[request] &&
+    !nativeModuleDisabledByExecArgv(request);
+}
+
 function nativeModuleCanBeRequiredByUsers(request) {
-  return !!nativeModuleExports[request];
+  return nativeModuleIsAvailable(request) &&
+    !SetPrototypeHas(schemelessBlockList, request);
 }
 
 function readPackageScope() {

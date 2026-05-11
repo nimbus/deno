@@ -120,39 +120,33 @@ export class Domain extends EventEmitter {
   bind(fn) {
     // deno-lint-ignore no-this-alias
     const self = this;
-    return function () {
+    function runBound() {
       self.enter();
-      try {
-        const ret = FunctionPrototypeApply(
-          fn,
-          this,
-          ArrayPrototypeSlice(arguments),
-        );
-        self.exit();
-        return ret;
-      } catch (e) {
-        self.exit();
-        if (typeof e === "object" && e !== null) {
-          e.domainBound = fn;
-          e.domainThrown = false;
-          ObjectDefineProperty(e, "domain", {
-            __proto__: null,
-            configurable: true,
-            enumerable: false,
-            value: self,
-            writable: true,
-          });
-        }
-        FunctionPrototypeCall(emitError, self, e);
-      }
-    };
+      const ret = FunctionPrototypeApply(
+        fn,
+        this,
+        ArrayPrototypeSlice(arguments),
+      );
+      self.exit();
+      return ret;
+    }
+
+    ObjectDefineProperty(runBound, "domain", {
+      __proto__: null,
+      configurable: true,
+      enumerable: false,
+      value: this,
+      writable: true,
+    });
+
+    return runBound;
   }
 
   intercept(fn) {
     // deno-lint-ignore no-this-alias
     const self = this;
     return function (e) {
-      if (e) {
+      if (e instanceof Error) {
         if (typeof e === "object" && e !== null) {
           e.domainBound = fn;
           e.domainThrown = false;
@@ -167,29 +161,13 @@ export class Domain extends EventEmitter {
         FunctionPrototypeCall(emitError, self, e);
       } else {
         self.enter();
-        try {
-          const ret = FunctionPrototypeApply(
-            fn,
-            this,
-            ArrayPrototypeSlice(arguments, 1),
-          );
-          self.exit();
-          return ret;
-        } catch (e) {
-          self.exit();
-          if (typeof e === "object" && e !== null) {
-            e.domainBound = fn;
-            e.domainThrown = false;
-            ObjectDefineProperty(e, "domain", {
-              __proto__: null,
-              configurable: true,
-              enumerable: false,
-              value: self,
-              writable: true,
-            });
-          }
-          FunctionPrototypeCall(emitError, self, e);
-        }
+        const ret = FunctionPrototypeApply(
+          fn,
+          this,
+          ArrayPrototypeSlice(arguments, 1),
+        );
+        self.exit();
+        return ret;
       }
     };
   }
@@ -201,18 +179,11 @@ export class Domain extends EventEmitter {
       this.exit();
       return ret;
     } catch (e) {
-      this.exit();
-      if (typeof e === "object" && e !== null) {
-        e.domainThrown = true;
-        ObjectDefineProperty(e, "domain", {
-          __proto__: null,
-          configurable: true,
-          enumerable: false,
-          value: this,
-          writable: true,
-        });
+      if (typeof process._fatalException === "function" &&
+        process._fatalException(e, false)) {
+        return;
       }
-      FunctionPrototypeCall(emitError, this, e);
+      throw e;
     }
   }
 

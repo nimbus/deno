@@ -3,7 +3,7 @@
 import { type WriteFileOptions } from "ext:deno_node/_fs/_fs_common.ts";
 import type { Encodings } from "ext:deno_node/_utils.ts";
 import { promisify } from "ext:deno_node/internal/util.mjs";
-import * as constants from "ext:deno_node/_fs/_fs_constants.ts";
+import constants from "ext:deno_node/_fs/_fs_constants.ts";
 import { copyFilePromise } from "ext:deno_node/_fs/_fs_copy.ts";
 import { cpPromise } from "ext:deno_node/_fs/_fs_cp.ts";
 import { lutimesPromise } from "ext:deno_node/_fs/_fs_lutimes.ts";

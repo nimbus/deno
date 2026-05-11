@@ -344,15 +344,44 @@ pub fn op_require_path_is_absolute(#[string] p: &str) -> bool {
   Path::new(p).is_absolute()
 }
 
+fn should_skip_require_stat_permission(path: &Path) -> bool {
+  let mut saw_lib_component = false;
+  for component in path.components() {
+    match component {
+      std::path::Component::Normal(name) => match name.to_str() {
+        Some("node_modules" | ".node_modules" | ".node_libraries") => {
+          return true;
+        }
+        Some("lib") => {
+          saw_lib_component = true;
+        }
+        Some("node") if saw_lib_component => {
+          return true;
+        }
+        _ => {
+          saw_lib_component = false;
+        }
+      },
+      _ => {
+        saw_lib_component = false;
+      }
+    }
+  }
+
+  false
+}
+
 #[op2(fast, stack_trace)]
 pub fn op_require_stat<TSys: ExtNodeSys + 'static>(
   state: &mut OpState,
   #[string] path: &str,
 ) -> Result<i32, JsErrorBox> {
   let path = Cow::Borrowed(Path::new(path));
-  let path = if path.ends_with("node_modules") {
-    // skip stat permission checks for node_modules directories
-    // because they're noisy and it's fine
+  let path = if should_skip_require_stat_permission(path.as_ref()) {
+    // Module resolution probes call into stat() for both candidate directories
+    // and extensionless file names beneath known local/global module roots.
+    // Keep those existence checks quiet and let actual reads stay permission-
+    // gated by op_require_read_file()/real_path.
     path
   } else {
     ensure_read_permission(state, path)?

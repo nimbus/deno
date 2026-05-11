@@ -107,6 +107,24 @@ export function makeCallback<T extends unknown[]>(
   cb?: (...args: T) => void,
 ) {
   validateFunction(cb, "cb");
+  const domain = process.domain;
 
-  return (...args: T) => ReflectApply(cb!, this, args);
+  return (...args: T) => {
+    if (domain === null || domain === undefined) {
+      return ReflectApply(cb!, this, args);
+    }
+
+    domain.enter();
+    try {
+      const ret = ReflectApply(cb!, this, args);
+      domain.exit();
+      return ret;
+    } catch (err) {
+      if (typeof process._fatalException === "function" &&
+        process._fatalException(err, false)) {
+        return;
+      }
+      throw err;
+    }
+  };
 }

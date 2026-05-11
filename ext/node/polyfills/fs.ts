@@ -21,7 +21,7 @@ import {
   denoWriteFileErrorToNodeError,
   ERR_FS_FILE_TOO_LARGE,
 } from "ext:deno_node/internal/errors.ts";
-import * as constants from "ext:deno_node/_fs/_fs_constants.ts";
+import constants from "ext:deno_node/_fs/_fs_constants.ts";
 import {
   CFISBIS,
   convertFileInfoToBigIntStats,

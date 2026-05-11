@@ -2696,6 +2696,15 @@ export class ERR_NOT_IMPLEMENTED extends NodeError {
   }
 }
 
+export class ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION extends NodeError {
+  constructor() {
+    super(
+      "ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION",
+      `Operation cannot be invoked when not in a single-executable application`,
+    );
+  }
+}
+
 export class ERR_INVALID_URL extends NodeTypeError {
   input: string;
   constructor(input: string) {
@@ -3050,6 +3059,8 @@ codes.ERR_OUT_OF_RANGE = ERR_OUT_OF_RANGE;
 codes.ERR_SOCKET_BAD_PORT = ERR_SOCKET_BAD_PORT;
 codes.ERR_SOCKET_CONNECTION_TIMEOUT = ERR_SOCKET_CONNECTION_TIMEOUT;
 codes.ERR_BUFFER_OUT_OF_BOUNDS = ERR_BUFFER_OUT_OF_BOUNDS;
+codes.ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION =
+  ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION;
 codes.ERR_UNKNOWN_ENCODING = ERR_UNKNOWN_ENCODING;
 codes.ERR_PARSE_ARGS_INVALID_OPTION_VALUE = ERR_PARSE_ARGS_INVALID_OPTION_VALUE;
 codes.ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL =

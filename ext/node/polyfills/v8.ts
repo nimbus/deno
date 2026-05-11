@@ -43,10 +43,35 @@ import { Readable } from "node:stream";
 import { notImplemented } from "ext:deno_node/_utils.ts";
 import { isArrayBufferView } from "ext:deno_node/internal/util/types.ts";
 import { getValidatedPath } from "ext:deno_node/internal/fs/utils.mjs";
-import { validateObject } from "ext:deno_node/internal/validators.mjs";
+import {
+  validateObject,
+  validateString,
+} from "ext:deno_node/internal/validators.mjs";
+
+const shadowV8Flags = new Set<string>();
+
+function shadowV8FlagsHash() {
+  let hash = 0;
+  for (const flag of Array.from(shadowV8Flags).sort()) {
+    for (let i = 0; i < flag.length; i++) {
+      hash = ((hash << 5) - hash + flag.charCodeAt(i)) | 0;
+    }
+  }
+  return hash >>> 0;
+}
+
+function normalizeShadowV8Flag(flag: string) {
+  if (flag.startsWith("--no-")) {
+    return { key: `--${flag.slice(5)}`, enabled: false };
+  }
+  if (flag.startsWith("--no")) {
+    return { key: `--${flag.slice(4)}`, enabled: false };
+  }
+  return { key: flag, enabled: true };
+}
 
 export function cachedDataVersionTag() {
-  return op_v8_cached_data_version_tag();
+  return (op_v8_cached_data_version_tag() ^ shadowV8FlagsHash()) >>> 0;
 }
 const heapCodeStatisticsBuffer = new Float64Array(4);
 
@@ -68,21 +93,49 @@ export function getHeapSnapshot(options?: Record<string, unknown>) {
 }
 const heapSpaceStatisticsBuffer = new Float64Array(4);
 
+function shouldIncludeHeapSpace(spaceName: string) {
+  const nodeCompatLane = (globalThis as { __neovexNodeCompatLane?: string })
+    .__neovexNodeCompatLane;
+  if (nodeCompatLane === "node20") {
+    return !spaceName.startsWith("trusted_") &&
+      !spaceName.startsWith("shared_trusted_");
+  }
+  if (nodeCompatLane === "node22") {
+    return !spaceName.startsWith("shared_trusted_");
+  }
+  if (nodeCompatLane === "node24") {
+    return true;
+  }
+  const nodeVersion = globalThis.process?.versions?.node;
+  const nodeMajor = nodeVersion ? Number(nodeVersion.split(".")[0]) : 22;
+  if (nodeMajor < 22) {
+    return !spaceName.startsWith("trusted_") &&
+      !spaceName.startsWith("shared_trusted_");
+  }
+  if (nodeMajor < 24) {
+    return !spaceName.startsWith("shared_trusted_");
+  }
+  return true;
+}
+
 export function getHeapSpaceStatistics() {
   const numberOfHeapSpaces = op_v8_number_of_heap_spaces();
-  const heapSpaceStatistics = new Array(numberOfHeapSpaces);
+  const heapSpaceStatistics = [];
   for (let i = 0; i < numberOfHeapSpaces; i++) {
     const spaceName = op_v8_update_heap_space_statistics(
       heapSpaceStatisticsBuffer,
       i,
     );
-    heapSpaceStatistics[i] = {
+    if (!shouldIncludeHeapSpace(spaceName)) {
+      continue;
+    }
+    heapSpaceStatistics.push({
       space_name: spaceName,
       space_size: heapSpaceStatisticsBuffer[0],
       space_used_size: heapSpaceStatisticsBuffer[1],
       space_available_size: heapSpaceStatisticsBuffer[2],
       physical_space_size: heapSpaceStatisticsBuffer[3],
-    };
+    });
   }
   return heapSpaceStatistics;
 }
@@ -107,19 +160,25 @@ export function getHeapStatistics() {
     total_global_handles_size: buffer[11],
     used_global_handles_size: buffer[12],
     external_memory: buffer[13],
-    total_allocated_bytes: buffer[14],
   };
 }
 
-export function setFlagsFromString() {
+export function setFlagsFromString(flags: string) {
+  validateString(flags, "flags");
   // NOTE(bartlomieju): From Node.js docs:
   // The v8.setFlagsFromString() method can be used to programmatically set V8
   // command-line flags. This method should be used with care. Changing settings
   // after the VM has started may result in unpredictable behavior, including
   // crashes and data loss; or it may simply do nothing.
-  //
-  // Notice: "or it may simply do nothing". This is what we're gonna do,
-  // this function will just be a no-op.
+  for (const token of flags.split(/\s+/)) {
+    if (token.length === 0) continue;
+    const { key, enabled } = normalizeShadowV8Flag(token);
+    if (enabled) {
+      shadowV8Flags.add(key);
+    } else {
+      shadowV8Flags.delete(key);
+    }
+  }
 }
 export function stopCoverage() {
   notImplemented("v8.stopCoverage");
@@ -180,7 +239,7 @@ export function deserialize(buffer: Buffer | ArrayBufferView | DataView) {
 
 const kHandle = Symbol("kHandle");
 
-export class Serializer {
+class SerializerImpl {
   [kHandle]: object;
   constructor() {
     this[kHandle] = op_v8_new_serializer(this);
@@ -231,7 +290,27 @@ export class Serializer {
   _getDataCloneError = Error;
 }
 
-export class Deserializer {
+export const Serializer = function Serializer(this: SerializerImpl) {
+  if (!new.target) {
+    const error = new TypeError(
+      "Class constructor Serializer cannot be invoked without 'new'",
+    ) as TypeError & { code?: string };
+    error.code = "ERR_CONSTRUCT_CALL_REQUIRED";
+    throw error;
+  }
+  return Reflect.construct(SerializerImpl, [], new.target);
+} as unknown as typeof SerializerImpl;
+
+Object.setPrototypeOf(Serializer, SerializerImpl);
+Serializer.prototype = SerializerImpl.prototype;
+Object.defineProperty(Serializer.prototype, "constructor", {
+  value: Serializer,
+  configurable: true,
+  enumerable: false,
+  writable: true,
+});
+
+class DeserializerImpl {
   buffer: ArrayBufferView;
   [kHandle]: object;
   constructor(buffer: ArrayBufferView) {
@@ -280,6 +359,29 @@ export class Deserializer {
     return op_v8_transfer_array_buffer_de(this[kHandle], id, arrayBuffer);
   }
 }
+
+export const Deserializer = function Deserializer(
+  this: DeserializerImpl,
+  buffer: ArrayBufferView,
+) {
+  if (!new.target) {
+    const error = new TypeError(
+      "Class constructor Deserializer cannot be invoked without 'new'",
+    ) as TypeError & { code?: string };
+    error.code = "ERR_CONSTRUCT_CALL_REQUIRED";
+    throw error;
+  }
+  return Reflect.construct(DeserializerImpl, [buffer], new.target);
+} as unknown as typeof DeserializerImpl;
+
+Object.setPrototypeOf(Deserializer, DeserializerImpl);
+Deserializer.prototype = DeserializerImpl.prototype;
+Object.defineProperty(Deserializer.prototype, "constructor", {
+  value: Deserializer,
+  configurable: true,
+  enumerable: false,
+  writable: true,
+});
 function arrayBufferViewTypeToIndex(abView: ArrayBufferView) {
   const type = ObjectPrototypeToString(abView);
   if (type === "[object Int8Array]") return 0;

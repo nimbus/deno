@@ -22,6 +22,13 @@ function emitBindingWarning() {
 export function internalBinding(name: BindingName) {
   emitBindingWarning();
   const binding = getBinding(name);
+  if (name === "constants" && binding && typeof binding === "object") {
+    const clone = Object.create(null);
+    for (const key of Object.keys(binding)) {
+      clone[key] = binding[key as keyof typeof binding];
+    }
+    return clone;
+  }
   if (
     name === "crypto" &&
     binding &&

@@ -835,6 +835,12 @@ export class REPLServer extends (Interface as any) {
       // Use vm.Script with a timeout for preview evaluation to avoid
       // hanging on infinite loops (e.g. `while(true){}`).
       let result;
+      let previewError:
+        | {
+          name?: string;
+          message?: string;
+        }
+        | null = null;
       try {
         let previewCode = previewLine + "\n";
         // Apply object literal wrapping for preview too
@@ -843,6 +849,12 @@ export class REPLServer extends (Interface as any) {
           !/;\s*$/.test(previewCode.trim())
         ) {
           previewCode = `(${previewCode.trim()})\n`;
+        }
+        if (
+          self.replMode === REPL_MODE_STRICT &&
+          !/^\s*$/.test(previewCode)
+        ) {
+          previewCode = `'use strict'; void 0;\n${previewCode}`;
         }
         const script = new vm.Script(previewCode, { filename: "repl" });
         if (self.useGlobal) {
@@ -856,21 +868,40 @@ export class REPLServer extends (Interface as any) {
             timeout: 500,
           });
         }
-      } catch {
-        // Timeout, syntax error, or runtime error - no preview
-        return;
+      } catch (error) {
+        if (
+          self.replMode === REPL_MODE_STRICT &&
+          completionPreview === null &&
+          error !== null &&
+          typeof error === "object" &&
+          (error as { name?: string }).name === "ReferenceError"
+        ) {
+          previewError = error as {
+            name?: string;
+            message?: string;
+          };
+        } else {
+          // Timeout, syntax error, or runtime error - no preview
+          return;
+        }
       }
 
-      if (result === undefined && self.ignoreUndefined) return;
-
-      let inspected = inspect(result, {
-        colors: false,
-        showProxy: true,
-        breakLength: Infinity,
-        compact: true,
-        maxArrayLength: 10,
-        depth: 1,
-      });
+      let inspected;
+      if (previewError !== null) {
+        const name = previewError.name ?? "Error";
+        const message = previewError.message ?? "";
+        inspected = message.length === 0 ? name : `${name}: ${message}`;
+      } else {
+        if (result === undefined && self.ignoreUndefined) return;
+        inspected = inspect(result, {
+          colors: false,
+          showProxy: true,
+          breakLength: Infinity,
+          compact: true,
+          maxArrayLength: 10,
+          depth: 1,
+        });
+      }
       if (inspected === line) return;
 
       // Truncate at newline
@@ -1327,7 +1358,16 @@ export class REPLServer extends (Interface as any) {
     if (this.useGlobal) {
       context = globalThis;
     } else {
-      context = vm.createContext();
+      context = vm.createContext(vm.constants.DONT_CONTEXTIFY);
+      for (const name of Object.getOwnPropertyNames(globalThis)) {
+        if (Object.prototype.hasOwnProperty.call(context, name)) {
+          continue;
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+        if (descriptor) {
+          Object.defineProperty(context, name, descriptor);
+        }
+      }
       context.global = context;
       let _console;
       try {

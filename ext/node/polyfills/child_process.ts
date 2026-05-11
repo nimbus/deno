@@ -146,11 +146,15 @@ export function fork(
   // Combine execArgv (Node CLI flags), modulePath (script), and args (script args)
   const nodeArgs = [...(execArgv || []), modulePath, ...args].map(String);
 
-  if (Deno.build.standalone) {
+  const resolvedExecPath = options.execPath || process.execPath || Deno.execPath();
+  const shouldTranslateNodeArgs = !Deno.build.standalone &&
+    resolvedExecPath === Deno.execPath();
+
+  if (!shouldTranslateNodeArgs) {
     // In standalone (compiled) binaries, skip Node-to-Deno arg translation.
     // The binary already has permissions and unstable config baked in.
-    // Translating would inject "run -A --unstable-..." which the compiled
-    // binary doesn't understand and would pass through as app args.
+    // Translating would inject "run -A --unstable-..." into Node-like
+    // execPath targets too, which do not understand Deno CLI flags.
     args = nodeArgs;
   } else {
     // Use the Rust parser to translate Node.js CLI args to Deno args
@@ -201,7 +205,7 @@ export function fork(
     throw new ERR_CHILD_PROCESS_IPC_REQUIRED("options.stdio");
   }
 
-  options.execPath = options.execPath || Deno.execPath();
+  options.execPath = resolvedExecPath;
   options.shell = false;
 
   // deno-lint-ignore no-explicit-any

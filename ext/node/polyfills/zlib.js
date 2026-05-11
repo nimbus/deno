@@ -622,17 +622,17 @@ function processCallback() {
   const self = this[owner_symbol];
   const state = self._writeState;
 
-  if (self.destroyed) {
+  if (self[kError]) {
+    // An error occurred during the native write. Call cb() to unblock the
+    // Transform write chain; the error event will be emitted by the nextTick
+    // destroy scheduled in zlibOnError.
     this.buffer = null;
     this.cb();
     deferHandleCleanup(this);
     return;
   }
 
-  if (self[kError]) {
-    // An error occurred during the native write. Call cb() to unblock the
-    // Transform write chain; the error event will be emitted by the nextTick
-    // destroy scheduled in zlibOnError.
+  if (self.destroyed) {
     this.buffer = null;
     this.cb();
     deferHandleCleanup(this);

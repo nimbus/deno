@@ -3,6 +3,7 @@
 // TODO(petamoriken): enable prefer-primordials for node polyfills
 // deno-lint-ignore-file prefer-primordials
 
+import { op_inspector_enabled } from "ext:core/ops";
 import * as asyncWrap from "ext:deno_node/internal_binding/async_wrap.ts";
 import * as buffer from "ext:deno_node/internal_binding/buffer.ts";
 import caresWrap from "ext:deno_node/internal_binding/cares_wrap.ts";
@@ -14,19 +15,36 @@ import * as streamWrap from "ext:deno_node/internal_binding/stream_wrap.ts";
 import * as stringDecoder from "ext:deno_node/internal_binding/string_decoder.ts";
 import * as symbols from "ext:deno_node/internal_binding/symbols.ts";
 import * as tcpWrap from "ext:deno_node/internal_binding/tcp_wrap.ts";
+import * as traceEvents from "ext:deno_node/internal_binding/trace_events.ts";
 import * as ttyWrap from "ext:deno_node/internal_binding/tty_wrap.ts";
 import * as types from "ext:deno_node/internal_binding/types.ts";
 import * as udpWrap from "ext:deno_node/internal_binding/udp_wrap.ts";
 import * as util from "ext:deno_node/internal_binding/util.ts";
 import * as uv from "ext:deno_node/internal_binding/uv.ts";
 import * as httpParser from "ext:deno_node/internal_binding/http_parser.ts";
+import * as jsStream from "ext:deno_node/internal_binding/js_stream.ts";
+
+const inspector = {
+  isEnabled() {
+    return op_inspector_enabled();
+  },
+};
+
+const constantsBinding = Object.assign(Object.create(null), {
+  crypto: constants.crypto,
+  fs: constants.fs,
+  internal: constants.internal,
+  os: constants.os,
+  trace: constants.trace,
+  zlib: constants.zlib,
+});
 
 const modules = {
   "async_wrap": asyncWrap,
   buffer,
   "cares_wrap": caresWrap,
   config: {},
-  constants,
+  constants: constantsBinding,
   contextify: {},
   credentials: {},
   crypto,
@@ -37,8 +55,8 @@ const modules = {
   "heap_utils": {},
   "http_parser": httpParser,
   icu: {},
-  inspector: {},
-  "js_stream": {},
+  inspector,
+  "js_stream": jsStream,
   messaging: {},
   "module_wrap": {},
   "native_module": {},
@@ -67,7 +85,7 @@ const modules = {
     },
   },
   "tls_wrap": {},
-  "trace_events": {},
+  "trace_events": traceEvents,
   "tty_wrap": ttyWrap,
   types,
   "udp_wrap": udpWrap,

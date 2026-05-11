@@ -31,6 +31,7 @@ mod impl_ {
   use std::rc::Rc;
 
   use deno_core::CancelFuture;
+  use deno_core::FastString;
   use deno_core::OpState;
   use deno_core::RcRef;
   use deno_core::ResourceId;
@@ -345,6 +346,21 @@ mod impl_ {
     }
   }
 
+  fn is_node_host_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> bool {
+    if object.is_array_buffer_view() {
+      return true;
+    }
+
+    let key = FastString::from_static("__node_internal_js_stream_host_object__")
+      .v8_string(scope)
+      .unwrap()
+      .into();
+    object.get(scope, key).is_some_and(|value| value.is_true())
+  }
+
   impl v8::ValueSerializerImpl for AdvancedSerializerDelegate {
     fn throw_data_clone_error<'s>(
       &self,
@@ -356,7 +372,7 @@ mod impl_ {
     }
 
     fn has_custom_host_object(&self, _isolate: &v8::Isolate) -> bool {
-      false
+      true
     }
 
     fn write_host_object<'s>(
@@ -389,11 +405,25 @@ mod impl_ {
         value_serializer.write_raw_bytes(slice);
         Some(true)
       } else {
-        value_serializer.write_uint32(NOT_ARRAY_BUFFER_VIEW_TAG);
-        value_serializer
-          .write_value(scope.get_current_context(), object.into());
-        Some(true)
+        scope.throw_exception(v8::Exception::type_error(
+          scope,
+          v8::String::new_from_utf8(
+            scope,
+            b"Cannot clone object of unsupported type.",
+            v8::NewStringType::Normal,
+          )
+          .unwrap(),
+        ));
+        None
       }
+    }
+
+    fn is_host_object<'s>(
+      &self,
+      scope: &mut v8::PinScope<'s, '_>,
+      object: v8::Local<'s, v8::Object>,
+    ) -> Option<bool> {
+      Some(is_node_host_object(scope, object))
     }
 
     fn get_shared_array_buffer_id<'s>(

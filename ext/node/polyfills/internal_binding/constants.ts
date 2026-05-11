@@ -1,8 +1,12 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 import { primordials } from "ext:core/mod.js";
-const { ObjectFreeze } = primordials;
+const { ObjectAssign, ObjectCreate, ObjectDefineProperty, ObjectFreeze } = primordials;
 import { op_node_build_os, op_node_fs_constants } from "ext:core/ops";
+
+function nullProtoClone<T extends object>(obj: T): T {
+  return ObjectAssign(ObjectCreate(null), obj);
+}
 
 let os: {
   dlopen: {
@@ -636,13 +640,28 @@ if (buildOs === "darwin") {
   };
 }
 
+const uvUdpIpv6Only = os.UV_UDP_IPV6ONLY;
+os.dlopen = nullProtoClone(os.dlopen);
+os.errno = nullProtoClone(os.errno);
+os.priority = nullProtoClone(os.priority);
+os.signals = nullProtoClone(os.signals);
 ObjectFreeze(os.signals);
+os = nullProtoClone(os);
+if (uvUdpIpv6Only !== undefined) {
+  ObjectDefineProperty(os, "UV_UDP_IPV6ONLY", {
+    value: uvUdpIpv6Only,
+    configurable: false,
+    enumerable: false,
+    writable: false,
+  });
+}
 
 export { os };
 
-export const fs = op_node_fs_constants();
+export const fs = nullProtoClone(op_node_fs_constants());
+export const internal = ObjectCreate(null);
 
-export const crypto = {
+export const crypto = nullProtoClone({
   OPENSSL_VERSION_NUMBER: 269488319,
   SSL_OP_ALL: 2147485780,
   SSL_OP_ALLOW_NO_DHE_KEX: 1024,
@@ -717,8 +736,8 @@ export const crypto = {
   POINT_CONVERSION_COMPRESSED: 2,
   POINT_CONVERSION_UNCOMPRESSED: 4,
   POINT_CONVERSION_HYBRID: 6,
-} as const;
-export const zlib = {
+} as const);
+export const zlib = nullProtoClone({
   Z_NO_FLUSH: 0,
   Z_PARTIAL_FLUSH: 1,
   Z_SYNC_FLUSH: 2,
@@ -864,8 +883,8 @@ export const zlib = {
   ZSTD_btopt: 7,
   ZSTD_btultra: 8,
   ZSTD_btultra2: 9,
-} as const;
-export const trace = {
+} as const);
+export const trace = nullProtoClone({
   TRACE_EVENT_PHASE_BEGIN: 66,
   TRACE_EVENT_PHASE_END: 69,
   TRACE_EVENT_PHASE_COMPLETE: 88,
@@ -892,4 +911,4 @@ export const trace = {
   TRACE_EVENT_PHASE_ENTER_CONTEXT: 40,
   TRACE_EVENT_PHASE_LEAVE_CONTEXT: 41,
   TRACE_EVENT_PHASE_LINK_IDS: 61,
-} as const;
+} as const);
