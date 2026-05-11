@@ -3075,7 +3075,10 @@ fn dh_group_generate(
   // MODULUS arrays are big-endian u32 words. Convert to big-endian bytes
   // for ASN.1, matching the prime used during key generation.
   let prime_bytes = asn1_positive_int_bytes(
-    &prime.iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<_>>(),
+    &prime
+      .iter()
+      .flat_map(|x| x.to_be_bytes())
+      .collect::<Vec<_>>(),
   );
   let gen_bytes = asn1_positive_int_bytes(&[generator as u8]);
   let params = DhParameter {

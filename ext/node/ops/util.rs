@@ -33,7 +33,8 @@ pub fn op_node_guess_handle_type(_state: &mut OpState, fd: u32) -> u32 {
 #[cfg(unix)]
 fn guess_socket_type(fd: i32) -> Option<HandleType> {
   let mut socket_type: libc::c_int = 0;
-  let mut socket_type_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+  let mut socket_type_len =
+    std::mem::size_of::<libc::c_int>() as libc::socklen_t;
   // SAFETY: `getsockopt` is safe with a valid descriptor, a correctly-sized
   // buffer, and a valid length pointer. It simply reports the socket type when
   // `fd` is a socket and fails otherwise.

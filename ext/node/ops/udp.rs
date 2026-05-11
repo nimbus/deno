@@ -98,9 +98,7 @@ fn duplicate_udp_socket_from_fd(
   // `try_clone()`. `ManuallyDrop` prevents the temporary wrapper from closing
   // the original socket.
   let original = ManuallyDrop::new(unsafe {
-    std::net::UdpSocket::from_raw_socket(
-      fd as std::os::windows::io::RawSocket,
-    )
+    std::net::UdpSocket::from_raw_socket(fd as std::os::windows::io::RawSocket)
   });
   let socket = original.try_clone()?;
   socket.set_nonblocking(true)?;

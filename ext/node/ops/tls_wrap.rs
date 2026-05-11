@@ -28,10 +28,10 @@ use std::cell::Cell;
 use std::ffi::c_char;
 use std::io::Read;
 use std::io::Write;
-use std::sync::Mutex;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use deno_core::CppgcInherits;
 use deno_core::GarbageCollected;
@@ -2771,7 +2771,8 @@ fn get_js_bytes(
       return Some(data.to_vec());
     }
 
-    v.to_string(scope).map(|s| s.to_rust_string_lossy(scope).into_bytes())
+    v.to_string(scope)
+      .map(|s| s.to_rust_string_lossy(scope).into_bytes())
   })
 }
 
@@ -2811,23 +2812,19 @@ fn parse_pkcs12_identity(
   let cert = parsed.cert?;
   let pkey = parsed.pkey?;
 
-  let mut certs = vec![rustls::pki_types::CertificateDer::from(
-    cert.to_der().ok()?,
-  )];
+  let mut certs =
+    vec![rustls::pki_types::CertificateDer::from(cert.to_der().ok()?)];
   if let Some(chain) = parsed.ca {
     for cert in chain {
-      certs.push(rustls::pki_types::CertificateDer::from(
-        cert.to_der().ok()?,
-      ));
+      certs.push(rustls::pki_types::CertificateDer::from(cert.to_der().ok()?));
     }
   }
 
   let private_key_der = pkey.private_key_to_pkcs8().ok()?;
-  let private_key = rustls::pki_types::PrivateKeyDer::try_from(
-    private_key_der.as_ref(),
-  )
-  .ok()?
-  .clone_key();
+  let private_key =
+    rustls::pki_types::PrivateKeyDer::try_from(private_key_der.as_ref())
+      .ok()?
+      .clone_key();
 
   Some(deno_tls::TlsKey(certs, private_key))
 }
@@ -3695,14 +3692,13 @@ fn build_server_config(
       }
     }
 
-    let mut verifier_builder =
-      rustls::server::WebPkiClientVerifier::builder(Arc::new(
-        if root_cert_ders.is_empty() && !reject_unauthorized {
-          deno_tls::create_default_root_cert_store()
-        } else {
-          root_cert_store
-        },
-      ));
+    let mut verifier_builder = rustls::server::WebPkiClientVerifier::builder(
+      Arc::new(if root_cert_ders.is_empty() && !reject_unauthorized {
+        deno_tls::create_default_root_cert_store()
+      } else {
+        root_cert_store
+      }),
+    );
     if !reject_unauthorized {
       verifier_builder = verifier_builder.allow_unauthenticated();
     }

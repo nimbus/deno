@@ -7,31 +7,16 @@ use std::rc::Rc;
 
 use aes::cipher::Block;
 use aes::cipher::BlockDecrypt;
-use aes::cipher::BlockSizeUser;
 use aes::cipher::BlockDecryptMut;
 use aes::cipher::BlockEncrypt;
 use aes::cipher::BlockEncryptMut;
+use aes::cipher::BlockSizeUser;
 use aes::cipher::KeyIvInit;
 use aes::cipher::KeySizeUser;
 use aes::cipher::StreamCipher;
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::typenum::{
-  U1,
-  U10,
-  U11,
-  U12,
-  U13,
-  U14,
-  U15,
-  U16,
-  U2,
-  U3,
-  U4,
-  U5,
-  U6,
-  U7,
-  U8,
-  U9,
+  U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16,
 };
 use deno_core::Resource;
 use deno_error::JsErrorClass;
@@ -617,7 +602,10 @@ impl RustOcbCipher {
     Ok(())
   }
 
-  fn compute_tag(self, _final_input_len: Option<usize>) -> Result<Vec<u8>, CipherInitError> {
+  fn compute_tag(
+    self,
+    _final_input_len: Option<usize>,
+  ) -> Result<Vec<u8>, CipherInitError> {
     if let Some(tag) = self.pending_tag {
       return Ok(tag);
     }
@@ -644,7 +632,8 @@ impl RustOcbCipher {
       &self.aad_buf,
       input,
       auth_tag,
-    )? else {
+    )?
+    else {
       return Ok(false);
     };
     output[..plaintext.len()].copy_from_slice(&plaintext);
@@ -654,8 +643,9 @@ impl RustOcbCipher {
 
 macro_rules! ocb_encrypt_concrete {
   ($cipher:ty, $nonce_size:ty, $tag_size:ty, $key:expr, $iv:expr, $aad:expr, $input:expr) => {{
-    let cipher = ocb3::Ocb3::<$cipher, $nonce_size, $tag_size>::new_from_slice($key)
-      .map_err(|_| CipherInitError::InitFailed)?;
+    let cipher =
+      ocb3::Ocb3::<$cipher, $nonce_size, $tag_size>::new_from_slice($key)
+        .map_err(|_| CipherInitError::InitFailed)?;
     let nonce = ocb3::GenericArray::from_slice($iv);
     let mut ciphertext = $input.to_vec();
     let tag = cipher
@@ -667,8 +657,9 @@ macro_rules! ocb_encrypt_concrete {
 
 macro_rules! ocb_decrypt_concrete {
   ($cipher:ty, $nonce_size:ty, $tag_size:ty, $key:expr, $iv:expr, $aad:expr, $input:expr, $auth_tag:expr) => {{
-    let cipher = ocb3::Ocb3::<$cipher, $nonce_size, $tag_size>::new_from_slice($key)
-      .map_err(|_| CipherInitError::InitFailed)?;
+    let cipher =
+      ocb3::Ocb3::<$cipher, $nonce_size, $tag_size>::new_from_slice($key)
+        .map_err(|_| CipherInitError::InitFailed)?;
     let nonce = ocb3::GenericArray::from_slice($iv);
     let tag = ocb3::GenericArray::from_slice($auth_tag);
     let mut plaintext = $input.to_vec();
@@ -682,22 +673,96 @@ macro_rules! ocb_decrypt_concrete {
 macro_rules! ocb_dispatch_tag_encrypt {
   ($cipher:ty, $nonce_size:ty, $key:expr, $iv:expr, $aad:expr, $input:expr, $tag_len:expr) => {{
     match $tag_len {
-      1 => ocb_encrypt_concrete!($cipher, $nonce_size, U1, $key, $iv, $aad, $input),
-      2 => ocb_encrypt_concrete!($cipher, $nonce_size, U2, $key, $iv, $aad, $input),
-      3 => ocb_encrypt_concrete!($cipher, $nonce_size, U3, $key, $iv, $aad, $input),
-      4 => ocb_encrypt_concrete!($cipher, $nonce_size, U4, $key, $iv, $aad, $input),
-      5 => ocb_encrypt_concrete!($cipher, $nonce_size, U5, $key, $iv, $aad, $input),
-      6 => ocb_encrypt_concrete!($cipher, $nonce_size, U6, $key, $iv, $aad, $input),
-      7 => ocb_encrypt_concrete!($cipher, $nonce_size, U7, $key, $iv, $aad, $input),
-      8 => ocb_encrypt_concrete!($cipher, $nonce_size, U8, $key, $iv, $aad, $input),
-      9 => ocb_encrypt_concrete!($cipher, $nonce_size, U9, $key, $iv, $aad, $input),
-      10 => ocb_encrypt_concrete!($cipher, $nonce_size, U10, $key, $iv, $aad, $input),
-      11 => ocb_encrypt_concrete!($cipher, $nonce_size, U11, $key, $iv, $aad, $input),
-      12 => ocb_encrypt_concrete!($cipher, $nonce_size, U12, $key, $iv, $aad, $input),
-      13 => ocb_encrypt_concrete!($cipher, $nonce_size, U13, $key, $iv, $aad, $input),
-      14 => ocb_encrypt_concrete!($cipher, $nonce_size, U14, $key, $iv, $aad, $input),
-      15 => ocb_encrypt_concrete!($cipher, $nonce_size, U15, $key, $iv, $aad, $input),
-      16 => ocb_encrypt_concrete!($cipher, $nonce_size, U16, $key, $iv, $aad, $input),
+      1 => {
+        ocb_encrypt_concrete!($cipher, $nonce_size, U1, $key, $iv, $aad, $input)
+      }
+      2 => {
+        ocb_encrypt_concrete!($cipher, $nonce_size, U2, $key, $iv, $aad, $input)
+      }
+      3 => {
+        ocb_encrypt_concrete!($cipher, $nonce_size, U3, $key, $iv, $aad, $input)
+      }
+      4 => {
+        ocb_encrypt_concrete!($cipher, $nonce_size, U4, $key, $iv, $aad, $input)
+      }
+      5 => {
+        ocb_encrypt_concrete!($cipher, $nonce_size, U5, $key, $iv, $aad, $input)
+      }
+      6 => {
+        ocb_encrypt_concrete!($cipher, $nonce_size, U6, $key, $iv, $aad, $input)
+      }
+      7 => {
+        ocb_encrypt_concrete!($cipher, $nonce_size, U7, $key, $iv, $aad, $input)
+      }
+      8 => {
+        ocb_encrypt_concrete!($cipher, $nonce_size, U8, $key, $iv, $aad, $input)
+      }
+      9 => {
+        ocb_encrypt_concrete!($cipher, $nonce_size, U9, $key, $iv, $aad, $input)
+      }
+      10 => ocb_encrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U10,
+        $key,
+        $iv,
+        $aad,
+        $input
+      ),
+      11 => ocb_encrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U11,
+        $key,
+        $iv,
+        $aad,
+        $input
+      ),
+      12 => ocb_encrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U12,
+        $key,
+        $iv,
+        $aad,
+        $input
+      ),
+      13 => ocb_encrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U13,
+        $key,
+        $iv,
+        $aad,
+        $input
+      ),
+      14 => ocb_encrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U14,
+        $key,
+        $iv,
+        $aad,
+        $input
+      ),
+      15 => ocb_encrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U15,
+        $key,
+        $iv,
+        $aad,
+        $input
+      ),
+      16 => ocb_encrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U16,
+        $key,
+        $iv,
+        $aad,
+        $input
+      ),
       _ => Err(CipherInitError::InitFailed),
     }
   }};
@@ -706,22 +771,166 @@ macro_rules! ocb_dispatch_tag_encrypt {
 macro_rules! ocb_dispatch_tag_decrypt {
   ($cipher:ty, $nonce_size:ty, $key:expr, $iv:expr, $aad:expr, $input:expr, $auth_tag:expr) => {{
     match $auth_tag.len() {
-      1 => ocb_decrypt_concrete!($cipher, $nonce_size, U1, $key, $iv, $aad, $input, $auth_tag),
-      2 => ocb_decrypt_concrete!($cipher, $nonce_size, U2, $key, $iv, $aad, $input, $auth_tag),
-      3 => ocb_decrypt_concrete!($cipher, $nonce_size, U3, $key, $iv, $aad, $input, $auth_tag),
-      4 => ocb_decrypt_concrete!($cipher, $nonce_size, U4, $key, $iv, $aad, $input, $auth_tag),
-      5 => ocb_decrypt_concrete!($cipher, $nonce_size, U5, $key, $iv, $aad, $input, $auth_tag),
-      6 => ocb_decrypt_concrete!($cipher, $nonce_size, U6, $key, $iv, $aad, $input, $auth_tag),
-      7 => ocb_decrypt_concrete!($cipher, $nonce_size, U7, $key, $iv, $aad, $input, $auth_tag),
-      8 => ocb_decrypt_concrete!($cipher, $nonce_size, U8, $key, $iv, $aad, $input, $auth_tag),
-      9 => ocb_decrypt_concrete!($cipher, $nonce_size, U9, $key, $iv, $aad, $input, $auth_tag),
-      10 => ocb_decrypt_concrete!($cipher, $nonce_size, U10, $key, $iv, $aad, $input, $auth_tag),
-      11 => ocb_decrypt_concrete!($cipher, $nonce_size, U11, $key, $iv, $aad, $input, $auth_tag),
-      12 => ocb_decrypt_concrete!($cipher, $nonce_size, U12, $key, $iv, $aad, $input, $auth_tag),
-      13 => ocb_decrypt_concrete!($cipher, $nonce_size, U13, $key, $iv, $aad, $input, $auth_tag),
-      14 => ocb_decrypt_concrete!($cipher, $nonce_size, U14, $key, $iv, $aad, $input, $auth_tag),
-      15 => ocb_decrypt_concrete!($cipher, $nonce_size, U15, $key, $iv, $aad, $input, $auth_tag),
-      16 => ocb_decrypt_concrete!($cipher, $nonce_size, U16, $key, $iv, $aad, $input, $auth_tag),
+      1 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U1,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      2 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U2,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      3 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U3,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      4 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U4,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      5 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U5,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      6 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U6,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      7 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U7,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      8 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U8,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      9 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U9,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      10 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U10,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      11 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U11,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      12 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U12,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      13 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U13,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      14 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U14,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      15 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U15,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
+      16 => ocb_decrypt_concrete!(
+        $cipher,
+        $nonce_size,
+        U16,
+        $key,
+        $iv,
+        $aad,
+        $input,
+        $auth_tag
+      ),
       _ => Err(CipherInitError::InitFailed),
     }
   }};
@@ -730,16 +939,36 @@ macro_rules! ocb_dispatch_tag_decrypt {
 macro_rules! ocb_dispatch_nonce_encrypt {
   ($cipher:ty, $key:expr, $iv:expr, $aad:expr, $input:expr, $tag_len:expr) => {{
     match $iv.len() {
-      6 => ocb_dispatch_tag_encrypt!($cipher, U6, $key, $iv, $aad, $input, $tag_len),
-      7 => ocb_dispatch_tag_encrypt!($cipher, U7, $key, $iv, $aad, $input, $tag_len),
-      8 => ocb_dispatch_tag_encrypt!($cipher, U8, $key, $iv, $aad, $input, $tag_len),
-      9 => ocb_dispatch_tag_encrypt!($cipher, U9, $key, $iv, $aad, $input, $tag_len),
-      10 => ocb_dispatch_tag_encrypt!($cipher, U10, $key, $iv, $aad, $input, $tag_len),
-      11 => ocb_dispatch_tag_encrypt!($cipher, U11, $key, $iv, $aad, $input, $tag_len),
-      12 => ocb_dispatch_tag_encrypt!($cipher, U12, $key, $iv, $aad, $input, $tag_len),
-      13 => ocb_dispatch_tag_encrypt!($cipher, U13, $key, $iv, $aad, $input, $tag_len),
-      14 => ocb_dispatch_tag_encrypt!($cipher, U14, $key, $iv, $aad, $input, $tag_len),
-      15 => ocb_dispatch_tag_encrypt!($cipher, U15, $key, $iv, $aad, $input, $tag_len),
+      6 => ocb_dispatch_tag_encrypt!(
+        $cipher, U6, $key, $iv, $aad, $input, $tag_len
+      ),
+      7 => ocb_dispatch_tag_encrypt!(
+        $cipher, U7, $key, $iv, $aad, $input, $tag_len
+      ),
+      8 => ocb_dispatch_tag_encrypt!(
+        $cipher, U8, $key, $iv, $aad, $input, $tag_len
+      ),
+      9 => ocb_dispatch_tag_encrypt!(
+        $cipher, U9, $key, $iv, $aad, $input, $tag_len
+      ),
+      10 => ocb_dispatch_tag_encrypt!(
+        $cipher, U10, $key, $iv, $aad, $input, $tag_len
+      ),
+      11 => ocb_dispatch_tag_encrypt!(
+        $cipher, U11, $key, $iv, $aad, $input, $tag_len
+      ),
+      12 => ocb_dispatch_tag_encrypt!(
+        $cipher, U12, $key, $iv, $aad, $input, $tag_len
+      ),
+      13 => ocb_dispatch_tag_encrypt!(
+        $cipher, U13, $key, $iv, $aad, $input, $tag_len
+      ),
+      14 => ocb_dispatch_tag_encrypt!(
+        $cipher, U14, $key, $iv, $aad, $input, $tag_len
+      ),
+      15 => ocb_dispatch_tag_encrypt!(
+        $cipher, U15, $key, $iv, $aad, $input, $tag_len
+      ),
       _ => Err(CipherInitError::InitFailed),
     }
   }};
@@ -748,16 +977,36 @@ macro_rules! ocb_dispatch_nonce_encrypt {
 macro_rules! ocb_dispatch_nonce_decrypt {
   ($cipher:ty, $key:expr, $iv:expr, $aad:expr, $input:expr, $auth_tag:expr) => {{
     match $iv.len() {
-      6 => ocb_dispatch_tag_decrypt!($cipher, U6, $key, $iv, $aad, $input, $auth_tag),
-      7 => ocb_dispatch_tag_decrypt!($cipher, U7, $key, $iv, $aad, $input, $auth_tag),
-      8 => ocb_dispatch_tag_decrypt!($cipher, U8, $key, $iv, $aad, $input, $auth_tag),
-      9 => ocb_dispatch_tag_decrypt!($cipher, U9, $key, $iv, $aad, $input, $auth_tag),
-      10 => ocb_dispatch_tag_decrypt!($cipher, U10, $key, $iv, $aad, $input, $auth_tag),
-      11 => ocb_dispatch_tag_decrypt!($cipher, U11, $key, $iv, $aad, $input, $auth_tag),
-      12 => ocb_dispatch_tag_decrypt!($cipher, U12, $key, $iv, $aad, $input, $auth_tag),
-      13 => ocb_dispatch_tag_decrypt!($cipher, U13, $key, $iv, $aad, $input, $auth_tag),
-      14 => ocb_dispatch_tag_decrypt!($cipher, U14, $key, $iv, $aad, $input, $auth_tag),
-      15 => ocb_dispatch_tag_decrypt!($cipher, U15, $key, $iv, $aad, $input, $auth_tag),
+      6 => ocb_dispatch_tag_decrypt!(
+        $cipher, U6, $key, $iv, $aad, $input, $auth_tag
+      ),
+      7 => ocb_dispatch_tag_decrypt!(
+        $cipher, U7, $key, $iv, $aad, $input, $auth_tag
+      ),
+      8 => ocb_dispatch_tag_decrypt!(
+        $cipher, U8, $key, $iv, $aad, $input, $auth_tag
+      ),
+      9 => ocb_dispatch_tag_decrypt!(
+        $cipher, U9, $key, $iv, $aad, $input, $auth_tag
+      ),
+      10 => ocb_dispatch_tag_decrypt!(
+        $cipher, U10, $key, $iv, $aad, $input, $auth_tag
+      ),
+      11 => ocb_dispatch_tag_decrypt!(
+        $cipher, U11, $key, $iv, $aad, $input, $auth_tag
+      ),
+      12 => ocb_dispatch_tag_decrypt!(
+        $cipher, U12, $key, $iv, $aad, $input, $auth_tag
+      ),
+      13 => ocb_dispatch_tag_decrypt!(
+        $cipher, U13, $key, $iv, $aad, $input, $auth_tag
+      ),
+      14 => ocb_dispatch_tag_decrypt!(
+        $cipher, U14, $key, $iv, $aad, $input, $auth_tag
+      ),
+      15 => ocb_dispatch_tag_decrypt!(
+        $cipher, U15, $key, $iv, $aad, $input, $auth_tag
+      ),
       _ => Err(CipherInitError::InitFailed),
     }
   }};
@@ -771,9 +1020,30 @@ fn ocb_encrypt_dispatch(
   auth_tag_length: usize,
 ) -> Result<(Vec<u8>, Vec<u8>), CipherInitError> {
   match key.len() {
-    16 => ocb_dispatch_nonce_encrypt!(aes::Aes128, key, iv, aad, input, auth_tag_length),
-    24 => ocb_dispatch_nonce_encrypt!(aes::Aes192, key, iv, aad, input, auth_tag_length),
-    32 => ocb_dispatch_nonce_encrypt!(aes::Aes256, key, iv, aad, input, auth_tag_length),
+    16 => ocb_dispatch_nonce_encrypt!(
+      aes::Aes128,
+      key,
+      iv,
+      aad,
+      input,
+      auth_tag_length
+    ),
+    24 => ocb_dispatch_nonce_encrypt!(
+      aes::Aes192,
+      key,
+      iv,
+      aad,
+      input,
+      auth_tag_length
+    ),
+    32 => ocb_dispatch_nonce_encrypt!(
+      aes::Aes256,
+      key,
+      iv,
+      aad,
+      input,
+      auth_tag_length
+    ),
     _ => Err(CipherInitError::InitFailed),
   }
 }
@@ -786,9 +1056,15 @@ fn ocb_decrypt_dispatch(
   auth_tag: &[u8],
 ) -> Result<Option<Vec<u8>>, CipherInitError> {
   match key.len() {
-    16 => ocb_dispatch_nonce_decrypt!(aes::Aes128, key, iv, aad, input, auth_tag),
-    24 => ocb_dispatch_nonce_decrypt!(aes::Aes192, key, iv, aad, input, auth_tag),
-    32 => ocb_dispatch_nonce_decrypt!(aes::Aes256, key, iv, aad, input, auth_tag),
+    16 => {
+      ocb_dispatch_nonce_decrypt!(aes::Aes128, key, iv, aad, input, auth_tag)
+    }
+    24 => {
+      ocb_dispatch_nonce_decrypt!(aes::Aes192, key, iv, aad, input, auth_tag)
+    }
+    32 => {
+      ocb_dispatch_nonce_decrypt!(aes::Aes256, key, iv, aad, input, auth_tag)
+    }
     _ => Err(CipherInitError::InitFailed),
   }
 }
@@ -799,11 +1075,7 @@ fn evp_cipher_by_name(
   let algorithm_name = CString::new(algorithm_name).ok()?;
   let cipher =
     unsafe { aws_lc_sys::EVP_get_cipherbyname(algorithm_name.as_ptr()) };
-  if cipher.is_null() {
-    None
-  } else {
-    Some(cipher)
-  }
+  if cipher.is_null() { None } else { Some(cipher) }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -903,12 +1175,7 @@ fn tdes_wrap_decrypt(
   let mut inner_iv = [0u8; 8];
   inner_iv.copy_from_slice(&reversed[..8]);
   let mut plaintext_and_icv = vec![0u8; input.len() - 8];
-  tdes_cbc_decrypt(
-    key,
-    &inner_iv,
-    &reversed[8..],
-    &mut plaintext_and_icv,
-  )?;
+  tdes_cbc_decrypt(key, &inner_iv, &reversed[8..], &mut plaintext_and_icv)?;
 
   let plaintext_len = plaintext_and_icv
     .len()
@@ -1111,7 +1378,8 @@ where
     }
 
     let claimed_len =
-      u32::from_be_bytes(block[4..8].try_into().expect("slice length")) as usize;
+      u32::from_be_bytes(block[4..8].try_into().expect("slice length"))
+        as usize;
     if !(1..=8).contains(&claimed_len) {
       return Err(AesKeyWrapError::IntegrityCheckFailed);
     }
@@ -1141,7 +1409,10 @@ where
   if ((claimed_len - 1) >> 3) != ((data.len() - 9) >> 3) {
     return Err(AesKeyWrapError::IntegrityCheckFailed);
   }
-  if output[claimed_len..padded_len].iter().any(|byte| *byte != 0) {
+  if output[claimed_len..padded_len]
+    .iter()
+    .any(|byte| *byte != 0)
+  {
     return Err(AesKeyWrapError::IntegrityCheckFailed);
   }
 
@@ -1796,9 +2067,7 @@ impl Cipher {
       Aes256Gcm(cipher, _) => {
         cipher.set_aad(aad);
       }
-      Aes128Ccm(cipher)
-      | Aes192Ccm(cipher)
-      | Aes256Ccm(cipher) => {
+      Aes128Ccm(cipher) | Aes192Ccm(cipher) | Aes256Ccm(cipher) => {
         cipher.set_aad(aad, plaintext_length);
       }
       Aes128Ocb(cipher) | Aes192Ocb(cipher) | Aes256Ocb(cipher) => {
@@ -1853,9 +2122,7 @@ impl Cipher {
         output[..input.len()].copy_from_slice(input);
         cipher.encrypt(output);
       }
-      Aes128Ccm(cipher)
-      | Aes192Ccm(cipher)
-      | Aes256Ccm(cipher) => {
+      Aes128Ccm(cipher) | Aes192Ccm(cipher) | Aes256Ccm(cipher) => {
         cipher.encrypt(input, output).expect("AEAD encrypt failed");
       }
       Aes128Ocb(cipher) | Aes192Ocb(cipher) | Aes256Ocb(cipher) => {
@@ -1882,13 +2149,8 @@ impl Cipher {
           encryptor.encrypt_block_b2b_mut(input.into(), output.into());
         }
       }
-      Aes128Wrap(..)
-      | Aes192Wrap(..)
-      | Aes256Wrap(..)
-      | Aes128WrapPad(..)
-      | Aes192WrapPad(..)
-      | Aes256WrapPad(..)
-      | Des3Wrap(..) => {}
+      Aes128Wrap(..) | Aes192Wrap(..) | Aes256Wrap(..) | Aes128WrapPad(..)
+      | Aes192WrapPad(..) | Aes256WrapPad(..) | Des3Wrap(..) => {}
       ChaCha20Poly1305(cipher) => {
         cipher.encrypt(input, output);
       }
@@ -2123,8 +2385,9 @@ impl Cipher {
         output.truncate(output_len);
         Ok(output)
       }
-      Des3Wrap(key) => tdes_wrap_encrypt(&key, input)
-        .map_err(|_| CipherError::InvalidDataSize),
+      Des3Wrap(key) => {
+        tdes_wrap_encrypt(&key, input).map_err(|_| CipherError::InvalidDataSize)
+      }
       _ => Err(CipherError::InvalidDataSize),
     }
   }
@@ -2658,9 +2921,7 @@ impl Decipher {
       Aes256Gcm(decipher, _) => {
         decipher.set_aad(aad);
       }
-      Aes128Ccm(decipher)
-      | Aes192Ccm(decipher)
-      | Aes256Ccm(decipher) => {
+      Aes128Ccm(decipher) | Aes192Ccm(decipher) | Aes256Ccm(decipher) => {
         decipher.set_aad(aad, plaintext_length);
       }
       Aes128Ocb(decipher) | Aes192Ocb(decipher) | Aes256Ocb(decipher) => {
@@ -2715,10 +2976,10 @@ impl Decipher {
         output[..input.len()].copy_from_slice(input);
         decipher.decrypt(output);
       }
-      Aes128Ccm(decipher)
-      | Aes192Ccm(decipher)
-      | Aes256Ccm(decipher) => {
-        decipher.decrypt(input, output).expect("AEAD decrypt failed");
+      Aes128Ccm(decipher) | Aes192Ccm(decipher) | Aes256Ccm(decipher) => {
+        decipher
+          .decrypt(input, output)
+          .expect("AEAD decrypt failed");
       }
       Aes128Ocb(..) | Aes192Ocb(..) | Aes256Ocb(..) => {}
       Aes256Cbc(decryptor) => {
@@ -2742,13 +3003,8 @@ impl Decipher {
           decryptor.decrypt_block_b2b_mut(input.into(), output.into());
         }
       }
-      Aes128Wrap(..)
-      | Aes192Wrap(..)
-      | Aes256Wrap(..)
-      | Aes128WrapPad(..)
-      | Aes192WrapPad(..)
-      | Aes256WrapPad(..)
-      | Des3Wrap(..) => {}
+      Aes128Wrap(..) | Aes192Wrap(..) | Aes256Wrap(..) | Aes128WrapPad(..)
+      | Aes192WrapPad(..) | Aes256WrapPad(..) | Des3Wrap(..) => {}
       ChaCha20Poly1305(decipher, _) => {
         decipher.decrypt(input, output);
       }
@@ -2969,42 +3225,36 @@ impl Decipher {
         decryptor.apply_keystream_b2b(input, output).unwrap();
         Ok(())
       }
-      (Aes128Wrap(cipher, iv), _) => aes_key_wrap_decrypt(
-        cipher.as_ref(),
-        &iv,
-        input,
-        output,
-      )
-      .map_err(|error| match error {
-        AesKeyWrapError::IntegrityCheckFailed => {
-          DecipherError::DataAuthenticationFailed
-        }
-        _ => DecipherError::InvalidDataSize,
-      }),
-      (Aes192Wrap(cipher, iv), _) => aes_key_wrap_decrypt(
-        cipher.as_ref(),
-        &iv,
-        input,
-        output,
-      )
-      .map_err(|error| match error {
-        AesKeyWrapError::IntegrityCheckFailed => {
-          DecipherError::DataAuthenticationFailed
-        }
-        _ => DecipherError::InvalidDataSize,
-      }),
-      (Aes256Wrap(cipher, iv), _) => aes_key_wrap_decrypt(
-        cipher.as_ref(),
-        &iv,
-        input,
-        output,
-      )
-      .map_err(|error| match error {
-        AesKeyWrapError::IntegrityCheckFailed => {
-          DecipherError::DataAuthenticationFailed
-        }
-        _ => DecipherError::InvalidDataSize,
-      }),
+      (Aes128Wrap(cipher, iv), _) => {
+        aes_key_wrap_decrypt(cipher.as_ref(), &iv, input, output).map_err(
+          |error| match error {
+            AesKeyWrapError::IntegrityCheckFailed => {
+              DecipherError::DataAuthenticationFailed
+            }
+            _ => DecipherError::InvalidDataSize,
+          },
+        )
+      }
+      (Aes192Wrap(cipher, iv), _) => {
+        aes_key_wrap_decrypt(cipher.as_ref(), &iv, input, output).map_err(
+          |error| match error {
+            AesKeyWrapError::IntegrityCheckFailed => {
+              DecipherError::DataAuthenticationFailed
+            }
+            _ => DecipherError::InvalidDataSize,
+          },
+        )
+      }
+      (Aes256Wrap(cipher, iv), _) => {
+        aes_key_wrap_decrypt(cipher.as_ref(), &iv, input, output).map_err(
+          |error| match error {
+            AesKeyWrapError::IntegrityCheckFailed => {
+              DecipherError::DataAuthenticationFailed
+            }
+            _ => DecipherError::InvalidDataSize,
+          },
+        )
+      }
       (Aes128WrapPad(cipher, iv), _) => {
         let output_len =
           aes_key_wrap_pad_decrypt(cipher.as_ref(), &iv, input, output)
@@ -3066,45 +3316,48 @@ impl Decipher {
     use Decipher::*;
     match self {
       Aes128Wrap(cipher, iv) => {
-        let output_len =
-          input.len().checked_sub(8).ok_or(DecipherError::InvalidDataSize)?;
+        let output_len = input
+          .len()
+          .checked_sub(8)
+          .ok_or(DecipherError::InvalidDataSize)?;
         let mut output = vec![0u8; output_len];
-        aes_key_wrap_decrypt(cipher.as_ref(), &iv, input, &mut output).map_err(
-          |error| match error {
+        aes_key_wrap_decrypt(cipher.as_ref(), &iv, input, &mut output)
+          .map_err(|error| match error {
             AesKeyWrapError::IntegrityCheckFailed => {
               DecipherError::DataAuthenticationFailed
             }
             _ => DecipherError::InvalidDataSize,
-          },
-        )?;
+          })?;
         Ok(output)
       }
       Aes192Wrap(cipher, iv) => {
-        let output_len =
-          input.len().checked_sub(8).ok_or(DecipherError::InvalidDataSize)?;
+        let output_len = input
+          .len()
+          .checked_sub(8)
+          .ok_or(DecipherError::InvalidDataSize)?;
         let mut output = vec![0u8; output_len];
-        aes_key_wrap_decrypt(cipher.as_ref(), &iv, input, &mut output).map_err(
-          |error| match error {
+        aes_key_wrap_decrypt(cipher.as_ref(), &iv, input, &mut output)
+          .map_err(|error| match error {
             AesKeyWrapError::IntegrityCheckFailed => {
               DecipherError::DataAuthenticationFailed
             }
             _ => DecipherError::InvalidDataSize,
-          },
-        )?;
+          })?;
         Ok(output)
       }
       Aes256Wrap(cipher, iv) => {
-        let output_len =
-          input.len().checked_sub(8).ok_or(DecipherError::InvalidDataSize)?;
+        let output_len = input
+          .len()
+          .checked_sub(8)
+          .ok_or(DecipherError::InvalidDataSize)?;
         let mut output = vec![0u8; output_len];
-        aes_key_wrap_decrypt(cipher.as_ref(), &iv, input, &mut output).map_err(
-          |error| match error {
+        aes_key_wrap_decrypt(cipher.as_ref(), &iv, input, &mut output)
+          .map_err(|error| match error {
             AesKeyWrapError::IntegrityCheckFailed => {
               DecipherError::DataAuthenticationFailed
             }
             _ => DecipherError::InvalidDataSize,
-          },
-        )?;
+          })?;
         Ok(output)
       }
       Aes128WrapPad(cipher, iv) => {
@@ -3146,14 +3399,14 @@ impl Decipher {
         output.truncate(output_len);
         Ok(output)
       }
-      Des3Wrap(key) => tdes_wrap_decrypt(&key, input).map_err(|error| {
-        match error {
+      Des3Wrap(key) => {
+        tdes_wrap_decrypt(&key, input).map_err(|error| match error {
           TdesWrapError::IntegrityCheckFailed => {
             DecipherError::DataAuthenticationFailed
           }
           TdesWrapError::InvalidDataSize => DecipherError::InvalidDataSize,
-        }
-      }),
+        })
+      }
       _ => Err(DecipherError::InvalidDataSize),
     }
   }

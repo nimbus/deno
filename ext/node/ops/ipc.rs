@@ -354,10 +354,11 @@ mod impl_ {
       return true;
     }
 
-    let key = FastString::from_static("__node_internal_js_stream_host_object__")
-      .v8_string(scope)
-      .unwrap()
-      .into();
+    let key =
+      FastString::from_static("__node_internal_js_stream_host_object__")
+        .v8_string(scope)
+        .unwrap()
+        .into();
     object.get(scope, key).is_some_and(|value| value.is_true())
   }
 

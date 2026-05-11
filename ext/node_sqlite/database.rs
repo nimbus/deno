@@ -554,9 +554,8 @@ fn set_db_config(
 
 fn permission_check_path(location: &str) -> PathBuf {
   if let Some(file_url_path) = location.strip_prefix("file:") {
-    let file_url_path = file_url_path
-      .strip_prefix("//")
-      .unwrap_or(file_url_path);
+    let file_url_path =
+      file_url_path.strip_prefix("//").unwrap_or(file_url_path);
     let trimmed = file_url_path
       .split_once('?')
       .map(|(path, _)| path)
@@ -574,8 +573,8 @@ fn sqlite_open_flags(read_only: bool) -> rusqlite::OpenFlags {
   let mut flags = if read_only {
     rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
   } else {
-    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE |
-      rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+      | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
   };
 
   flags |= rusqlite::OpenFlags::SQLITE_OPEN_URI;

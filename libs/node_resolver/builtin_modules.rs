@@ -5,10 +5,7 @@ pub trait IsBuiltInNodeModuleChecker: std::fmt::Debug {
   fn is_builtin_node_module(&self, module_name: &str) -> bool;
 
   /// e.g. `is_builtin_node_module_without_scheme("assert")`
-  fn is_builtin_node_module_without_scheme(
-    &self,
-    module_name: &str,
-  ) -> bool {
+  fn is_builtin_node_module_without_scheme(&self, module_name: &str) -> bool {
     self.is_builtin_node_module(module_name)
   }
 }

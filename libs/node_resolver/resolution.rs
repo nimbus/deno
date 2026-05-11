@@ -378,10 +378,7 @@ impl<
   }
 
   #[inline(always)]
-  pub fn is_builtin_node_module_without_scheme(
-    &self,
-    specifier: &str,
-  ) -> bool {
+  pub fn is_builtin_node_module_without_scheme(&self, specifier: &str) -> bool {
     self
       .is_built_in_node_module_checker
       .is_builtin_node_module_without_scheme(specifier)
