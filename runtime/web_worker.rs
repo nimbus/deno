@@ -628,6 +628,7 @@ impl WebWorker {
       module_loader: Some(services.module_loader),
       startup_snapshot: options.startup_snapshot,
       create_params: options.create_params,
+      use_locker: false,
       shared_array_buffer_store: services.shared_array_buffer_store,
       compiled_wasm_module_store: services.compiled_wasm_module_store,
       extensions,

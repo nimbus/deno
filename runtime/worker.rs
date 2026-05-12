@@ -1138,6 +1138,7 @@ fn common_runtime(opts: CommonRuntimeOptions) -> JsRuntime {
     module_loader: Some(opts.module_loader),
     startup_snapshot: opts.startup_snapshot,
     create_params: opts.create_params,
+    use_locker: false,
     skip_op_registration: opts.skip_op_registration,
     shared_array_buffer_store: opts.shared_array_buffer_store,
     compiled_wasm_module_store: opts.compiled_wasm_module_store,

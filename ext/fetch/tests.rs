@@ -43,7 +43,10 @@ fn test_userspace_resolver() {
     // use `localhost` to ensure dns step happens.
     let addr = format!("localhost:{}", src_addr.port());
 
-    let hickory = hickory_resolver::Resolver::builder_tokio().unwrap().build();
+    let hickory = hickory_resolver::Resolver::builder_tokio()
+      .unwrap()
+      .build()
+      .unwrap();
 
     assert_eq!(thread_counter.load(SeqCst), 0);
     run_test_client_with_resolver(
@@ -186,7 +189,7 @@ async fn create_https_server(allow_h2: bool, bind_addr: IpAddr) -> SocketAddr {
     .with_no_client_auth()
     .with_single_cert(
       vec![EXAMPLE_CRT.into()],
-      webpki::types::PrivateKeyDer::try_from(EXAMPLE_KEY).unwrap(),
+      rustls::pki_types::PrivateKeyDer::try_from(EXAMPLE_KEY).unwrap(),
     )
     .unwrap();
   if allow_h2 {
@@ -259,7 +262,7 @@ async fn create_https_proxy(src_addr: SocketAddr) -> SocketAddr {
     .with_no_client_auth()
     .with_single_cert(
       vec![EXAMPLE_CRT.into()],
-      webpki::types::PrivateKeyDer::try_from(EXAMPLE_KEY).unwrap(),
+      rustls::pki_types::PrivateKeyDer::try_from(EXAMPLE_KEY).unwrap(),
     )
     .unwrap();
   // Set ALPN, to check our proxy connector. But we shouldn't receive anything.
