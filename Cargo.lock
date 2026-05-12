@@ -11268,7 +11268,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "147.4.0"
-source = "git+https://github.com/agentstation/rusty_v8?tag=v147.4.0-locker.2#0231260c48bcf9dba098959d34e9e412a5134d51"
+source = "git+https://github.com/nimbus/rusty_v8?tag=v147.4.0-locker.2#0231260c48bcf9dba098959d34e9e412a5134d51"
 dependencies = [
  "bindgen 0.72.1",
  "bitflags 2.9.3",
