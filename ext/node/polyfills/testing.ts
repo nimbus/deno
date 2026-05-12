@@ -300,7 +300,7 @@ function normalizeSyntheticRerunFilePath(file: string) {
 
   const normalizedFile = file.replaceAll("\\", "/");
   const normalizedCwd = cwd.replaceAll("\\", "/");
-  const bundleMarker = "/app/.neovex/convex/";
+  const bundleMarker = "/app/.nimbus/convex/";
   const fileBundleIndex = normalizedFile.indexOf(bundleMarker);
   const cwdBundleIndex = normalizedCwd.indexOf(bundleMarker);
 
@@ -531,9 +531,9 @@ export function run(options = {}) {
   }
 
   const stream = new TestRunStream();
-  const flushEmbeddedTests = globalThis.__neovexFlushEmbeddedTests;
+  const flushEmbeddedTests = globalThis.__nimbusFlushEmbeddedTests;
   const require = createRequire(
-    resolvePath(globalThis.process?.cwd?.() ?? ".", "__neovex-test-runner__.js"),
+    resolvePath(globalThis.process?.cwd?.() ?? ".", "__nimbus-test-runner__.js"),
   );
 
   queueMicrotask(() => {

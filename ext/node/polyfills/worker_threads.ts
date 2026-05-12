@@ -376,8 +376,8 @@ class NodeWorker extends EventEmitter {
     const envOpt = options?.env;
     if (envOpt === SHARE_ENV) {
       const installSharedEnv = (globalThis as typeof globalThis & {
-        __neovexInstallSharedWorkerEnvProxy?: () => void;
-      }).__neovexInstallSharedWorkerEnvProxy;
+        __nimbusInstallSharedWorkerEnvProxy?: () => void;
+      }).__nimbusInstallSharedWorkerEnvProxy;
       if (typeof installSharedEnv === "function") {
         installSharedEnv();
       }

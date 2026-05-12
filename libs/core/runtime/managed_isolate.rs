@@ -1,5 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Locker-aware isolate management for the agentstation/deno fork.
+// Locker-aware isolate management for the nimbus/deno fork.
 
 use std::ops::Deref;
 use std::ops::DerefMut;

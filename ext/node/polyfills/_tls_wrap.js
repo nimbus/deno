@@ -170,7 +170,7 @@ function unregisterSyntheticServerSessionState(server) {
 
 function createSyntheticClientSession(scopeKey, endpointKey, generation) {
   const session = Buffer.from(
-    `neovex-tls-session:${++syntheticClientSessionCounter}:${scopeKey}:${generation}`,
+    `nimbus-tls-session:${++syntheticClientSessionCounter}:${scopeKey}:${generation}`,
   );
   syntheticClientSessionStateByHex.set(session.toString("hex"), {
     endpointKey,

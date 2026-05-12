@@ -94,8 +94,8 @@ export function getHeapSnapshot(options?: Record<string, unknown>) {
 const heapSpaceStatisticsBuffer = new Float64Array(4);
 
 function shouldIncludeHeapSpace(spaceName: string) {
-  const nodeCompatLane = (globalThis as { __neovexNodeCompatLane?: string })
-    .__neovexNodeCompatLane;
+  const nodeCompatLane = (globalThis as { __nimbusNodeCompatLane?: string })
+    .__nimbusNodeCompatLane;
   if (nodeCompatLane === "node20") {
     return !spaceName.startsWith("trusted_") &&
       !spaceName.startsWith("shared_trusted_");
