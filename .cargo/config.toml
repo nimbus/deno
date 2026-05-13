@@ -41,4 +41,4 @@ rustflags = [
 git-fetch-with-cli = true
 
 [env]
-RUSTY_V8_VERSION = "147.4.0-locker.2"
+RUSTY_V8_VERSION = "147.4.0-locker.7"
