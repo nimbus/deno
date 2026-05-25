@@ -36,3 +36,6 @@ rustflags = [
   "--cfg",
   "tokio_unstable",
 ]
+
+[env]
+RUSTY_V8_VERSION = "149.0.0-nimbus.1"

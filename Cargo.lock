@@ -11336,8 +11336,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "149.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55897294cf631f99d5ff57c6a0611648861645ed7c8f251579161e0768812840"
+source = "git+https://github.com/nimbus/rusty_v8?tag=v149.0.0-nimbus.1#9b77553883f1117ab3df62709b8673b803ed721b"
 dependencies = [
  "bindgen 0.72.1",
  "bitflags 2.9.3",

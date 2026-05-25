@@ -612,3 +612,6 @@ opt-level = 3
 opt-level = 3
 [profile.release.package.twox-hash]
 opt-level = 3
+
+[patch.crates-io]
+v8 = { git = "https://github.com/nimbus/rusty_v8", tag = "v149.0.0-nimbus.1" }
