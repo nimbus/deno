@@ -4,6 +4,7 @@ pub(crate) mod bindings;
 pub(crate) mod exception_state;
 mod jsrealm;
 mod jsruntime;
+pub(crate) mod managed_isolate;
 pub mod op_driver;
 #[doc(hidden)]
 pub mod ops;
