@@ -50,6 +50,15 @@ impl ExceptionState {
     self.dispatched_exception.set(None);
   }
 
+  /// Clear per-request exception state for warm reuse. Preserves
+  /// bootstrap-installed JS callbacks.
+  pub(crate) fn clear_request_state(&self) {
+    self.dispatched_exception.set(None);
+    self.dispatched_exception_is_promise.set(false);
+    self.pending_promise_rejections.borrow_mut().clear();
+    self.pending_handled_promise_rejections.borrow_mut().clear();
+  }
+
   pub(crate) fn has_dispatched_exception(&self) -> bool {
     // SAFETY: we limit access to this cell to this method only
     unsafe {
