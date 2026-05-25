@@ -135,7 +135,7 @@ impl<T> DerefMut for ManuallyDropRc<T> {
   }
 }
 
-/// This struct contains the [`JsRuntimeState`] and [`v8::OwnedIsolate`] that are required
+/// This struct contains the [`JsRuntimeState`] and V8 isolate that are required
 /// to do an orderly shutdown of V8. We keep these in a separate struct to allow us to control
 /// the destruction more closely, as snapshots require the isolate to be destroyed by the
 /// snapshot process, not the destructor.
@@ -155,7 +155,7 @@ pub(crate) struct InnerIsolateState {
   addl_refs_count: usize,
   main_realm: ManuallyDrop<JsRealm>,
   pub(crate) state: ManuallyDropRc<JsRuntimeState>,
-  v8_isolate: ManuallyDrop<v8::OwnedIsolate>,
+  v8_isolate: ManuallyDrop<super::managed_isolate::ManagedIsolate>,
 }
 
 impl InnerIsolateState {
@@ -183,6 +183,8 @@ impl InnerIsolateState {
     let inspector = self.state.inspector.take();
 
     // Unregister isolate waker before dropping the isolate
+    self.v8_isolate.ensure_lock_held();
+
     let isolate_ptr = unsafe { self.v8_isolate.as_raw_isolate_ptr() };
     setup::unregister_isolate(setup::isolate_ptr_to_key(isolate_ptr));
 
@@ -221,11 +223,16 @@ impl InnerIsolateState {
     unsafe {
       ManuallyDrop::drop(&mut self.state.0);
 
-      let isolate = ManuallyDrop::take(&mut self.v8_isolate);
+      let managed = ManuallyDrop::take(&mut self.v8_isolate);
 
       std::mem::forget(self);
 
-      isolate
+      match managed {
+        super::managed_isolate::ManagedIsolate::Owned(owned) => owned,
+        _ => panic!(
+          "prepare_for_snapshot requires OwnedIsolate (use_locker must be false)"
+        ),
+      }
     }
   }
 }
@@ -525,6 +532,11 @@ pub struct RuntimeOptions {
   /// Isolate creation parameters.
   pub create_params: Option<v8::CreateParams>,
 
+  /// If true, create the isolate using `v8::UnenteredIsolate` + `v8::Locker`
+  /// instead of `v8::OwnedIsolate`. This enables multiple `JsRuntime`s on the
+  /// same thread via cooperative lock/unlock.
+  pub use_locker: bool,
+
   /// V8 platform instance to use. Used when Deno initializes V8
   /// (which it only does once), otherwise it's silently dropped.
   pub v8_platform: Option<v8::SharedRef<v8::Platform>>,
@@ -633,7 +645,41 @@ macro_rules! scope {
   };
 }
 
+/// RAII guard for the V8 lock on locker-enabled runtimes.
+///
+/// Standard upstream-style runtimes treat this as a no-op wrapper.
+pub struct JsRuntimeV8LockGuard<'a> {
+  runtime: &'a mut JsRuntime,
+  release_on_drop: bool,
+}
+
+impl Deref for JsRuntimeV8LockGuard<'_> {
+  type Target = JsRuntime;
+
+  fn deref(&self) -> &Self::Target {
+    self.runtime
+  }
+}
+
+impl DerefMut for JsRuntimeV8LockGuard<'_> {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    self.runtime
+  }
+}
+
+impl Drop for JsRuntimeV8LockGuard<'_> {
+  fn drop(&mut self) {
+    if self.release_on_drop {
+      self.runtime.release_v8_lock();
+    }
+  }
+}
+
 impl JsRuntime {
+  fn ensure_v8_lock_held(&mut self) {
+    self.inner.v8_isolate.ensure_lock_held();
+  }
+
   /// Explicitly initalizes the V8 platform using the passed platform. This
   /// should only be called once per process. Further calls will be silently
   /// ignored.
@@ -874,6 +920,7 @@ impl JsRuntime {
       options.create_params.take(),
       maybe_startup_snapshot,
       external_references.into(),
+      options.use_locker,
     );
 
     let isolate_ptr = unsafe { isolate.as_raw_isolate_ptr() };
@@ -927,7 +974,7 @@ impl JsRuntime {
     // ...and with `ContextState` available we can set up V8 context...
     let mut snapshotted_data = None;
     let main_context = {
-      v8::scope!(let scope, &mut isolate);
+      v8::scope!(let scope, isolate.as_mut());
 
       let cppgc_template = crate::cppgc::make_cppgc_template(scope);
       state_rc
@@ -953,7 +1000,7 @@ impl JsRuntime {
     };
 
     let main_realm = {
-      v8::scope_with_context!(context_scope, &mut isolate, &main_context);
+      v8::scope_with_context!(context_scope, isolate.as_mut(), &main_context);
       let scope = context_scope;
       let context = v8::Local::new(scope, &main_context);
 
@@ -1285,18 +1332,137 @@ impl JsRuntime {
   }
 
   #[inline]
-  pub fn v8_isolate(&mut self) -> &mut v8::OwnedIsolate {
+  pub fn v8_isolate(&mut self) -> &mut v8::Isolate {
+    self.ensure_v8_lock_held();
     &mut self.inner.v8_isolate
   }
 
   #[inline]
   fn v8_isolate_ptr(&mut self) -> v8::UnsafeRawIsolatePtr {
+    self.ensure_v8_lock_held();
     unsafe { self.inner.v8_isolate.as_raw_isolate_ptr() }
   }
 
   #[inline]
   pub fn inspector(&self) -> Rc<JsRuntimeInspector> {
     self.inner.state.inspector()
+  }
+
+  #[inline]
+  pub fn is_v8_lock_held(&self) -> bool {
+    self.inner.v8_isolate.is_lock_held()
+  }
+
+  #[inline]
+  pub fn release_v8_lock(&mut self) -> bool {
+    self.inner.v8_isolate.release_lock()
+  }
+
+  #[inline]
+  pub fn acquire_v8_lock(&mut self) -> JsRuntimeV8LockGuard<'_> {
+    let release_on_drop = self.inner.v8_isolate.is_lockable();
+    self.ensure_v8_lock_held();
+    JsRuntimeV8LockGuard {
+      runtime: self,
+      release_on_drop,
+    }
+  }
+
+  /// Returns true if the runtime's event loop is fully quiescent and safe to
+  /// return to a warm pool without carrying forward request state.
+  ///
+  /// This checks all tracked `EventLoopPendingState` fields, including timers,
+  /// immediates, and unrefed ops that `EventLoopPendingState::is_pending()`
+  /// intentionally ignores for ordinary event-loop liveness checks.
+  pub fn is_warm_reuse_safe(&mut self) -> bool {
+    self.ensure_v8_lock_held();
+    let main_context = self.inner.main_realm.context().clone();
+    let isolate = self.v8_isolate();
+    v8::scope!(let scope, isolate);
+    let context = v8::Local::new(scope, &main_context);
+    let mut scope = v8::ContextScope::new(scope, context);
+    let state = EventLoopPendingState::new_from_scope(&mut scope);
+    state.is_warm_reuse_safe()
+  }
+
+  /// Reset per-request event-loop state for warm module reuse while preserving
+  /// evaluated modules and bootstrap globals.
+  ///
+  /// The caller must first ensure the runtime is fully quiescent by checking
+  /// [`JsRuntime::is_warm_reuse_safe`]. Calling this method with live pending
+  /// state is an error.
+  pub fn reset_request_state(&mut self) -> Result<(), CoreError> {
+    self.ensure_v8_lock_held();
+
+    {
+      let main_context = self.inner.main_realm.context().clone();
+      let isolate = self.v8_isolate();
+      v8::scope!(let scope, isolate);
+      let context = v8::Local::new(scope, &main_context);
+      let mut scope = v8::ContextScope::new(scope, context);
+      let pending = EventLoopPendingState::new_from_scope(&mut scope);
+      if !pending.is_warm_reuse_safe() {
+        return Err(
+          CoreErrorKind::JsBox(JsErrorBox::generic(
+            "reset_request_state requires the event loop to be fully quiescent",
+          ))
+          .into_box(),
+        );
+      }
+    }
+
+    {
+      let main_context = self.inner.main_realm.context().clone();
+      let foreground_tasks = self.inner.state.foreground_tasks.clone();
+      let isolate = self.v8_isolate();
+      v8::scope!(let scope, isolate);
+      let context = v8::Local::new(scope, &main_context);
+      let mut context_scope = v8::ContextScope::new(scope, context);
+
+      for _drain_pass in 0..8 {
+        let tasks = std::mem::take(&mut *foreground_tasks.lock().unwrap());
+        let had_tasks = !tasks.is_empty();
+        for task in tasks {
+          task.run();
+        }
+        v8::tc_scope!(tc_scope, &mut context_scope);
+        tc_scope.perform_microtask_checkpoint();
+        if !had_tasks {
+          break;
+        }
+      }
+    }
+
+    let context_state = &self.inner.main_realm.0.context_state;
+    let module_map = &self.inner.main_realm.0.module_map;
+
+    context_state.exception_state.clear_request_state();
+    module_map.clear_pending_state();
+
+    // These buffers are shared with V8 ArrayBuffers, so reset them in place
+    // only after verifying the runtime is fully quiescent.
+    unsafe {
+      let tick = context_state.tick_info.as_ptr() as *mut u8;
+      *tick = 0;
+      *tick.add(1) = 0;
+      let imm = context_state.immediate_info.as_ptr() as *mut u32;
+      *imm.add(IMM_IDX_COUNT) = 0;
+      *imm.add(IMM_IDX_REF_COUNT) = 0;
+      *imm.add(IMM_IDX_HAS_OUTSTANDING) = 0;
+      let timer = context_state.timer_info.as_ptr() as *mut i32;
+      *timer = 0;
+      let expiry = context_state.timer_expiry.as_ptr() as *mut f64;
+      *expiry = 0.0;
+    }
+
+    context_state.active_timers.borrow_mut().clear();
+    context_state.unrefed_ops.borrow_mut().clear();
+    context_state.external_ops_tracker.reset();
+    context_state.activity_traces.clear_traces();
+    *context_state.event_loop_phases.borrow_mut() = Default::default();
+    context_state.task_spawner_factory.clear();
+
+    Ok(())
   }
 
   #[inline]
@@ -1882,6 +2048,7 @@ impl JsRuntime {
     name: impl IntoModuleName,
     source_code: impl IntoModuleCodeString,
   ) -> Result<v8::Global<v8::Value>, Box<JsError>> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self.inner.main_realm.execute_script(
       isolate,
@@ -2021,6 +2188,7 @@ impl JsRuntime {
     &mut self,
     module_id: ModuleId,
   ) -> Result<v8::Global<v8::Object>, CoreError> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self
       .inner
@@ -2906,6 +3074,23 @@ impl EventLoopPendingState {
       || self.has_pending_external_ops
       || self.has_uv_alive_handles
   }
+
+  /// Returns true only if no event-loop state is live and the runtime is safe
+  /// to return to a warm pool without carrying forward request state.
+  pub fn is_warm_reuse_safe(&self) -> bool {
+    !self.has_pending_ops
+      && !self.has_pending_refed_ops
+      && !self.has_pending_dyn_imports
+      && !self.has_pending_dyn_module_evaluation
+      && !self.has_pending_module_evaluation
+      && !self.has_pending_background_tasks
+      && !self.has_tick_scheduled
+      && !self.has_pending_promise_events
+      && !self.has_pending_external_ops
+      && !self.has_outstanding_immediates
+      && !self.has_pending_timers
+      && !self.has_uv_alive_handles
+  }
 }
 
 extern "C" fn near_heap_limit_callback<F>(
@@ -2958,8 +3143,9 @@ impl JsRuntime {
     &mut self,
     id: ModuleId,
   ) -> Result<(), v8::Global<v8::Value>> {
-    let isolate = &mut *self.inner.v8_isolate;
+    self.ensure_v8_lock_held();
     let realm = JsRealm::clone(&self.inner.main_realm);
+    let isolate = self.v8_isolate();
     jsrealm::context_scope!(scope, realm, isolate);
     realm.instantiate_module(scope, id)
   }
@@ -2985,10 +3171,12 @@ impl JsRuntime {
     &mut self,
     id: ModuleId,
   ) -> impl Future<Output = Result<(), CoreError>> + use<> {
-    let isolate = &mut *self.inner.v8_isolate;
-    let realm = &self.inner.main_realm;
+    self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(&self.inner.main_realm);
+    let module_map = realm.0.module_map.clone();
+    let isolate = self.v8_isolate();
     jsrealm::context_scope!(scope, realm, isolate);
-    self.inner.main_realm.0.module_map.mod_evaluate(scope, id)
+    module_map.mod_evaluate(scope, id)
   }
 
   /// Asynchronously load specified module and all of its dependencies.
@@ -3008,6 +3196,7 @@ impl JsRuntime {
     specifier: &ModuleSpecifier,
     code: impl IntoModuleCodeString,
   ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self
       .inner
@@ -3032,6 +3221,7 @@ impl JsRuntime {
     &mut self,
     specifier: &ModuleSpecifier,
   ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self
       .inner
@@ -3058,6 +3248,7 @@ impl JsRuntime {
     specifier: &ModuleSpecifier,
     code: impl IntoModuleCodeString,
   ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self
       .inner
@@ -3082,6 +3273,7 @@ impl JsRuntime {
     &mut self,
     specifier: &ModuleSpecifier,
   ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self
       .inner
@@ -3102,6 +3294,7 @@ impl JsRuntime {
     specifier: impl IntoModuleName,
     code: impl IntoModuleCodeString,
   ) -> Result<v8::Global<v8::Value>, CoreError> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self.inner.main_realm.lazy_load_es_module_with_code(
       isolate,
