@@ -593,7 +593,7 @@ fn set_db_config(
   conn: &rusqlite::Connection,
   config: i32,
   value: bool,
-) -> bool {
+) -> Result<(), SqliteError> {
   // SAFETY: call to sqlite3_db_config is safe because the connection
   // handle is valid and the parameters are correct.
   unsafe {
@@ -605,11 +605,13 @@ fn set_db_config(
       &mut set,
     );
 
-    if r != libsqlite3_sys::SQLITE_OK {
-      panic!("Failed to set db config");
+    check_error_code(r, conn.handle())?;
+
+    if set != value as i32 {
+      return check_error_code2(libsqlite3_sys::SQLITE_MISUSE);
     }
 
-    set == value as i32
+    Ok(())
   }
 }
 
@@ -668,29 +670,17 @@ fn open_db(
   if location == ":memory:" {
     let conn = rusqlite::Connection::open_in_memory()?;
     if disable_attach {
-      assert!(set_db_config(
-        &conn,
-        SQLITE_DBCONFIG_ENABLE_ATTACH_WRITE,
-        false
-      ));
+      set_db_config(&conn, SQLITE_DBCONFIG_ENABLE_ATTACH_WRITE, false)?;
       conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
     }
 
     if options.allow_extension {
       perms.check_ffi_all()?;
     } else {
-      assert!(set_db_config(
-        &conn,
-        SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION,
-        false
-      ));
+      set_db_config(&conn, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, false)?;
     }
 
-    assert!(set_db_config(
-      &conn,
-      SQLITE_DBCONFIG_DEFENSIVE,
-      options.is_defensive_mode,
-    ));
+    set_db_config(&conn, SQLITE_DBCONFIG_DEFENSIVE, options.is_defensive_mode)?;
 
     apply_initial_limits(&conn, options)?;
 
@@ -714,29 +704,17 @@ fn open_db(
       rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     if disable_attach {
-      assert!(set_db_config(
-        &conn,
-        SQLITE_DBCONFIG_ENABLE_ATTACH_WRITE,
-        false
-      ));
+      set_db_config(&conn, SQLITE_DBCONFIG_ENABLE_ATTACH_WRITE, false)?;
       conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
     }
 
     if options.allow_extension {
       perms.check_ffi_all()?;
     } else {
-      assert!(set_db_config(
-        &conn,
-        SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION,
-        false
-      ));
+      set_db_config(&conn, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, false)?;
     }
 
-    assert!(set_db_config(
-      &conn,
-      SQLITE_DBCONFIG_DEFENSIVE,
-      options.is_defensive_mode,
-    ));
+    set_db_config(&conn, SQLITE_DBCONFIG_DEFENSIVE, options.is_defensive_mode)?;
 
     apply_initial_limits(&conn, options)?;
 
@@ -749,22 +727,14 @@ fn open_db(
   if options.allow_extension {
     perms.check_ffi_all()?;
   } else {
-    assert!(set_db_config(
-      &conn,
-      SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION,
-      false
-    ));
+    set_db_config(&conn, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, false)?;
   }
 
   if disable_attach {
     conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
   }
 
-  assert!(set_db_config(
-    &conn,
-    SQLITE_DBCONFIG_DEFENSIVE,
-    options.is_defensive_mode,
-  ));
+  set_db_config(&conn, SQLITE_DBCONFIG_DEFENSIVE, options.is_defensive_mode)?;
 
   apply_initial_limits(&conn, options)?;
 
@@ -816,12 +786,12 @@ impl DatabaseSync {
         &db,
         SQLITE_DBCONFIG_DQS_DDL,
         options.enable_double_quoted_string_literals,
-      );
+      )?;
       set_db_config(
         &db,
         SQLITE_DBCONFIG_DQS_DML,
         options.enable_double_quoted_string_literals,
-      );
+      )?;
       Some(db)
     } else {
       None
@@ -860,12 +830,12 @@ impl DatabaseSync {
       &db,
       SQLITE_DBCONFIG_DQS_DDL,
       self.options.enable_double_quoted_string_literals,
-    );
+    )?;
     set_db_config(
       &db,
       SQLITE_DBCONFIG_DQS_DML,
       self.options.enable_double_quoted_string_literals,
-    );
+    )?;
 
     *self.conn.borrow_mut() = Some(db);
 
@@ -1597,7 +1567,7 @@ impl DatabaseSync {
   ) -> Result<(), SqliteError> {
     let db = self.conn.borrow();
     let conn = db.as_ref().ok_or(SqliteError::AlreadyClosed)?;
-    assert!(set_db_config(conn, SQLITE_DBCONFIG_DEFENSIVE, is_enabled));
+    set_db_config(conn, SQLITE_DBCONFIG_DEFENSIVE, is_enabled)?;
     Ok(())
   }
 
