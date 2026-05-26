@@ -8,7 +8,7 @@ use std::task::Poll;
 use std::task::{self};
 use std::vec;
 
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hyper_util::client::legacy::connect::dns::GaiResolver;
 use hyper_util::client::legacy::connect::dns::Name;
 use tokio::task::JoinHandle;
@@ -20,7 +20,7 @@ pub enum Resolver {
   /// A resolver using blocking `getaddrinfo` calls in a threadpool.
   Gai(GaiResolver),
   /// hickory-resolver's userspace resolver.
-  Hickory(hickory_resolver::Resolver<TokioConnectionProvider>),
+  Hickory(hickory_resolver::TokioResolver),
   /// A custom resolver that implements `Resolve`.
   Custom(Arc<dyn Resolve>),
 }
@@ -53,14 +53,14 @@ impl Resolver {
   }
 
   /// Create a [`AsyncResolver`] from system conf.
-  pub fn hickory() -> Result<Self, hickory_resolver::ResolveError> {
+  pub fn hickory() -> Result<Self, hickory_resolver::net::NetError> {
     Ok(Self::Hickory(
-      hickory_resolver::Resolver::builder_tokio()?.build(),
+      hickory_resolver::TokioResolver::builder_tokio()?.build()?,
     ))
   }
 
   pub fn hickory_from_resolver(
-    resolver: hickory_resolver::Resolver<TokioConnectionProvider>,
+    resolver: hickory_resolver::Resolver<TokioRuntimeProvider>,
   ) -> Self {
     Self::Hickory(resolver)
   }
@@ -119,10 +119,13 @@ impl Service<Name> for Resolver {
       Resolver::Hickory(async_resolver) => {
         let resolver = async_resolver.clone();
         tokio::spawn(async move {
-          let result = resolver.lookup_ip(name.as_str()).await?;
+          let result = resolver
+            .lookup_ip(name.as_str())
+            .await
+            .map_err(io::Error::other)?;
 
           let x: Vec<_> =
-            result.into_iter().map(|x| SocketAddr::new(x, 0)).collect();
+            result.iter().map(|x| SocketAddr::new(x, 0)).collect();
           let iter: SocketAddrs = x.into_iter();
           Ok(iter)
         })
