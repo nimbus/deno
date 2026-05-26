@@ -681,15 +681,36 @@ pub fn create_v8_context<'a>(
   let scope = &mut scope.init();
 
   let context = if mode == ContextInitMode::UseSnapshot {
-    v8::Context::from_snapshot(
+    if let Some(context) = v8::Context::from_snapshot(
       scope,
       VM_CONTEXT_INDEX,
       v8::ContextOptions {
         microtask_queue: Some(microtask_queue),
         ..Default::default()
       },
-    )
-    .unwrap()
+    ) {
+      context
+    } else {
+      // Nimbus embeds deno_node without a Node startup snapshot for ordinary
+      // runtimes. In that mode the VM context snapshot slot is absent; fall
+      // back to a fresh context instead of aborting the embedder process.
+      let ctx = v8::Context::new(
+        scope,
+        v8::ContextOptions {
+          global_template: Some(object_template),
+          microtask_queue: Some(microtask_queue),
+          ..Default::default()
+        },
+      );
+      // SAFETY: ContextifyContexts will update this to a pointer to the native object
+      unsafe {
+        ctx.set_aligned_pointer_in_embedder_data(1, std::ptr::null_mut());
+        ctx.set_aligned_pointer_in_embedder_data(2, std::ptr::null_mut());
+        ctx.set_aligned_pointer_in_embedder_data(3, std::ptr::null_mut());
+        ctx.clear_all_slots();
+      };
+      ctx
+    }
   } else {
     let ctx = v8::Context::new(
       scope,

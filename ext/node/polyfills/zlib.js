@@ -71,9 +71,9 @@ const { crc32: crc32Native } = binding;
 const assert = core.loadExtScript(
   "ext:deno_node/internal/assert.mjs",
 );
-const { Buffer, kMaxLength } = core.loadExtScript(
-  "ext:deno_node/internal/buffer.mjs",
-);
+const publicBufferModule = globalThis.process?.getBuiltinModule?.("buffer") ??
+  core.createLazyLoader("node:buffer")();
+const { Buffer, kMaxLength } = publicBufferModule;
 const { ownerSymbol: owner_symbol } = core.loadExtScript(
   "ext:deno_node/internal_binding/symbols.ts",
 );
