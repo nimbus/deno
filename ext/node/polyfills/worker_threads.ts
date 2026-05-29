@@ -1916,6 +1916,22 @@ function webMessagePortToNodeMessagePort(port: MessagePort) {
     enumerable: false,
     configurable: false,
   });
+  const webAddEventListener = port.addEventListener;
+  port.addEventListener = function (
+    this: MessagePort,
+    name,
+    listener,
+    options,
+  ) {
+    FunctionPrototypeCall(webAddEventListener, port, name, listener, options);
+    if (name === "message") {
+      // Node starts worker_threads MessagePorts when a message listener is
+      // attached through EventTarget as well as through `.on()` or
+      // `onmessage`. Defer one microtask so receiveMessageOnPort can still
+      // synchronously drain already-queued data first.
+      PromisePrototypeThen(PromiseResolve(undefined), () => port.start());
+    }
+  };
   port.on = port.addListener = function (this: MessagePort, name, listener) {
     if (!isWebEvent(name)) {
       // EventEmitter-like dispatch path for arbitrary event names.
@@ -1945,19 +1961,6 @@ function webMessagePortToNodeMessagePort(port: MessagePort) {
     };
     map.set(listener, _listener);
     port.addEventListener(name, _listener);
-    if (name === "message") {
-      // Mirror the auto-start behavior of `port.onmessage = fn` so Node
-      // code that does `port.on('message', ...)` without an explicit
-      // `port.start()` still receives messages. Deferred via a
-      // microtask so `receiveMessageOnPort` (sync) gets a chance to
-      // drain the queue first -- this is the same pattern the web
-      // MessagePort applies in its `message` event handler init, which
-      // `npm:piscina` relies on. Messages buffered before the listener
-      // was attached are still picked up by the next iteration of the
-      // recv loop (or by `MessagePort.close()`'s drain when the paired
-      // port closes in the same turn).
-      PromisePrototypeThen(PromiseResolve(undefined), () => port.start());
-    }
     return this;
   };
   port.off = port.removeListener = function (
