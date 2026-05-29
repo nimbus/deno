@@ -20,6 +20,7 @@ const {
   ArrayPrototypeFilter,
   ArrayPrototypeIncludes,
   ArrayPrototypePush,
+  ArrayPrototypeShift,
   ObjectDefineProperty,
   ObjectFreeze,
   ObjectHasOwn,
@@ -119,6 +120,7 @@ const MessagePortReceiveMessageOnPortSymbol = Symbol(
 const _enabled = Symbol("enabled");
 const _refed = Symbol("refed");
 const _messageEventListenerCount = Symbol("messageEventListenerCount");
+const _pendingMessageData = Symbol("pendingMessageData");
 const nodeWorkerThreadCloseCb = Symbol("nodeWorkerThreadCloseCb");
 const nodeWorkerThreadCloseCbInvoked = Symbol("nodeWorkerThreadCloseCbInvoked");
 const refMessagePort = Symbol("refMessagePort");
@@ -137,6 +139,7 @@ function createMessagePort(id) {
   port[_id] = id;
   port[_enabled] = false;
   port[_messageEventListenerCount] = 0;
+  port[_pendingMessageData] = [];
   port[_refed] = false;
   return port;
 }
@@ -182,6 +185,11 @@ function dispatchPortMessageData(target, data) {
   return true;
 }
 
+function shouldPauseNodeMessagePortDispatch(port) {
+  return typeof port[nodeWorkerThreadCloseCb] === "function" &&
+    port[_messageEventListenerCount] === 0;
+}
+
 // Internal intermediate class that holds the ref-count override of
 // add/removeEventListener. The user-visible `MessagePort` class extends
 // this so `Object.getOwnPropertyNames(MessagePort.prototype)` matches
@@ -220,6 +228,7 @@ class MessagePort extends _MessagePortBase {
   /** @type {Promise<any> | undefined} */
   [_dataPromise] = undefined;
   [_messageEventListenerCount] = 0;
+  [_pendingMessageData] = [];
 
   constructor() {
     super();
@@ -346,11 +355,20 @@ class MessagePort extends _MessagePortBase {
     (async () => {
       this[_enabled] = true;
       while (true) {
-        if (this[_id] === null) break;
+        if (typeof this[_id] !== "number") break;
+        while (this[_pendingMessageData].length > 0) {
+          if (shouldPauseNodeMessagePortDispatch(this)) break;
+          const pendingData = ArrayPrototypeShift(this[_pendingMessageData]);
+          if (!dispatchPortMessageData(this, pendingData)) return;
+          await new Promise((resolve) => queueMicrotask(() => resolve()));
+        }
+        if (shouldPauseNodeMessagePortDispatch(this)) break;
         let data;
         try {
+          const rid = this[_id];
+          if (typeof rid !== "number") break;
           this[_dataPromise] = op_message_port_recv_message(
-            this[_id],
+            rid,
           );
           if (
             typeof this[nodeWorkerThreadCloseCb] === "function" &&
@@ -369,6 +387,10 @@ class MessagePort extends _MessagePortBase {
         }
         if (data === null) {
           nodeWorkerThreadMaybeInvokeCloseCb(this);
+          break;
+        }
+        if (shouldPauseNodeMessagePortDispatch(this)) {
+          ArrayPrototypePush(this[_pendingMessageData], data);
           break;
         }
         if (!dispatchPortMessageData(this, data)) return;

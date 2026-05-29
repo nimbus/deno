@@ -578,6 +578,32 @@ Deno.test({
   },
 });
 
+Deno.test({
+  name:
+    "[node/worker_threads] MessagePort.addEventListener starts message delivery",
+  async fn() {
+    const deferred = Promise.withResolvers<void>();
+    const { port1, port2 } = new workerThreads.MessageChannel();
+
+    port1.addEventListener("message", (event) => {
+      assertEquals((event as MessageEvent).data, { ok: true });
+      port1.close();
+      port2.close();
+      deferred.resolve();
+    }, { once: true });
+    port2.postMessage({ ok: true });
+
+    const timeout = setTimeout(() => {
+      fail("Test timed out");
+    }, 1_000);
+    try {
+      await deferred.promise;
+    } finally {
+      clearTimeout(timeout);
+    }
+  },
+});
+
 // Regression test for https://github.com/denoland/deno/issues/33373
 // Node's MessagePort.on('message', fn) deduplicates by listener
 // reference. Registering the same function multiple times must
