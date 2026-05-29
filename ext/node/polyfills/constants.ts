@@ -4,7 +4,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { ObjectAssign } = primordials;
+const { ObjectAssign, ObjectFreeze } = primordials;
 
 const fsConstants = core.loadExtScript(
   "ext:deno_node/_fs/_fs_constants.ts",
@@ -17,7 +17,7 @@ const {
   zlib: zlibConstants,
 } = core.loadExtScript("ext:deno_node/internal_binding/constants.ts");
 
-const defaultExport = ObjectAssign(
+const defaultExport = ObjectFreeze(ObjectAssign(
   {},
   fsConstants,
   osConstants.dlopen,
@@ -26,7 +26,7 @@ const defaultExport = ObjectAssign(
   osConstants.priority,
   cryptoConstants,
   zlibConstants,
-);
+));
 
 return {
   default: defaultExport,

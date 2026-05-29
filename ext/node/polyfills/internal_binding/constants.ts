@@ -2,7 +2,7 @@
 
 (function () {
 const { primordials } = __bootstrap;
-const { ObjectFreeze } = primordials;
+const { ObjectAssign, ObjectCreate, ObjectFreeze, ObjectKeys } = primordials;
 const { core } = __bootstrap;
 const { op_node_build_os, op_node_fs_constants } = core.ops;
 
@@ -894,5 +894,36 @@ const trace = {
   TRACE_EVENT_PHASE_LINK_IDS: 61,
 } as const;
 
-return { os, fs, crypto, zlib, trace };
+function copyBindingConstants(
+  source: Record<string, unknown>,
+  options: { hideUvUdpIpv6Only?: boolean } = {},
+) {
+  const constants = ObjectCreate(null) as Record<string, unknown>;
+  for (const key of ObjectKeys(source)) {
+    if (options.hideUvUdpIpv6Only && key === "UV_UDP_IPV6ONLY") {
+      continue;
+    }
+    const value = source[key];
+    if (value === undefined) {
+      continue;
+    }
+    constants[key] = typeof value === "object" && value !== null
+      ? copyBindingConstants(value as Record<string, unknown>)
+      : value;
+  }
+  return constants;
+}
+
+const bindingConstants = ObjectAssign(ObjectCreate(null), {
+  crypto: copyBindingConstants(crypto),
+  fs: copyBindingConstants(fs),
+  internal: ObjectCreate(null),
+  os: copyBindingConstants(os as unknown as Record<string, unknown>, {
+    hideUvUdpIpv6Only: true,
+  }),
+  trace: copyBindingConstants(trace),
+  zlib: copyBindingConstants(zlib),
+});
+
+return { os, fs, crypto, zlib, trace, default: bindingConstants };
 })();

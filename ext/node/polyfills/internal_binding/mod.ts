@@ -83,7 +83,7 @@ const modules = {
   buffer,
   "cares_wrap": caresWrap,
   config: {},
-  constants,
+  constants: constants.default,
   contextify: {},
   credentials: {},
   crypto,

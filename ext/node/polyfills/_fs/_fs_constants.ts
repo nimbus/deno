@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 (function () {
 const { core, primordials } = __bootstrap;
-const { ObjectAssign, ObjectCreate } = primordials;
+const { ObjectCreate, ObjectKeys } = primordials;
 const { fs } = core.loadExtScript(
   "ext:deno_node/internal_binding/constants.ts",
 );
@@ -66,7 +66,18 @@ const {
   O_NOATIME,
 } = fs;
 
-return ObjectAssign(ObjectCreate(null), {
+function copyDefinedConstants(source: Record<string, number | undefined>) {
+  const constants = ObjectCreate(null) as Record<string, number>;
+  for (const key of ObjectKeys(source)) {
+    const value = source[key];
+    if (value !== undefined) {
+      constants[key] = value;
+    }
+  }
+  return constants;
+}
+
+return copyDefinedConstants({
   F_OK,
   R_OK,
   W_OK,
