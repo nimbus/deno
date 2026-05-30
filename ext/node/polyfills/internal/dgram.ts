@@ -33,6 +33,7 @@ const { guessHandleType } = core.loadExtScript(
   "ext:deno_node/internal_binding/util.ts",
 );
 const { codeMap } = core.loadExtScript("ext:deno_node/internal_binding/uv.ts");
+const { isIP } = core.loadExtScript("ext:deno_node/internal/net.ts");
 const {
   isInt32,
   validateFunction,
@@ -118,8 +119,12 @@ function _createSocketHandle(
       err = handle.open(fd);
     }
   } else if (port || address) {
-    // deno-lint-ignore prefer-primordials
-    err = handle.bind(address, port || 0, flags);
+    if (address && isIP(address) === 0) {
+      err = MapPrototypeGet(codeMap, "EINVAL")!;
+    } else {
+      // deno-lint-ignore prefer-primordials
+      err = handle.bind(address, port || 0, flags);
+    }
   }
 
   if (err) {

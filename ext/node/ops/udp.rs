@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::mem::ManuallyDrop;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
@@ -61,6 +62,61 @@ impl Resource for NodeUdpSocketResource {
   fn close(self: Rc<Self>) {
     self.cancel.cancel()
   }
+}
+
+#[cfg(unix)]
+fn duplicate_udp_socket_from_fd(
+  fd: i32,
+) -> Result<std::net::UdpSocket, NodeUdpError> {
+  use std::os::fd::FromRawFd;
+
+  if fd < 0 {
+    return Err(std::io::Error::from_raw_os_error(libc::EBADF).into());
+  }
+
+  // SAFETY: `fd` is borrowed only long enough to duplicate it with
+  // `try_clone()`. `ManuallyDrop` prevents the temporary wrapper from closing
+  // the caller-owned descriptor.
+  let original =
+    ManuallyDrop::new(unsafe { std::net::UdpSocket::from_raw_fd(fd) });
+  let socket = original.try_clone()?;
+  socket.set_nonblocking(true)?;
+  Ok(socket)
+}
+
+#[cfg(windows)]
+fn duplicate_udp_socket_from_fd(
+  fd: i32,
+) -> Result<std::net::UdpSocket, NodeUdpError> {
+  use std::os::windows::io::FromRawSocket;
+
+  if fd < 0 {
+    return Err(std::io::Error::from_raw_os_error(libc::EBADF).into());
+  }
+
+  // SAFETY: `fd` is borrowed only long enough to duplicate it with
+  // `try_clone()`. `ManuallyDrop` prevents the temporary wrapper from closing
+  // the caller-owned socket.
+  let original = ManuallyDrop::new(unsafe {
+    std::net::UdpSocket::from_raw_socket(fd as std::os::windows::io::RawSocket)
+  });
+  let socket = original.try_clone()?;
+  socket.set_nonblocking(true)?;
+  Ok(socket)
+}
+
+#[cfg(unix)]
+fn udp_socket_fd(socket: &UdpSocket) -> i32 {
+  use std::os::fd::AsRawFd;
+
+  socket.as_raw_fd()
+}
+
+#[cfg(windows)]
+fn udp_socket_fd(socket: &UdpSocket) -> i32 {
+  use std::os::windows::io::AsRawSocket;
+
+  socket.as_raw_socket() as i32
 }
 
 #[op2]
@@ -650,6 +706,16 @@ pub fn op_node_udp_fd_for_ipc(
   }
 }
 
+#[op2(fast)]
+#[smi]
+pub fn op_node_udp_get_fd(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<i32, NodeUdpError> {
+  let resource = state.resource_table.get::<NodeUdpSocketResource>(rid)?;
+  Ok(udp_socket_fd(&resource.socket))
+}
+
 /// Adopt an existing file descriptor as a UDP socket resource.  Used on the
 /// receiving side of IPC handle passing.
 #[op2]
@@ -657,21 +723,25 @@ pub fn op_node_udp_fd_for_ipc(
 pub fn op_node_udp_open(
   state: &mut OpState,
   #[smi] fd: i32,
-) -> Result<(ResourceId, String, u16), NodeUdpError> {
+) -> Result<(ResourceId, String, u16, bool, i32), NodeUdpError> {
   #[cfg(unix)]
   {
-    use std::os::unix::io::FromRawFd;
-    // SAFETY: The fd was received via SCM_RIGHTS and is a valid, open socket.
-    let std_socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
-    std_socket.set_nonblocking(true)?;
+    let std_socket = duplicate_udp_socket_from_fd(fd)?;
     let local_addr = std_socket.local_addr()?;
     let socket = UdpSocket::from_std(std_socket)?;
+    let opened_fd = udp_socket_fd(&socket);
     let resource = NodeUdpSocketResource {
       socket,
       cancel: Default::default(),
     };
     let rid = state.resource_table.add(resource);
-    Ok((rid, local_addr.ip().to_string(), local_addr.port()))
+    Ok((
+      rid,
+      local_addr.ip().to_string(),
+      local_addr.port(),
+      local_addr.is_ipv6(),
+      opened_fd,
+    ))
   }
   #[cfg(not(unix))]
   {

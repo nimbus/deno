@@ -28,6 +28,7 @@ const { core } = __bootstrap;
 const {
   op_node_udp_bind,
   op_node_udp_fd_for_ipc,
+  op_node_udp_get_fd,
   op_node_udp_join_multi_v4,
   op_node_udp_join_multi_v6,
   op_node_udp_join_source_specific,
@@ -70,6 +71,30 @@ const AF_INET = 2;
 const AF_INET6 = 10;
 
 const UDP_DGRAM_MAXSIZE = 64 * 1024;
+
+const udpOwnersByFd = new Map<number, unknown>();
+
+function rememberUdpFd(handle: UDP) {
+  if (handle.fd >= 0) {
+    udpOwnersByFd.set(handle.fd, handle[ownerSymbol]);
+  }
+}
+
+function forgetUdpFd(handle: UDP) {
+  if (handle.fd >= 0) {
+    udpOwnersByFd.delete(handle.fd);
+  }
+}
+
+function uvErrnoFromThrown(e: unknown): number {
+  if (e !== null && typeof e === "object" && "code" in e) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string") {
+      return codeMap.get(code) ?? codeMap.get("UNKNOWN")!;
+    }
+  }
+  return codeMap.get("UNKNOWN")!;
+}
 
 /** Validate that the address is a parseable IPv4 address. */
 function isValidIPv4Address(address: string): boolean {
@@ -117,6 +142,7 @@ class UDP extends HandleWrap {
   #address?: string;
   #family?: string;
   #port?: number;
+  #fd = -1;
 
   #remoteAddress?: string;
   #remoteFamily?: string;
@@ -125,6 +151,8 @@ class UDP extends HandleWrap {
   #rid?: number;
   #receiving = false;
   #recvPromiseId?: number;
+  #sendQueueCount = 0;
+  #sendQueueSize = 0;
   #unrefed = false;
 
   #recvBufferSize = UDP_DGRAM_MAXSIZE;
@@ -154,6 +182,10 @@ class UDP extends HandleWrap {
 
   constructor() {
     super(providerType.UDPWRAP);
+  }
+
+  get fd(): number {
+    return this.#fd;
   }
 
   addMembership(multicastAddress: string, interfaceAddress?: string): number {
@@ -241,17 +273,27 @@ class UDP extends HandleWrap {
     buffer: boolean,
     ctx: Record<string, string | number>,
   ): number | undefined {
+    const syscall = buffer ? "uv_recv_buffer_size" : "uv_send_buffer_size";
+
     if (!this.#address) {
       const err = isWindows ? "ENOTSOCK" : "EBADF";
       ctx.errno = codeMap.get(err)!;
       ctx.code = err;
       ctx.message = errorMap.get(ctx.errno)![1];
-      ctx.syscall = buffer ? "uv_recv_buffer_size" : "uv_send_buffer_size";
+      ctx.syscall = syscall;
 
       return;
     }
 
     if (size !== 0) {
+      if (size > 0x7fffffff) {
+        ctx.errno = codeMap.get("EINVAL")!;
+        ctx.code = "EINVAL";
+        ctx.message = errorMap.get(ctx.errno)![1];
+        ctx.syscall = syscall;
+        return;
+      }
+
       size = isLinux ? size * 2 : size;
 
       if (buffer) {
@@ -262,6 +304,14 @@ class UDP extends HandleWrap {
     }
 
     return buffer ? this.#recvBufferSize : this.#sendBufferSize;
+  }
+
+  getSendQueueCount(): number {
+    return this.#sendQueueCount;
+  }
+
+  getSendQueueSize(): number {
+    return this.#sendQueueSize;
   }
 
   connect(ip: string, port: number): number {
@@ -383,18 +433,21 @@ class UDP extends HandleWrap {
    * @return An error status code.
    */
   open(fd: number): number {
+    if ((udpOwnersByFd.get(fd) ?? null) !== null) {
+      return codeMap.get("EEXIST")!;
+    }
+
     try {
-      const [rid, hostname, boundPort] = op_node_udp_open(fd);
+      const [rid, hostname, boundPort, isIpv6, openedFd] = op_node_udp_open(fd);
       this.#rid = rid;
       this.#address = hostname;
       this.#port = boundPort;
-      // Determine family from the address string returned by the op.
-      this.#family = hostname.includes(":")
-        ? ("IPv6" as const)
-        : ("IPv4" as const);
+      this.#family = isIpv6 ? ("IPv6" as const) : ("IPv4" as const);
+      this.#fd = openedFd;
+      rememberUdpFd(this);
       return 0;
     } catch (e) {
-      return codeMap.get(e.code ?? "UNKNOWN") ?? codeMap.get("UNKNOWN")!;
+      return uvErrnoFromThrown(e);
     }
   }
 
@@ -555,12 +608,14 @@ class UDP extends HandleWrap {
       this.#family = family === AF_INET6
         ? ("IPv6" as const)
         : ("IPv4" as const);
+      this.#fd = op_node_udp_get_fd(rid);
+      rememberUdpFd(this);
       return 0;
     } catch (e) {
       if (e instanceof Deno.errors.NotCapable) {
         throw e;
       }
-      return codeMap.get(e.code ?? "UNKNOWN") ?? codeMap.get("UNKNOWN")!;
+      return uvErrnoFromThrown(e);
     }
   }
 
@@ -602,6 +657,9 @@ class UDP extends HandleWrap {
         }),
       ),
     );
+    const queuedBytes = payload.byteLength;
+    this.#sendQueueCount++;
+    this.#sendQueueSize += queuedBytes;
 
     (async () => {
       let sent: number;
@@ -627,6 +685,9 @@ class UDP extends HandleWrap {
         }
 
         sent = 0;
+      } finally {
+        this.#sendQueueCount = Math.max(0, this.#sendQueueCount - 1);
+        this.#sendQueueSize = Math.max(0, this.#sendQueueSize - queuedBytes);
       }
 
       if (hasCallback) {
@@ -698,10 +759,15 @@ class UDP extends HandleWrap {
   /** Handle socket closure. */
   override _onClose(): number {
     this.#receiving = false;
+    this.#sendQueueCount = 0;
+    this.#sendQueueSize = 0;
+
+    forgetUdpFd(this);
 
     this.#address = undefined;
     this.#port = undefined;
     this.#family = undefined;
+    this.#fd = -1;
 
     if (this.#rid !== undefined) {
       try {

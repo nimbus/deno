@@ -36,7 +36,7 @@ fn guess_handle_type(fd: i32) -> HandleType {
   match uv_compat::uv_guess_handle(fd) {
     uv_compat::uv_handle_type::UV_TCP => HandleType::Tcp,
     uv_compat::uv_handle_type::UV_TTY => HandleType::Tty,
-    uv_compat::uv_handle_type::UV_UDP => HandleType::Unknown,
+    uv_compat::uv_handle_type::UV_UDP => HandleType::Udp,
     uv_compat::uv_handle_type::UV_FILE => HandleType::File,
     uv_compat::uv_handle_type::UV_NAMED_PIPE => HandleType::Pipe,
     _ => HandleType::Unknown,

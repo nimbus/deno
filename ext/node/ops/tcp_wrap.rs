@@ -272,6 +272,21 @@ impl TCPWrap {
     }
   }
 
+  fn raw_fd(&self) -> i32 {
+    let tcp = self.tcp_ptr();
+    if tcp.is_null() {
+      return -1;
+    }
+
+    #[cfg(unix)]
+    {
+      // SAFETY: tcp is valid (null-checked above).
+      unsafe { uv_compat::uv_tcp_fd_for_ipc(tcp) }
+    }
+    #[cfg(not(unix))]
+    -1
+  }
+
   /// Get the underlying uv_stream_t pointer. Used by TLSWrap to attach
   /// to the TCP stream for encrypted I/O.
   pub fn stream_ptr(&self) -> *mut UvStream {
@@ -381,6 +396,11 @@ impl TCPWrap {
     }
   }
 
+  #[getter]
+  fn fd(&self) -> i32 {
+    self.raw_fd()
+  }
+
   #[fast]
   fn socket_type_for_ipc(&self) -> i32 {
     // Match Node's `net.Native` IPC handle type: the receiver needs to know
@@ -395,19 +415,7 @@ impl TCPWrap {
 
   #[fast]
   fn fd_for_ipc(&self) -> i32 {
-    #[cfg(unix)]
-    {
-      let tcp = self.tcp_ptr();
-      if tcp.is_null() {
-        return -1;
-      }
-      // SAFETY: tcp is valid (null-checked above).
-      unsafe { uv_compat::uv_tcp_fd_for_ipc(tcp) }
-    }
-    // Windows IPC handle passing doesn't use SCM_RIGHTS-style fd transfer;
-    // returning -1 surfaces "not supported" to the JS handle-passing path.
-    #[cfg(not(unix))]
-    -1
+    self.raw_fd()
   }
 
   #[fast]
