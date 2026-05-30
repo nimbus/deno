@@ -29,6 +29,7 @@ const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
 const {
   ERR_BUFFER_OUT_OF_BOUNDS,
+  ERR_IP_BLOCKED,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_FD_TYPE,
   ERR_MISSING_ARGS,
@@ -69,6 +70,7 @@ const { os } = core.loadExtScript(
 const { nextTick } = core.loadExtScript("ext:deno_node/_next_tick.ts");
 const { deprecate } = core.loadExtScript("ext:deno_node/util.ts");
 const { channel } = core.loadExtScript("ext:deno_node/diagnostics_channel.js");
+const { isIP } = core.loadExtScript("ext:deno_node/internal/net.ts");
 const { isArrayBufferView } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
 );
@@ -120,6 +122,12 @@ interface SocketOptions extends Abortable {
   recvBufferSize?: number;
   sendBufferSize?: number;
   lookup?: typeof defaultLookup;
+  receiveBlockList?: {
+    check(address: string, type?: string): boolean;
+  };
+  sendBlockList?: {
+    check(address: string, type?: string): boolean;
+  };
 }
 
 interface SocketInternalState {
@@ -138,6 +146,12 @@ interface SocketInternalState {
   ipv6Only?: boolean;
   recvBufferSize?: number;
   sendBufferSize?: number;
+  receiveBlockList?: {
+    check(address: string, type?: string): boolean;
+  };
+  sendBlockList?: {
+    check(address: string, type?: string): boolean;
+  };
 }
 
 const isSocketOptions = (
@@ -152,6 +166,15 @@ const isUdpHandle = (handle: unknown): handle is UDP =>
 
 const isBindOptions = (options: unknown): options is BindOptions =>
   options !== null && typeof options === "object";
+
+const isBlockListLike = (
+  value: unknown,
+): value is {
+  check(address: string, type?: string): boolean;
+} =>
+  value !== null &&
+  typeof value === "object" &&
+  typeof (value as { check?: unknown }).check === "function";
 
 /**
  * Encapsulates the datagram functionality.
@@ -174,6 +197,8 @@ class Socket extends EventEmitter {
     let lookup;
     let recvBufferSize;
     let sendBufferSize;
+    let receiveBlockList;
+    let sendBlockList;
 
     let options: SocketOptions | undefined;
 
@@ -192,6 +217,26 @@ class Socket extends EventEmitter {
       }
       recvBufferSize = options.recvBufferSize;
       sendBufferSize = options.sendBufferSize;
+      if (options.receiveBlockList !== undefined) {
+        if (!isBlockListLike(options.receiveBlockList)) {
+          throw new ERR_INVALID_ARG_TYPE(
+            "options.receiveBlockList",
+            "net.BlockList",
+            options.receiveBlockList,
+          );
+        }
+        receiveBlockList = options.receiveBlockList;
+      }
+      if (options.sendBlockList !== undefined) {
+        if (!isBlockListLike(options.sendBlockList)) {
+          throw new ERR_INVALID_ARG_TYPE(
+            "options.sendBlockList",
+            "net.BlockList",
+            options.sendBlockList,
+          );
+        }
+        sendBlockList = options.sendBlockList;
+      }
     }
 
     const handle = newHandle(type, lookup);
@@ -214,6 +259,8 @@ class Socket extends EventEmitter {
       ipv6Only: options && options.ipv6Only,
       recvBufferSize,
       sendBufferSize,
+      receiveBlockList,
+      sendBlockList,
     };
 
     if (options?.signal !== undefined) {
@@ -479,6 +526,10 @@ class Socket extends EventEmitter {
 
     // Resolve address first
     state.handle!.lookup(address, (lookupError, ip) => {
+      if (!state.handle) {
+        return;
+      }
+
       if (lookupError) {
         state.bindState = BIND_STATE_UNBOUND;
         this.emit("error", lookupError);
@@ -502,10 +553,6 @@ class Socket extends EventEmitter {
       //
       // Though Deno has has a Worker capability from which we could simulate this,
       // for now we assert that we are _always_ on the primary process.
-
-      if (!state.handle) {
-        return; // Handle has been closed in the mean time
-      }
 
       const err = state.handle.bind(ip, port as number || 0, flags);
 
@@ -721,6 +768,14 @@ class Socket extends EventEmitter {
    */
   getSendBufferSize(): number {
     return bufferSize(this, 0, SEND_BUFFER);
+  }
+
+  getSendQueueSize(): number {
+    return this[kStateSymbol].handle!.getSendQueueSize();
+  }
+
+  getSendQueueCount(): number {
+    return this[kStateSymbol].handle!.getSendQueueCount();
   }
 
   /**
@@ -1427,6 +1482,15 @@ function onMessage(
     return;
   }
 
+  if (
+    self[kStateSymbol]?.receiveBlockList?.check(
+      rinfo!.address,
+      rinfo!.family?.toLowerCase(),
+    )
+  ) {
+    return;
+  }
+
   rinfo!.size = buf!.length; // compatibility
 
   self.emit("message", buf, rinfo);
@@ -1556,6 +1620,12 @@ function doConnect(
   }
 
   if (!ex) {
+    if (ip && state.sendBlockList?.check(ip, `ipv${isIP(ip)}`)) {
+      ex = new ERR_IP_BLOCKED(ip);
+    }
+  }
+
+  if (!ex) {
     const err = state.handle.connect(ip, port);
 
     if (err) {
@@ -1604,6 +1674,13 @@ function doSend(
 
     return;
   } else if (!state.handle) {
+    return;
+  }
+
+  if (ip && state.sendBlockList?.check(ip, `ipv${isIP(ip)}`)) {
+    if (callback) {
+      nextTick(callback, new ERR_IP_BLOCKED(ip));
+    }
     return;
   }
 

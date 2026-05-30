@@ -44,6 +44,11 @@ const { AsyncWrap, providerType } = core.loadExtScript(
 // This allows parser.consume(socket._handle) to detect it as consumable.
 TCPWrap.prototype.isStreamBase = true;
 
+const nativeListen = TCPWrap.prototype.listen;
+TCPWrap.prototype.listen = function (backlog = 511) {
+  return nativeListen.call(this, backlog);
+};
+
 /** The type of TCP socket. */
 enum socketType {
   SOCKET,
