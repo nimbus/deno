@@ -4,7 +4,7 @@
 // deno-lint-ignore-file no-process-global
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const { ERR_UNHANDLED_ERROR } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -86,6 +86,9 @@ class Domain extends EventEmitter {
   constructor() {
     super();
     patchEventEmitter();
+    patchPromiseReject();
+    patchPromisePrototype(Promise);
+    internals.__enableDomainUnhandledRejectionTracking?.();
     asyncHook.enable();
   }
 
@@ -125,32 +128,24 @@ class Domain extends EventEmitter {
   bind(fn) {
     // deno-lint-ignore no-this-alias
     const self = this;
-    return function () {
+    const runBound = function () {
       self.enter();
-      try {
-        const ret = FunctionPrototypeApply(
-          fn,
-          this,
-          ArrayPrototypeSlice(arguments),
-        );
-        self.exit();
-        return ret;
-      } catch (e) {
-        self.exit();
-        if (typeof e === "object" && e !== null) {
-          e.domainBound = fn;
-          e.domainThrown = false;
-          ObjectDefineProperty(e, "domain", {
-            __proto__: null,
-            configurable: true,
-            enumerable: false,
-            value: self,
-            writable: true,
-          });
-        }
-        FunctionPrototypeCall(emitError, self, e);
-      }
+      const ret = FunctionPrototypeApply(
+        fn,
+        this,
+        ArrayPrototypeSlice(arguments),
+      );
+      self.exit();
+      return ret;
     };
+    ObjectDefineProperty(runBound, "domain", {
+      __proto__: null,
+      configurable: true,
+      enumerable: false,
+      value: this,
+      writable: true,
+    });
+    return runBound;
   }
 
   intercept(fn) {
@@ -300,6 +295,95 @@ function domainUncaughtExceptionHandler(er) {
 }
 
 let patched = false;
+let promiseRejectPatched = false;
+const patchedPromiseThens = new SafeMap();
+
+function wrapDomainPromiseCallback(callback, domain) {
+  if (typeof callback !== "function") {
+    return callback;
+  }
+  return function () {
+    domain.enter();
+    try {
+      return FunctionPrototypeApply(
+        callback,
+        this,
+        ArrayPrototypeSlice(arguments),
+      );
+    } finally {
+      domain.exit();
+    }
+  };
+}
+
+function patchPromisePrototype(PromiseCtor) {
+  const prototype = PromiseCtor?.prototype;
+  if (prototype === null || prototype === undefined) {
+    return;
+  }
+
+  const originalThen = prototype.then;
+  if (
+    typeof originalThen !== "function" || patchedPromiseThens.has(prototype)
+  ) {
+    return;
+  }
+  patchedPromiseThens.set(prototype, true);
+
+  ObjectDefineProperty(prototype, "then", {
+    __proto__: null,
+    configurable: true,
+    enumerable: false,
+    value: function then(onFulfilled, onRejected) {
+      const domain = process.domain;
+      if (domain !== null && domain !== undefined) {
+        onFulfilled = wrapDomainPromiseCallback(onFulfilled, domain);
+        onRejected = wrapDomainPromiseCallback(onRejected, domain);
+      }
+      return ReflectApply(originalThen, this, [onFulfilled, onRejected]);
+    },
+    writable: true,
+  });
+}
+
+internals.__patchDomainPromiseContext = patchPromisePrototype;
+
+function patchPromiseReject() {
+  if (promiseRejectPatched) return;
+  promiseRejectPatched = true;
+  const originalReject = Promise.reject;
+  ObjectDefineProperty(Promise, "reject", {
+    __proto__: null,
+    configurable: true,
+    enumerable: false,
+    value: function reject() {
+      const promise = FunctionPrototypeApply(originalReject, this, arguments);
+      if (process.domain !== null && process.domain !== undefined) {
+        ObjectDefineProperty(promise, "domain", {
+          __proto__: null,
+          configurable: true,
+          enumerable: false,
+          value: process.domain,
+          writable: true,
+        });
+        const reason = arguments[0];
+        if (typeof reason === "object" && reason !== null) {
+          ObjectDefineProperty(reason, "domain", {
+            __proto__: null,
+            configurable: true,
+            enumerable: false,
+            value: process.domain,
+            writable: true,
+          });
+          reason.domainThrown = true;
+        }
+      }
+      return promise;
+    },
+    writable: true,
+  });
+}
+
 /** Patches EventEmitter method to make it domain-aware.
  * This happens at top-level of domain module in Node. That works because
  * Node uses cjs for internal modules. We do this patching at constructor

@@ -357,7 +357,7 @@ function getCallSites(
 function parseEnv(input) {
   validateString(input, "content");
   const parsed = binding.parseEnv(input);
-  const result = ObjectCreate(null);
+  const result = {};
   const keys = ObjectKeys(parsed);
   for (let i = 0; i < keys.length; i++) {
     result[keys[i]] = parsed[keys[i]];

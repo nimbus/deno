@@ -13,6 +13,7 @@ const {
   Interface: _Interface,
   kQuestion,
   kQuestionCancel,
+  kQuestionReject,
 } = core.loadExtScript("ext:deno_node/internal/readline/interface.mjs");
 const { AbortError } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { validateAbortSignal } = core.loadExtScript(
@@ -86,28 +87,58 @@ export class Interface extends _Interface {
   }
   question(query: string, options: Abortable = kEmptyObject): Promise<string> {
     return new Promise((resolve, reject) => {
-      let cb = resolve;
+      let settled = false;
+      let onAbort: (() => void) | undefined;
+      const signal = options?.signal;
+      const cleanup = () => {
+        this[kQuestionReject] = undefined;
+        if (signal && onAbort) {
+          signal.removeEventListener("abort", onAbort);
+        }
+      };
+      let cb = (answer: string) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(answer);
+      };
 
-      if (options?.signal) {
-        validateAbortSignal(options.signal, "options.signal");
-        if (options.signal.aborted) {
+      if (signal) {
+        validateAbortSignal(signal, "options.signal");
+        if (signal.aborted) {
           return reject(
-            new AbortError(undefined, { cause: options.signal.reason }),
+            new AbortError(undefined, { cause: signal.reason }),
           );
         }
 
-        const onAbort = () => {
+        onAbort = () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
           this[kQuestionCancel]();
-          reject(new AbortError(undefined, { cause: options!.signal!.reason }));
+          cleanup();
+          reject(new AbortError(undefined, { cause: signal.reason }));
         };
-        options.signal.addEventListener("abort", onAbort, { once: true });
-        cb = (answer) => {
-          options!.signal!.removeEventListener("abort", onAbort);
-          resolve(answer);
-        };
+        signal.addEventListener("abort", onAbort, { once: true });
       }
 
-      this[kQuestion](query, cb);
+      this[kQuestionReject] = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      try {
+        this[kQuestion](query, cb);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
     });
   }
 }

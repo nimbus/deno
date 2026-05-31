@@ -655,6 +655,8 @@ impl<
           }
         } else if self.bare_node_builtins
           && matches!(err.as_kind(), DenoResolveErrorKind::MappedResolution(err) if err.is_unmapped_bare_specifier())
+          && raw_specifier != "test"
+          && raw_specifier != "test/reporters"
           && node_resolver.is_builtin_node_module(raw_specifier)
         {
           return Ok(DenoResolution {

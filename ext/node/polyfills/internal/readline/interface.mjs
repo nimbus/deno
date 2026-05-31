@@ -29,6 +29,7 @@ const { core, primordials } = __bootstrap;
 const { op_get_env_no_permission_check } = core.ops;
 
 const {
+  AbortError,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
   ERR_OUT_OF_RANGE,
@@ -124,6 +125,7 @@ const lineEnding = new SafeRegExp(/\r?\n|\r(?!\n)|\u2028|\u2029/g);
 const kLineObjectStream = Symbol("line object stream");
 const kQuestionCancel = Symbol("kQuestionCancel");
 const kQuestion = Symbol("kQuestion");
+const kQuestionReject = Symbol("kQuestionReject");
 const kKillRing = Symbol("kKillRing");
 const kKillRingCursor = Symbol("kKillRingCursor");
 const kYank = Symbol("kYank");
@@ -390,7 +392,9 @@ class Interface extends InterfaceConstructor {
    */
   prompt(preserveCursor) {
     if (this.paused) this.resume();
-    if (this.terminal && op_get_env_no_permission_check("TERM") !== "dumb") {
+    const term = lazyProcess().default?.env?.TERM ??
+      op_get_env_no_permission_check("TERM");
+    if (this.terminal && term !== "dumb") {
       if (!preserveCursor) this.cursor = 0;
       this[kRefreshLine]();
     } else {
@@ -1092,6 +1096,7 @@ class Interface extends InterfaceConstructor {
           } else {
             // This readline instance is finished
             this.close();
+            this[kQuestionReject]?.(new AbortError("Aborted with Ctrl+C"));
           }
           break;
 
@@ -1103,6 +1108,7 @@ class Interface extends InterfaceConstructor {
           if (this.cursor === 0 && this.line.length === 0) {
             // This readline instance is finished
             this.close();
+            this[kQuestionReject]?.(new AbortError("Aborted with Ctrl+D"));
           } else if (this.cursor < this.line.length) {
             this[kDeleteRight]();
           }
@@ -1364,6 +1370,7 @@ return {
   kQuestion,
   kQuestionCallback,
   kQuestionCancel,
+  kQuestionReject,
   kRefreshLine,
   kSawKeyPress,
   kSawReturnAt,

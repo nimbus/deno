@@ -795,6 +795,9 @@ function readFile(
   } else {
     cb = callback;
   }
+  if (cb) {
+    cb = maybeCallback(cb);
+  }
 
   const options = getOptions<FileOptions>(
     optOrCallback,
@@ -3525,16 +3528,39 @@ function watchPromise(
     recursive?: boolean;
     encoding?: string;
     signal?: AbortSignal;
+    maxQueue?: number;
+    overflow?: string;
     ignore?: IgnoreOption;
   },
 ): AsyncIterable<{ eventType: string; filename: string | Buffer | null }> {
   // deno-lint-ignore prefer-primordials
   const watchPath = getValidatedPath(filename).toString();
 
-  const recursive = options?.recursive ?? false;
-  const signal = options?.signal;
+  options ??= kEmptyObject;
+  validateObject(options, "options");
+
+  const persistent = options.persistent ?? true;
+  const recursive = options.recursive ?? false;
+  const encoding = options.encoding ?? "utf8";
+  const signal = options.signal;
+  const maxQueue = options.maxQueue ?? 2048;
+  const overflow = options.overflow ?? "ignore";
+  validateBoolean(persistent, "options.persistent");
+  validateBoolean(recursive, "options.recursive");
+  if (typeof maxQueue !== "number") {
+    throw new ERR_INVALID_ARG_TYPE("options.maxQueue", "number", maxQueue);
+  }
+  validateInteger(maxQueue, "options.maxQueue");
+  validateOneOf(overflow, "options.overflow", ["ignore", "error"]);
   validateAbortSignal(signal, "options.signal");
   validateIgnoreOption(options?.ignore, "options.ignore");
+  if (encoding && !Buffer.isEncoding(encoding)) {
+    throw new ERR_INVALID_ARG_VALUE(
+      "encoding",
+      encoding,
+      "is invalid encoding",
+    );
+  }
   const ignoreMatcher = createIgnoreMatcher(options?.ignore);
   const watcher = Deno.watchFs(watchPath, {
     recursive,
@@ -3595,7 +3621,7 @@ function watchPromise(
           continue;
         }
         return {
-          value: { eventType, filename: fname },
+          value: { eventType, filename: encodeWatchFilename(fname, encoding) },
           done: false,
         };
       }

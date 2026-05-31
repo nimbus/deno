@@ -305,6 +305,7 @@ const repl = core.createLazyLoader("node:repl");
 const internalRepl = core.createLazyLoader(
   "ext:deno_node/internal/repl.ts",
 );
+const sea = core.createLazyLoader("node:sea");
 const sqlite = core.loadExtScript("ext:deno_node/sqlite.ts");
 // node:stream and node:stream/promises are eager (`esm` in lib.rs): every
 // program pays their cost at startup via `__bootstrapNodeProcess` building
@@ -319,6 +320,7 @@ import streamPromises from "node:stream/promises";
 const stringDecoder =
   core.loadExtScript("ext:deno_node/string_decoder.ts").default;
 const test = core.loadExtScript("ext:deno_node/testing.ts").default;
+const testReporters = core.createLazyLoader("node:test/reporters");
 const timers = core.loadExtScript("ext:deno_node/timers.ts");
 const timersPromises = core.loadExtScript(
   "ext:deno_node/timers/promises.ts",
@@ -388,6 +390,8 @@ const lazyNodeModules = {
   "internal/fs/utils": () => internalFsUtils().default,
   "readline": () => readline().default,
   "readline/promises": () => readlinePromises().default,
+  "sea": () => sea().default,
+  "test/reporters": () => testReporters(),
   "internal/child_process": () =>
     core.loadExtScript("ext:deno_node/internal/child_process.ts").default,
   "stream/web": () => core.loadExtScript("ext:deno_node/stream/web.js"),
@@ -516,8 +520,10 @@ function setupBuiltinModules() {
   // via the `node:` scheme (see lib/internal/bootstrap/realm.js), so they
   // appear in `builtinModules` as `node:<name>` rather than `<name>`.
   const schemelessBlockList = new SafeSet([
+    "sea",
     "sqlite",
     "test",
+    "test/reporters",
   ]);
   function registerName(name) {
     // `internal/*` modules are only exposed under --expose-internals, so
@@ -1377,7 +1383,7 @@ Module._resolveLookupPaths = function (request, parent) {
     : request;
   if (
     isBuiltin(request) ||
-    normalizedRequest in nativeModuleExports
+    nativeModuleCanBeRequiredByUsers(normalizedRequest)
   ) {
     return null;
   }
@@ -1556,7 +1562,11 @@ Module._load = function (request, parent, isMain) {
 
   // A resolve hook that redirected `require('zlib')` to a file path must
   // not silently fall back to the native module via the original request.
-  if (!SetPrototypeHas(cjsHookResolvedFilenames, filename)) {
+  if (
+    !SetPrototypeHas(cjsHookResolvedFilenames, filename) &&
+    request !== "test" &&
+    request !== "test/reporters"
+  ) {
     maybeEmitNativeModuleDeprecation(filename);
     const mod = loadNativeModule(filename, request);
     if (mod) {
@@ -2016,9 +2026,13 @@ Module.prototype.require = function (id) {
   }
 };
 
+const DEFAULT_CJS_WRAPPER_START =
+  "(function (exports, require, module, __filename, __dirname) { ";
+const DEFAULT_CJS_WRAPPER_END = "\n});";
+
 const wrapper = [
-  "(function (exports, require, module, __filename, __dirname) { ",
-  "\n});",
+  DEFAULT_CJS_WRAPPER_START,
+  DEFAULT_CJS_WRAPPER_END,
 ];
 
 export let wrap = function (script) {
@@ -2089,11 +2103,45 @@ function wrapSafe(
   let err;
 
   if (patched) {
-    [f, err] = core.evalContext(
-      Module.wrap(content),
-      url.pathToFileURL(filename).toString(),
-      [format !== "module"],
-    );
+    const wrappedContent = StringPrototypeReplace(content, /^#!.*?\n/, "");
+    const wrapperStart = Module.wrapper[0];
+    const wrapperEnd = Module.wrapper[1];
+    if (
+      typeof wrapperStart === "string" &&
+      typeof wrapperEnd === "string" &&
+      StringPrototypeStartsWith(wrapperStart, DEFAULT_CJS_WRAPPER_START) &&
+      StringPrototypeEndsWith(wrapperEnd, DEFAULT_CJS_WRAPPER_END) &&
+      Module.wrap(content) === `${wrapperStart}${wrappedContent}${wrapperEnd}`
+    ) {
+      const prefix = StringPrototypeSlice(
+        wrapperStart,
+        DEFAULT_CJS_WRAPPER_START.length,
+      );
+      const suffix = StringPrototypeSlice(
+        wrapperEnd,
+        0,
+        wrapperEnd.length - DEFAULT_CJS_WRAPPER_END.length,
+      );
+      const patchedBody = `${prefix}${wrappedContent}${suffix}`;
+      [f, err] = core.compileFunction(
+        patchedBody,
+        url.pathToFileURL(filename).toString(),
+        [format !== "module"],
+        [
+          "exports",
+          "require",
+          "module",
+          "__filename",
+          "__dirname",
+        ],
+      );
+    } else {
+      [f, err] = core.evalContext(
+        Module.wrap(content),
+        url.pathToFileURL(filename).toString(),
+        [format !== "module"],
+      );
+    }
   } else {
     [f, err] = core.compileFunction(
       content,
@@ -2420,8 +2468,8 @@ function isBuiltin(moduleName) {
 
   if (StringPrototypeStartsWith(moduleName, "node:")) {
     moduleName = StringPrototypeSlice(moduleName, 5);
-  } else if (moduleName === "test") {
-    // test is only a builtin if it has the "node:" scheme
+  } else if (moduleName === "test" || moduleName === "test/reporters") {
+    // test and test/reporters are only builtins if they have the "node:" scheme
     // see https://github.com/nodejs/node/blob/73025c4dec042e344eeea7912ed39f7b7c4a3991/test/parallel/test-module-isBuiltin.js#L14
     return false;
   }
@@ -2537,6 +2585,9 @@ function loadNativeModule(_id, request) {
 }
 
 function nativeModuleCanBeRequiredByUsers(request) {
+  if (request === "test" || request === "test/reporters") {
+    return false;
+  }
   // `in` rather than bracket access avoids triggering the lazy getters
   // installed by `defineLazyNativeModule`.
   return request in nativeModuleExports;

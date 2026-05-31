@@ -788,7 +788,7 @@ const kNoHeaderFlags = StringFromCharCode(NGHTTP2_NV_FLAG_NONE);
 function buildNgHeaderString(
   arrayOrMap,
   assertValuePseudoHeader = assertValidPseudoHeader,
-  strictSingleValueFields?,
+  strictSingleValueFields = true,
 ) {
   const checkIsHttpToken = lazyHttpCommon()._checkIsHttpToken;
   let headers = "";

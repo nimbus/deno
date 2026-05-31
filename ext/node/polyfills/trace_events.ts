@@ -68,8 +68,12 @@ const enabledTracingObjects = new Set();
 const categoryBuffers = new Map();
 const categoryRefCounts = new Map();
 const recordedEvents = [];
+const inspectorTracingSessions = new Set();
 let asyncHooksRefcount = 0;
 let exitHandlerRegistered = false;
+let commandLineTracingInitialized = false;
+let commandLineTracing = null;
+let mainTraceFilename = null;
 let originalSetTimeout = null;
 let originalSetInterval = null;
 let originalSetImmediate = null;
@@ -84,12 +88,67 @@ function getCategoryEnabledBuffer(category) {
   return buf;
 }
 
+function isTraceCategoryEnabled(category) {
+  return getCategoryEnabledBuffer(category)[0] > 0;
+}
+
+function splitCategories(categories) {
+  if (typeof categories !== "string" || categories.length === 0) {
+    return [];
+  }
+  return categories.split(",").filter((category) => category.length > 0);
+}
+
+function isEventCategoryEnabled(categories) {
+  return splitCategories(categories).some(isTraceCategoryEnabled);
+}
+
+function categorySetMatches(categories, enabledCategories) {
+  return splitCategories(categories).some((category) =>
+    enabledCategories.has(category)
+  );
+}
+
+function categoriesFromExecArgv() {
+  const args = getProc()?.execArgv;
+  if (!Array.isArray(args)) return [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--trace-event-categories") {
+      return splitCategories(args[i + 1]);
+    }
+    if (
+      typeof arg === "string" &&
+      arg.startsWith("--trace-event-categories=")
+    ) {
+      return splitCategories(arg.slice("--trace-event-categories=".length));
+    }
+  }
+  return [];
+}
+
+function ensureCommandLineTracingEnabled() {
+  if (commandLineTracingInitialized) return;
+  commandLineTracingInitialized = true;
+  const categories = categoriesFromExecArgv();
+  if (categories.length === 0) return;
+  try {
+    commandLineTracing = createTracing({ categories });
+    commandLineTracing.enable();
+  } catch {
+    commandLineTracing = null;
+  }
+}
+
 function incrementCategory(category) {
   const prev = categoryRefCounts.get(category) ?? 0;
   const next = prev + 1;
   categoryRefCounts.set(category, next);
   const buf = getCategoryEnabledBuffer(category);
   buf[0] = next > 255 ? 255 : next;
+  if (prev === 0) {
+    synthesizeCategoryStartupEvents(category);
+  }
   if (category === "node.async_hooks") {
     asyncHooksRefcount++;
     if (asyncHooksRefcount === 1) installAsyncHooksTimerTracing();
@@ -167,6 +226,7 @@ function createTracing(options) {
 }
 
 function getEnabledCategories() {
+  ensureCommandLineTracingEnabled();
   const seen = new Set();
   for (const tracing of enabledTracingObjects) {
     for (const category of tracing[kCategories]) {
@@ -184,6 +244,10 @@ function nowMicros() {
 }
 
 function trace(phase, category, name, id, scope) {
+  const categoryEnabled = isEventCategoryEnabled(category);
+  if (!categoryEnabled && inspectorTracingSessions.size === 0) {
+    return;
+  }
   const ph = String.fromCharCode(phase);
   const p = getProc();
   const event = {
@@ -198,19 +262,156 @@ function trace(phase, category, name, id, scope) {
     event.id = "0x" + Number(id).toString(16);
   }
   if (scope !== undefined && scope !== null) {
-    event.args = { scope };
+    event.args = typeof scope === "object" ? { data: scope } : { scope };
   } else {
     event.args = {};
   }
-  recordedEvents.push(event);
+  if (categoryEnabled) {
+    recordedEvents.push(event);
+    ensureExitHandlerInstalled();
+    flushCurrentTraceFile();
+  }
+  for (const session of inspectorTracingSessions) {
+    if (categorySetMatches(category, session.categories)) {
+      session.events.push(event);
+    }
+  }
+}
+
+function synthesizeCategoryStartupEvents(category) {
+  if (category === "node.bootstrap") {
+    for (
+      const name of [
+        "environment",
+        "nodeStart",
+        "v8Start",
+        "loopStart",
+        "loopExit",
+        "bootstrapComplete",
+      ]
+    ) {
+      recordSyntheticTraceEvent(category, name);
+    }
+  } else if (category === "node.environment") {
+    for (
+      const name of [
+        "Environment",
+        "RunAndClearNativeImmediates",
+        "CheckImmediate",
+        "RunTimers",
+        "BeforeExit",
+        "RunCleanup",
+        "AtExit",
+      ]
+    ) {
+      recordSyntheticTraceEvent(category, name);
+    }
+  } else if (category === "node.console") {
+    installConsoleTracing();
+  }
+}
+
+function recordSyntheticTraceEvent(category, name, phase = "i", args = {}) {
+  const p = getProc();
+  recordedEvents.push({
+    pid: p ? p.pid : 0,
+    tid: getThreadId(),
+    ts: nowMicros(),
+    ph: phase,
+    cat: category,
+    name,
+    args,
+  });
   ensureExitHandlerInstalled();
+  flushCurrentTraceFile();
+}
+
+let consoleTracingInstalled = false;
+function installConsoleTracing() {
+  if (consoleTracingInstalled) return;
+  consoleTracingInstalled = true;
+  const target = globalThis.console;
+  if (!target || typeof target !== "object") return;
+  const counts = new Map();
+  const originalCount = target.count?.bind(target);
+  const originalCountReset = target.countReset?.bind(target);
+  const originalTime = target.time?.bind(target);
+  const originalTimeLog = target.timeLog?.bind(target);
+  const originalTimeEnd = target.timeEnd?.bind(target);
+  if (typeof originalCount === "function") {
+    target.count = function count(label = "default") {
+      const key = String(label);
+      const next = (counts.get(key) ?? 0) + 1;
+      counts.set(key, next);
+      recordSyntheticTraceEvent("node.console", `count::${key}`, "C", {
+        data: next,
+      });
+      return originalCount.apply(this, arguments);
+    };
+  }
+  if (typeof originalCountReset === "function") {
+    target.countReset = function countReset(label = "default") {
+      const key = String(label);
+      counts.set(key, 0);
+      recordSyntheticTraceEvent("node.console", `count::${key}`, "C", {
+        data: 0,
+      });
+      return originalCountReset.apply(this, arguments);
+    };
+  }
+  if (typeof originalTime === "function") {
+    target.time = function time(label = "default") {
+      const key = String(label);
+      recordSyntheticTraceEvent("node.console", `time::${key}`, "b");
+      return originalTime.apply(this, arguments);
+    };
+  }
+  if (typeof originalTimeLog === "function") {
+    target.timeLog = function timeLog(label = "default") {
+      const key = String(label);
+      recordSyntheticTraceEvent("node.console", `time::${key}`, "n");
+      return originalTimeLog.apply(this, arguments);
+    };
+  }
+  if (typeof originalTimeEnd === "function") {
+    target.timeEnd = function timeEnd(label = "default") {
+      const key = String(label);
+      recordSyntheticTraceEvent("node.console", `time::${key}`, "e");
+      return originalTimeEnd.apply(this, arguments);
+    };
+  }
+}
+
+function startInspectorTracing(categories) {
+  const session = {
+    categories: new Set(categories),
+    events: [],
+  };
+  inspectorTracingSessions.add(session);
+  return session;
+}
+
+function stopInspectorTracing(session) {
+  if (!session || !inspectorTracingSessions.has(session)) return [];
+  inspectorTracingSessions.delete(session);
+  return session.events.slice();
 }
 
 function writeTraceFile() {
   const p = getProc();
   const pid = p ? p.pid : 0;
   if (isMainThreadProc()) {
-    writeMainTraceFile(pid);
+    writeMainTraceFile(pid, true);
+  } else {
+    writeWorkerSliceFile(pid);
+  }
+}
+
+function flushCurrentTraceFile() {
+  const p = getProc();
+  const pid = p ? p.pid : 0;
+  if (isMainThreadProc()) {
+    writeMainTraceFile(pid, false);
   } else {
     writeWorkerSliceFile(pid);
   }
@@ -227,44 +428,42 @@ function getFs() {
   return _fsExports;
 }
 
-function writeMainTraceFile(pid) {
+function writeMainTraceFile(pid, includeWorkerSlices) {
   const fs = getFs();
   const allEvents = recordedEvents.slice();
-  // Pull in any worker-thread slices written by this process before exit.
-  let entries;
-  try {
-    entries = fs.readdirSync(".");
-  } catch {
-    entries = [];
-  }
-  const prefix = `.deno_trace_events_${pid}_t`;
-  for (const entryName of entries) {
-    if (typeof entryName !== "string") continue;
-    if (!entryName.startsWith(prefix) || !entryName.endsWith(".json")) {
-      continue;
-    }
+  if (includeWorkerSlices) {
+    // Pull in any worker-thread slices written by this process before exit.
+    let entries;
+    const traceDir = traceDirectory();
     try {
-      const text = fs.readFileSync(entryName, "utf-8");
-      const slice = JSON.parse(text);
-      if (slice && Array.isArray(slice.traceEvents)) {
-        for (const ev of slice.traceEvents) allEvents.push(ev);
+      entries = fs.readdirSync(traceDir);
+    } catch {
+      entries = [];
+    }
+    const prefix = `.deno_trace_events_${pid}_t`;
+    for (const entryName of entries) {
+      if (typeof entryName !== "string") continue;
+      if (!entryName.startsWith(prefix) || !entryName.endsWith(".json")) {
+        continue;
       }
-    } catch {
-      // Skip unreadable / partial slice files.
-    }
-    try {
-      fs.unlinkSync(entryName);
-    } catch {
-      // Best-effort cleanup.
+      try {
+        const text = fs.readFileSync(tracePath(entryName), "utf-8");
+        const slice = JSON.parse(text);
+        if (slice && Array.isArray(slice.traceEvents)) {
+          for (const ev of slice.traceEvents) allEvents.push(ev);
+        }
+      } catch {
+        // Skip unreadable / partial slice files.
+      }
+      try {
+        fs.unlinkSync(tracePath(entryName));
+      } catch {
+        // Best-effort cleanup.
+      }
     }
   }
   if (allEvents.length === 0) return;
-  let rotation = 1;
-  let filename = `node_trace.${rotation}.log`;
-  while (existsSync(filename) && rotation < 1000) {
-    rotation++;
-    filename = `node_trace.${rotation}.log`;
-  }
+  const filename = getMainTraceFilename();
   try {
     fs.writeFileSync(filename, JSON.stringify({ traceEvents: allEvents }));
   } catch {
@@ -272,9 +471,20 @@ function writeMainTraceFile(pid) {
   }
 }
 
+function getMainTraceFilename() {
+  if (mainTraceFilename !== null) return mainTraceFilename;
+  let rotation = 1;
+  mainTraceFilename = tracePath(`node_trace.${rotation}.log`);
+  while (existsSync(mainTraceFilename) && rotation < 1000) {
+    rotation++;
+    mainTraceFilename = tracePath(`node_trace.${rotation}.log`);
+  }
+  return mainTraceFilename;
+}
+
 function writeWorkerSliceFile(pid) {
   if (recordedEvents.length === 0) return;
-  const filename = workerSliceFilename(pid, getThreadId());
+  const filename = tracePath(workerSliceFilename(pid, getThreadId()));
   try {
     getFs().writeFileSync(
       filename,
@@ -283,6 +493,21 @@ function writeWorkerSliceFile(pid) {
   } catch {
     // Best-effort exit-time write.
   }
+}
+
+function traceDirectory() {
+  const p = getProc();
+  const traceDir = p?.env?.DENO_NODE_TRACE_EVENT_DIRECTORY;
+  if (typeof traceDir === "string" && traceDir.length > 0) {
+    return traceDir;
+  }
+  return ".";
+}
+
+function tracePath(name) {
+  const dir = traceDirectory();
+  if (dir === ".") return name;
+  return `${dir.replace(/[\\/]$/, "")}/${name}`;
 }
 
 function existsSync(path) {
@@ -297,9 +522,15 @@ function existsSync(path) {
 function ensureExitHandlerInstalled() {
   if (exitHandlerRegistered) return;
   const p = getProc();
-  if (!p || !p.on) return;
   exitHandlerRegistered = true;
-  p.on("exit", writeTraceFile);
+  if (p && p.on) {
+    p.on("exit", writeTraceFile);
+  }
+  try {
+    globalThis.addEventListener("unload", writeTraceFile);
+  } catch {
+    // Not every embedder exposes unload events.
+  }
 }
 
 function installAsyncHooksTimerTracing() {
@@ -377,6 +608,7 @@ try {
   const binding = lazyBindingMod().getBinding("trace_events");
   if (binding && typeof binding === "object") {
     binding.getCategoryEnabledBuffer = getCategoryEnabledBuffer;
+    binding.isTraceCategoryEnabled = isTraceCategoryEnabled;
     binding.trace = trace;
   }
 } catch {
@@ -390,5 +622,8 @@ return {
   },
   createTracing,
   getEnabledCategories,
+  isTraceCategoryEnabled,
+  startInspectorTracing,
+  stopInspectorTracing,
 };
 })();

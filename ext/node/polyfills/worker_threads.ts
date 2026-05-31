@@ -32,6 +32,7 @@ const {
   MessagePortPrototype,
   MessagePortReceiveMessageOnPortSymbol,
   nodeWorkerThreadCloseCb,
+  nodeWorkerThreadCloseCbInvoked,
   refMessagePort,
   serializeJsMessageData,
   unrefParentPort,
@@ -64,6 +65,12 @@ const { channel: createDiagnosticsChannel } = core.loadExtScript(
 const workerThreadsChannel = createDiagnosticsChannel("worker_threads");
 const lazyStream = core.createLazyLoader("node:stream");
 const {
+  emitDestroy,
+  emitInit,
+  executionAsyncId,
+  newAsyncId,
+} = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
+const {
   BroadcastChannel: WebBroadcastChannel,
   refBroadcastChannel,
 } = core.loadExtScript("ext:deno_web/01_broadcast_channel.js");
@@ -71,6 +78,7 @@ const { untransferableSymbol } = core.loadExtScript(
   "ext:deno_node/internal_binding/util.ts",
 );
 const lazyProcess = core.createLazyLoader("node:process");
+const lazyPath = core.createLazyLoader("node:path");
 const lazyUrl = core.createLazyLoader("node:url");
 const lazyModule = core.createLazyLoader("node:module");
 
@@ -146,6 +154,14 @@ function debugWT(...args) {
     // deno-lint-ignore prefer-primordials no-console
     console.log(...args);
   }
+}
+
+function currentProcessCwd() {
+  const processObject = globalThis.process;
+  if (processObject && typeof processObject.cwd === "function") {
+    return FunctionPrototypeCall(processObject.cwd, processObject);
+  }
+  return process.cwd();
 }
 
 interface WorkerOnlineMsg {
@@ -255,15 +271,30 @@ interface WorkerOptions {
 }
 
 const privateWorkerRef = Symbol("privateWorkerRef");
+
+interface WorkerAsyncResource {
+  hasRef: () => boolean | undefined;
+  ref?: () => void;
+  unref?: () => void;
+}
+
+interface PendingWorkerMessage {
+  raw: boolean;
+  data: unknown;
+}
+
 class NodeWorker extends EventEmitter {
   #id = 0;
   #name = "";
   #refed = true;
+  #asyncId = 0;
+  #asyncResource: WorkerAsyncResource | undefined = undefined;
   #messagePromise = undefined;
   #controlPromise = undefined;
   #messageLoopPromise = undefined;
   #workerOnline = false;
   #exited = false;
+  #pendingOutboundMessages: PendingWorkerMessage[] = [];
   // "RUNNING" | "CLOSED" | "TERMINATED"
   // "TERMINATED" means that any controls or messages received will be
   // discarded. "CLOSED" means that we have received a control
@@ -287,6 +318,12 @@ class NodeWorker extends EventEmitter {
 
   constructor(specifier: URL | string, options?: WorkerOptions) {
     super();
+
+    const URLConstructor = lazyUrl().URL;
+    const specifierIsUrl = specifier instanceof URLConstructor;
+    if (typeof specifier !== "string" && !specifierIsUrl) {
+      throw new ERR_INVALID_ARG_TYPE("filename", ["string", "URL"], specifier);
+    }
 
     if (options?.execArgv) {
       validateArray(options.execArgv, "options.execArgv");
@@ -357,7 +394,7 @@ class NodeWorker extends EventEmitter {
       }
     }
 
-    if (typeof specifier === "object") {
+    if (specifierIsUrl) {
       if (
         !(specifier.protocol === "data:" || specifier.protocol === "file:")
       ) {
@@ -404,6 +441,16 @@ class NodeWorker extends EventEmitter {
     // See https://github.com/denoland/deno/issues/23522.
     let env_ = undefined;
     const envOpt = options?.env;
+    const shareEnv = envOpt === SHARE_ENV;
+    if (shareEnv) {
+      const installSharedWorkerEnvProxy =
+        (globalThis as Record<string, unknown>)[
+          "__nimbusInstallSharedWorkerEnvProxy"
+        ];
+      if (typeof installSharedWorkerEnvProxy === "function") {
+        installSharedWorkerEnvProxy();
+      }
+    }
     if (envOpt != null && envOpt !== SHARE_ENV) {
       if (typeof envOpt !== "object") {
         throw new ERR_INVALID_ARG_TYPE(
@@ -464,6 +511,7 @@ class NodeWorker extends EventEmitter {
       workerData: options?.workerData,
       environmentData: environmentData,
       env: env_,
+      shareEnv,
       argv: argv_,
       execArgv: options?.execArgv ?? [],
       name: this.#name,
@@ -489,10 +537,10 @@ class NodeWorker extends EventEmitter {
       // See: https://github.com/denoland/deno/issues/26739
       sourceCode = `var __filename = ${
         // deno-lint-ignore prefer-primordials
-        JSON.stringify(process.cwd() + "/[worker eval]")};\n` +
+        JSON.stringify(currentProcessCwd() + "/[worker eval]")};\n` +
         `var __dirname = ${
           // deno-lint-ignore prefer-primordials
-          JSON.stringify(process.cwd())};\n` +
+          JSON.stringify(currentProcessCwd())};\n` +
         `var module = { exports: {} };\n` +
         `var exports = module.exports;\n` +
         code;
@@ -503,6 +551,15 @@ class NodeWorker extends EventEmitter {
     ) {
       // deno-lint-ignore prefer-primordials
       specifier = specifier.toString();
+      if (
+        !options?.eval &&
+        (StringPrototypeStartsWith(specifier, "./") ||
+          StringPrototypeStartsWith(specifier, "../") ||
+          StringPrototypeStartsWith(specifier, ".\\") ||
+          StringPrototypeStartsWith(specifier, "..\\"))
+      ) {
+        specifier = lazyPath().resolve(currentProcessCwd(), specifier);
+      }
       specifier = op_worker_threads_filename(specifier) ?? specifier;
     }
 
@@ -530,6 +587,7 @@ class NodeWorker extends EventEmitter {
     );
     this.#id = id;
     this.threadId = id;
+    this.#emitAsyncInit();
 
     if (resourceLimits_) {
       this.resourceLimits = { ...resourceLimits_ };
@@ -572,13 +630,40 @@ class NodeWorker extends EventEmitter {
     }
   }
 
-  [privateWorkerRef](ref) {
-    if (ref === this.#refed) {
-      return;
-    }
-    this.#refed = ref;
+  #emitAsyncInit() {
+    const resource: WorkerAsyncResource = {
+      hasRef: () => this.#asyncId === 0 ? undefined : this.#refed,
+      ref: () => {
+        this.ref();
+      },
+      unref: () => {
+        this.unref();
+      },
+    };
+    this.#asyncId = newAsyncId();
+    this.#asyncResource = resource;
+    emitInit(this.#asyncId, "WORKER", executionAsyncId(), resource);
+  }
 
-    if (ref) {
+  #emitAsyncDestroy() {
+    this.#clearPendingOutboundMessages();
+    if (this.#asyncId !== 0) {
+      emitDestroy(this.#asyncId);
+      this.#asyncId = 0;
+    }
+    if (this.#asyncResource !== undefined) {
+      this.#asyncResource.ref = undefined;
+      this.#asyncResource.unref = undefined;
+      this.#asyncResource = undefined;
+    }
+  }
+
+  #shouldRefHostOps() {
+    return this.#refed || !this.#workerOnline;
+  }
+
+  #syncHostOpRefState() {
+    if (this.#shouldRefHostOps()) {
       if (this.#controlPromise) {
         core.refOpPromise(this.#controlPromise);
       }
@@ -593,6 +678,15 @@ class NodeWorker extends EventEmitter {
         core.unrefOpPromise(this.#messagePromise);
       }
     }
+  }
+
+  [privateWorkerRef](ref) {
+    if (ref === this.#refed) {
+      return;
+    }
+    this.#refed = ref;
+
+    this.#syncHostOpRefState();
   }
 
   #handleError(err) {
@@ -619,7 +713,7 @@ class NodeWorker extends EventEmitter {
   #pollControl = async () => {
     while (this.#status === "RUNNING") {
       this.#controlPromise = op_host_recv_ctrl(this.#id);
-      if (!this.#refed) {
+      if (!this.#shouldRefHostOps()) {
         core.unrefOpPromise(this.#controlPromise);
       }
       const { 0: type, 1: data } = await this.#controlPromise;
@@ -662,6 +756,7 @@ class NodeWorker extends EventEmitter {
           if (!this.#exited) {
             this.#exited = true;
             this.emit("exit", data.exitCode ?? 1);
+            this.#emitAsyncDestroy();
           }
           return;
         }
@@ -683,6 +778,7 @@ class NodeWorker extends EventEmitter {
           if (!this.#exited) {
             this.#exited = true;
             this.emit("exit", data ?? 0);
+            this.#emitAsyncDestroy();
           }
           return;
         }
@@ -710,6 +806,8 @@ class NodeWorker extends EventEmitter {
       !this.#workerOnline && isWorkerOnlineMsg(message)
     ) {
       this.#workerOnline = true;
+      this.#syncHostOpRefState();
+      this.#flushPendingOutboundMessages();
       this.emit("online");
     } else if (isWorkerStdoutMsg(message)) {
       FunctionPrototypeCall(
@@ -732,7 +830,7 @@ class NodeWorker extends EventEmitter {
   #pollMessages = async () => {
     while (this.#status !== "TERMINATED") {
       this.#messagePromise = op_host_recv_message(this.#id);
-      if (!this.#refed) {
+      if (!this.#shouldRefHostOps()) {
         core.unrefOpPromise(this.#messagePromise);
       }
       const data = await this.#messagePromise;
@@ -752,6 +850,50 @@ class NodeWorker extends EventEmitter {
     }
   };
 
+  #sendSerializedMessage(message: PendingWorkerMessage) {
+    if (message.raw) {
+      op_host_post_message_raw(this.#id, message.data);
+    } else {
+      op_host_post_message(this.#id, message.data);
+    }
+  }
+
+  #postSerializedMessage(message: PendingWorkerMessage) {
+    if (!this.#workerOnline) {
+      ArrayPrototypePush(this.#pendingOutboundMessages, message);
+      return;
+    }
+    this.#sendSerializedMessage(message);
+  }
+
+  #flushPendingOutboundMessages() {
+    if (
+      this.#pendingOutboundMessages.length === 0 ||
+      this.#status !== "RUNNING"
+    ) {
+      return;
+    }
+    const pending = ArrayPrototypeSplice(
+      this.#pendingOutboundMessages,
+      0,
+      this.#pendingOutboundMessages.length,
+    );
+    for (let i = 0; i < pending.length; i++) {
+      this.#sendSerializedMessage(pending[i]);
+    }
+  }
+
+  #clearPendingOutboundMessages() {
+    if (this.#pendingOutboundMessages.length === 0) {
+      return;
+    }
+    ArrayPrototypeSplice(
+      this.#pendingOutboundMessages,
+      0,
+      this.#pendingOutboundMessages.length,
+    );
+  }
+
   postMessage(message, transferOrOptions = { __proto__: null }) {
     const prefix = "Failed to execute 'postMessage' on 'MessagePort'";
     webidl.requiredArguments(arguments.length, 1, prefix);
@@ -762,10 +904,10 @@ class NodeWorker extends EventEmitter {
       transferOrOptions === null ||
       (arguments.length <= 1)
     ) {
-      op_host_post_message_raw(
-        this.#id,
-        core.serialize(message),
-      );
+      this.#postSerializedMessage({
+        raw: true,
+        data: core.serialize(message),
+      });
       return;
     }
     message = webidl.converters.any(message);
@@ -790,7 +932,7 @@ class NodeWorker extends EventEmitter {
     }
     const { transfer } = options;
     const data = serializeJsMessageData(message, transfer);
-    op_host_post_message(this.#id, data);
+    this.#postSerializedMessage({ raw: false, data });
   }
 
   // https://nodejs.org/api/worker_threads.html#workerterminate
@@ -800,12 +942,14 @@ class NodeWorker extends EventEmitter {
     }
 
     this.#status = "TERMINATED";
+    this.#clearPendingOutboundMessages();
     op_host_terminate_worker(this.#id);
     this.#closeStdio();
 
     if (!this.#exited) {
       this.#exited = true;
       this.emit("exit", 1);
+      this.#emitAsyncDestroy();
       return PromiseResolve(1);
     }
 
@@ -820,10 +964,12 @@ class NodeWorker extends EventEmitter {
 
   ref() {
     this[privateWorkerRef](true);
+    return this;
   }
 
   unref() {
     this[privateWorkerRef](false);
+    return this;
   }
 
   cpuUsage(prevValue?: { user: number; system: number }) {
@@ -1013,11 +1159,50 @@ internals.__initWorkerThreads = (
     // onmessage handler (globalThis.onmessage) since both would fire
     // for the same MessageEvent.
     let messageListenerCount = 0;
+    let parentPortOnmessageActive = false;
+    let parentPortExplicitlyUnrefed = false;
     // Track Web API message listeners to prevent underflow on
     // double-remove (same concern as the Node-style off() path).
     const webMessageListeners = new SafeSet();
+    const pendingParentPortMessages: Array<{
+      data: unknown;
+      ports: readonly MessagePort[];
+    }> = [];
+    const syncParentPortRefState = () => {
+      const shouldUnref = parentPortExplicitlyUnrefed ||
+        (messageListenerCount === 0 && !parentPortOnmessageActive);
+      parentPort[unrefParentPort] = shouldUnref;
+      globalThis[unrefParentPort] = shouldUnref;
+    };
+    const replayPendingParentPortMessages = () => {
+      if (
+        (messageListenerCount === 0 && !parentPortOnmessageActive) ||
+        pendingParentPortMessages.length === 0
+      ) {
+        return;
+      }
+      const pending = ArrayPrototypeSplice(
+        pendingParentPortMessages,
+        0,
+        pendingParentPortMessages.length,
+      );
+      for (let i = 0; i < pending.length; i++) {
+        globalThis.dispatchEvent(new MessageEvent("message", pending[i]));
+      }
+    };
 
     parentPort = ObjectCreate(null) as ParentPort;
+    syncParentPortRefState();
+    nativeAddEventListener("message", (ev) => {
+      if (messageListenerCount > 0 || parentPortOnmessageActive) {
+        return;
+      }
+      ArrayPrototypePush(pendingParentPortMessages, {
+        data: ev.data,
+        ports: ev.ports,
+      });
+      ev.stopImmediatePropagation();
+    });
     parentPort.postMessage = function (message, transferOrOptions?) {
       return nativePostMessage(message, transferOrOptions);
     };
@@ -1026,6 +1211,8 @@ internals.__initWorkerThreads = (
       if (name === "message" && !webMessageListeners.has(listener)) {
         webMessageListeners.add(listener);
         messageListenerCount++;
+        syncParentPortRefState();
+        replayPendingParentPortMessages();
       }
     };
     parentPort.removeEventListener = function (name, listener) {
@@ -1033,6 +1220,7 @@ internals.__initWorkerThreads = (
       if (name === "message" && webMessageListeners.has(listener)) {
         webMessageListeners.delete(listener);
         messageListenerCount--;
+        syncParentPortRefState();
       }
     };
     // Delegate parentPort.onmessage to globalThis.onmessage so that
@@ -1070,10 +1258,14 @@ internals.__initWorkerThreads = (
           if (onmessageForwarder) {
             nativeRemoveEventListener("message", onmessageForwarder);
             onmessageForwarder = null;
+            parentPortOnmessageActive = false;
+            syncParentPortRefState();
           }
           storedOnmessage = handler;
           // Add forwarder only when a handler is set
           if (typeof handler === "function") {
+            parentPortOnmessageActive = true;
+            syncParentPortRefState();
             onmessageForwarder = (ev: Event) => {
               if (messageListenerCount > 0) return;
               if (typeof storedOnmessage === "function") {
@@ -1081,6 +1273,7 @@ internals.__initWorkerThreads = (
               }
             };
             nativeAddEventListener("message", onmessageForwarder);
+            replayPendingParentPortMessages();
           }
         },
         configurable: true,
@@ -1222,7 +1415,10 @@ internals.__initWorkerThreads = (
         if (wrapper !== undefined) {
           nativeRemoveEventListener(name, wrapper);
           map.delete(listener);
-          if (name === "message") messageListenerCount--;
+          if (name === "message") {
+            messageListenerCount--;
+            syncParentPortRefState();
+          }
         }
       }
       return parentPort;
@@ -1245,7 +1441,11 @@ internals.__initWorkerThreads = (
       };
       map.set(listener, _listener);
       nativeAddEventListener(name, _listener);
-      if (name === "message") messageListenerCount++;
+      if (name === "message") {
+        messageListenerCount++;
+        syncParentPortRefState();
+        replayPendingParentPortMessages();
+      }
       return parentPort;
     };
 
@@ -1257,14 +1457,21 @@ internals.__initWorkerThreads = (
       // deno-lint-ignore no-explicit-any
       const _listener = (ev: any) => {
         map.delete(listener);
-        if (name === "message") messageListenerCount--;
+        if (name === "message") {
+          messageListenerCount--;
+          syncParentPortRefState();
+        }
         const message = ev.data;
         patchMessagePortIfFound(message);
         return listener(message);
       };
       map.set(listener, _listener);
       nativeAddEventListener(name, _listener, { once: true });
-      if (name === "message") messageListenerCount++;
+      if (name === "message") {
+        messageListenerCount++;
+        syncParentPortRefState();
+        replayPendingParentPortMessages();
+      }
       return parentPort;
     };
 
@@ -1282,14 +1489,12 @@ internals.__initWorkerThreads = (
       parentPort.emit("close");
     });
     parentPort.unref = () => {
-      parentPort[unrefParentPort] = true;
-      // Also set on globalThis so runtime/js/99_main.js event loop
-      // check (globalThis[unrefParentPort]) still works.
-      globalThis[unrefParentPort] = true;
+      parentPortExplicitlyUnrefed = true;
+      syncParentPortRefState();
     };
     parentPort.ref = () => {
-      parentPort[unrefParentPort] = false;
-      globalThis[unrefParentPort] = false;
+      parentPortExplicitlyUnrefed = false;
+      syncParentPortRefState();
     };
 
     if (isWorkerThread) {
@@ -1809,6 +2014,8 @@ function receiveMessageOnPort(port: MessagePort): object | undefined {
 // "Class constructor X cannot be invoked without 'new'" -- the node_compat
 // suite asserts the specific code/constructor for both forms.
 // deno-lint-ignore no-explicit-any
+const nodePortListenersSymbol = Symbol("nodePortListeners");
+
 function NodeMessageChannel(this: any) {
   if (new.target === undefined) {
     throw new ERR_CONSTRUCT_CALL_REQUIRED("MessageChannel");
@@ -1844,27 +2051,45 @@ function NodeMessageChannel(this: any) {
     const origClose1 = FunctionPrototypeBind(port1.close, port1);
     const origClose2 = FunctionPrototypeBind(port2.close, port2);
 
+    const hasNodePortListener = (peer: MessagePort, name: string): boolean => {
+      const listenerMap = peer[nodePortListenersSymbol]?.[name];
+      return listenerMap !== undefined && listenerMap.size > 0;
+    };
+    const closePeerIfOnlyCloseIsObserved = (peer: MessagePort) => {
+      try {
+        peer.start();
+      } catch {
+        // start may throw if the port is already detached.
+      }
+      if (
+        !hasNodePortListener(peer, "close") ||
+        hasNodePortListener(peer, "message") ||
+        peer.onmessage !== null
+      ) {
+        return;
+      }
+      queueMicrotask(() => {
+        if (
+          typeof peer[nodeWorkerThreadCloseCb] === "function" &&
+          !peer[nodeWorkerThreadCloseCbInvoked]
+        ) {
+          peer[nodeWorkerThreadCloseCb]();
+          peer[nodeWorkerThreadCloseCbInvoked] = true;
+        }
+      });
+    };
+
     port1.close = (cb) => {
       origClose1(cb);
-      try {
-        port2.start();
-      } catch {
-        // start may throw if the port is already detached -- safe to
-        // ignore.
-      }
+      closePeerIfOnlyCloseIsObserved(port2);
     };
     port2.close = (cb) => {
       origClose2(cb);
-      try {
-        port1.start();
-      } catch {
-        // see above
-      }
+      closePeerIfOnlyCloseIsObserved(port1);
     };
   }
 }
 
-const nodePortListenersSymbol = Symbol("nodePortListeners");
 // Reuse the web MessageChannel's prototype so `instanceof MessageChannel`
 // still works regardless of whether the user got the global MessageChannel
 // (NodeMessageChannel) or the web one. Port1/port2 own properties on each

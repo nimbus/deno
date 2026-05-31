@@ -39,6 +39,13 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 
 const process = lazyProcess().default;
+let traceEventsModule = null;
+
+function getTraceEventsModule() {
+  if (traceEventsModule !== null) return traceEventsModule;
+  traceEventsModule = core.loadExtScript("ext:deno_node/trace_events.ts");
+  return traceEventsModule;
+}
 
 function isLoopback(host) {
   const hostLower = host.toLowerCase();
@@ -89,6 +96,7 @@ function encodeNetworkData(data) {
 
 class Session extends EventEmitter {
   #connection = null;
+  #nodeTracingSession = null;
   #nextId = 1;
   #messageCallbacks = new SafeMap();
   #pendingMessages = [];
@@ -145,6 +153,12 @@ class Session extends EventEmitter {
     }
   }
 
+  #emitProtocolEvent(method, params = {}) {
+    const message = { method, params };
+    this.emit(method, message);
+    this.emit("inspectorNotification", message);
+  }
+
   #enqueueMessage(message) {
     ArrayPrototypePush(this.#pendingMessages, message);
     if (this.#isDraining) return;
@@ -183,6 +197,44 @@ class Session extends EventEmitter {
     if (!this.#connection) {
       throw new ERR_INSPECTOR_NOT_CONNECTED();
     }
+    if (method === "NodeTracing.start") {
+      if (!lazyWorkerThreads().isMainThread) {
+        if (callback) {
+          process.nextTick(callback, {
+            code: -32000,
+            message:
+              "Tracing properties can only be changed through main thread sessions",
+          });
+        }
+        return;
+      }
+      if (this.#nodeTracingSession !== null) {
+        getTraceEventsModule().stopInspectorTracing(this.#nodeTracingSession);
+      }
+      const includedCategories = params?.traceConfig?.includedCategories;
+      const categories = Array.isArray(includedCategories)
+        ? includedCategories
+        : [];
+      this.#nodeTracingSession = getTraceEventsModule().startInspectorTracing(
+        categories,
+      );
+      if (callback) {
+        process.nextTick(callback, null, {});
+      }
+      return;
+    }
+    if (method === "NodeTracing.stop") {
+      const events = getTraceEventsModule().stopInspectorTracing(
+        this.#nodeTracingSession,
+      );
+      this.#nodeTracingSession = null;
+      this.#emitProtocolEvent("NodeTracing.dataCollected", { value: events });
+      this.#emitProtocolEvent("NodeTracing.tracingComplete", {});
+      if (callback) {
+        process.nextTick(callback, null, {});
+      }
+      return;
+    }
     const id = this.#nextId++;
     const message = { id, method };
     if (params) {
@@ -200,6 +252,10 @@ class Session extends EventEmitter {
     }
     op_inspector_disconnect(this.#connection);
     this.#connection = null;
+    if (this.#nodeTracingSession !== null) {
+      getTraceEventsModule().stopInspectorTracing(this.#nodeTracingSession);
+      this.#nodeTracingSession = null;
+    }
     for (const callback of this.#messageCallbacks.values()) {
       process.nextTick(callback, new ERR_INSPECTOR_CLOSED());
     }

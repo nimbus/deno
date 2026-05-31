@@ -389,7 +389,10 @@ impl<
     // Note: if we are here, then the referrer is an esm module
     // TODO(bartlomieju): skipped "policy" part as we don't plan to support it
 
-    if self.is_builtin_node_module(specifier) {
+    if specifier != "test"
+      && specifier != "test/reporters"
+      && self.is_builtin_node_module(specifier)
+    {
       return Ok(NodeResolution::BuiltIn(specifier.to_string()));
     }
 

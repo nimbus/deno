@@ -2,7 +2,7 @@
 // Copyright Joyent, Inc. and Node.js contributors. All rights reserved. MIT license.
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
 const {
@@ -67,6 +67,21 @@ const {
 } = primordials;
 
 const kParsingContext = Symbol("script parsing context");
+
+function patchDomainPromiseContext(contextifiedObject) {
+  const patch = internals.__patchDomainPromiseContext;
+  if (typeof patch !== "function") {
+    return;
+  }
+
+  try {
+    const promiseCtor = new Script("Promise").runInContext(contextifiedObject);
+    patch(promiseCtor);
+  } catch (_) {
+    // Contexts that disable string code generation cannot be patched without
+    // violating their code-generation policy.
+  }
+}
 
 class Script {
   #inner;
@@ -255,11 +270,13 @@ function createContext(
     ]);
     const microtaskQueue = microtaskMode === "afterEvaluate";
 
-    return op_vm_create_context_without_contextify(
+    const context = op_vm_create_context_without_contextify(
       strings,
       wasm,
       microtaskQueue,
     );
+    patchDomainPromiseContext(context);
+    return context;
   }
 
   if (isContext(contextObject)) {
@@ -311,6 +328,7 @@ function createContext(
   );
   // Register the context scope callback after the context was initialized.
   // registerImportModuleDynamically(contextObject, importModuleDynamically);
+  patchDomainPromiseContext(contextObject);
   return contextObject;
 }
 
