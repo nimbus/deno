@@ -75,6 +75,45 @@ function createMemoryTypeError(actual: unknown): TypeError {
   return err;
 }
 
+function shouldCaptureWasiStdio(): boolean {
+  return (globalThis as unknown as {
+    __nimbusRuntimeCaptureWasiStdio?: boolean;
+  })
+    .__nimbusRuntimeCaptureWasiStdio === true;
+}
+
+function writeCapturedWasiStdio(
+  stream: { write?: (chunk: Uint8Array) => unknown } | undefined,
+  memory: Uint8Array,
+  iovsPtr: number,
+  iovsLen: number,
+  nwrittenPtr: number,
+): number {
+  if (typeof stream?.write !== "function") return 8; // EBADF
+
+  const view = new DataView(
+    memory.buffer,
+    memory.byteOffset,
+    memory.byteLength,
+  );
+  let total = 0;
+  for (let index = 0; index < iovsLen; index++) {
+    const iovPtr = iovsPtr + index * 8;
+    const chunkPtr = view.getUint32(iovPtr, true);
+    const chunkLen = view.getUint32(iovPtr + 4, true);
+    if (chunkLen === 0) continue;
+    const chunk = new Uint8Array(
+      memory.buffer,
+      memory.byteOffset + chunkPtr,
+      chunkLen,
+    );
+    stream.write(chunk);
+    total += chunkLen;
+  }
+  view.setUint32(nwrittenPtr, total, true);
+  return 0;
+}
+
 class WASIProcExit {
   code: number;
   constructor(code: number) {
@@ -275,12 +314,34 @@ class WASI {
         iovsLen: number,
         nwrittenPtr: number,
       ) {
+        const memoryBuffer = self.#getMemoryBuffer();
+        if (shouldCaptureWasiStdio()) {
+          const proc = (globalThis as any).process;
+          if (fd === stdoutFd) {
+            return writeCapturedWasiStdio(
+              proc?.stdout,
+              memoryBuffer,
+              iovsPtr,
+              iovsLen,
+              nwrittenPtr,
+            );
+          }
+          if (fd === stderrFd) {
+            return writeCapturedWasiStdio(
+              proc?.stderr,
+              memoryBuffer,
+              iovsPtr,
+              iovsLen,
+              nwrittenPtr,
+            );
+          }
+        }
         return ctx.fdWrite(
           fd,
           iovsPtr,
           iovsLen,
           nwrittenPtr,
-          self.#getMemoryBuffer(),
+          memoryBuffer,
         );
       },
       fd_read(

@@ -455,7 +455,10 @@ impl<
       );
     }
 
-    if self.is_builtin_node_module(specifier) {
+    if specifier != "test"
+      && specifier != "test/reporters"
+      && self.is_builtin_node_module(specifier)
+    {
       return Ok(NodeResolution::BuiltIn(specifier.to_string()));
     }
 

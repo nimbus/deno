@@ -1370,6 +1370,15 @@ let uncaughtExceptionListenerCount = 0;
 let uncaughtExceptionMonitorListenerCount = 0;
 let beforeExitListenerCount = 0;
 let exitListenerCount = 0;
+let domainUnhandledRejectionTracking = false;
+
+internals.__enableDomainUnhandledRejectionTracking = () => {
+  if (domainUnhandledRejectionTracking) {
+    return;
+  }
+  domainUnhandledRejectionTracking = true;
+  synchronizeListeners();
+};
 
 process.on("newListener", (event: string) => {
   switch (event) {
@@ -1466,7 +1475,8 @@ function synchronizeListeners() {
     unhandledRejectionListenerCount > 0 ||
     uncaughtExceptionListenerCount > 0 ||
     uncaughtExceptionMonitorListenerCount > 0 ||
-    _uncaughtExceptionCaptureFn !== null
+    _uncaughtExceptionCaptureFn !== null ||
+    domainUnhandledRejectionTracking
   ) {
     internals.nodeProcessUnhandledRejectionCallback = (event) => {
       if (process.listenerCount("unhandledRejection") === 0) {
@@ -1506,6 +1516,25 @@ function synchronizeListeners() {
             configurable: true,
           });
           reason = err;
+        }
+
+        const domain = event.promise?.domain ?? event.reason?.domain;
+        if (domain && typeof domain.emit === "function") {
+          if (reason !== null && typeof reason === "object") {
+            Object.defineProperty(reason, "domain", {
+              __proto__: null,
+              configurable: true,
+              enumerable: false,
+              value: domain,
+              writable: true,
+            });
+            if (reason.domainThrown === undefined) {
+              reason.domainThrown = true;
+            }
+          }
+          event.preventDefault();
+          domain.emit("error", reason);
+          return;
         }
 
         // Only preventDefault if a registered handler (uncaughtException
