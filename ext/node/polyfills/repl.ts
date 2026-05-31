@@ -24,10 +24,10 @@ const { validateFunction } = core.loadExtScript(
 );
 const vm = core.loadExtScript("ext:deno_node/vm.js").default;
 import process from "node:process";
-import path from "node:path";
-import fs from "node:fs";
-import { Console } from "node:console";
 import Module from "node:module";
+const path = core.loadExtScript("ext:deno_node/path/mod.ts").default;
+const fs = core.loadExtScript("ext:deno_node/fs.ts");
+const { Console } = core.loadExtScript("ext:deno_node/console.ts");
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
 
 export const REPL_MODE_SLOPPY = Symbol("repl-sloppy");
@@ -1176,6 +1176,7 @@ export class REPLServer extends (Interface as any) {
       // so `inspect()` below sees the real JS object (with prototype,
       // class info, getters, etc.) rather than the CDP wire shape.
       let result;
+      let previewError: string | null = null;
       try {
         const script = new vm.Script(previewCode, { filename: "repl" });
         if (self.useGlobal) {
@@ -1189,16 +1190,24 @@ export class REPLServer extends (Interface as any) {
             timeout: 500,
           });
         }
-      } catch {
+      } catch (error) {
         // Probe says safe but the actual eval threw -- e.g. the probe
         // ran against globalThis and the expression references a REPL
-        // var that only exists in `self.context`. Silently skip.
-        return;
+        // var that only exists in `self.context`. Node's terminal REPL previews
+        // ReferenceErrors in strict mode, but still suppresses syntax/time-limit
+        // noise while the user is typing.
+        if (
+          self.replMode !== REPL_MODE_STRICT ||
+          !error || (error as any).name !== "ReferenceError"
+        ) {
+          return;
+        }
+        previewError = `${(error as any).name}: ${(error as any).message}`;
       }
 
       if (result === undefined && self.ignoreUndefined) return;
 
-      let inspected = inspect(result, {
+      let inspected = previewError ?? inspect(result, {
         colors: false,
         showProxy: true,
         breakLength: Infinity,
@@ -1724,6 +1733,7 @@ export class REPLServer extends (Interface as any) {
       );
       for (const name of Object.getOwnPropertyNames(globalThis)) {
         if (builtinNames.has(name)) continue;
+        if (name.startsWith("__nimbus")) continue;
         try {
           const desc = Object.getOwnPropertyDescriptor(globalThis, name);
           if (desc) Object.defineProperty(context, name, desc);

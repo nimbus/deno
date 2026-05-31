@@ -2,7 +2,7 @@
 // Copyright Joyent, Inc. and Node.js contributors. All rights reserved. MIT license.
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
 const {
@@ -78,6 +78,21 @@ const USE_MAIN_CONTEXT_DEFAULT_LOADER = Symbol(
   "USE_MAIN_CONTEXT_DEFAULT_LOADER",
 );
 const DONT_CONTEXTIFY = Symbol("DONT_CONTEXTIFY");
+
+function patchDomainPromiseContext(contextifiedObject) {
+  const patch = internals.__patchDomainPromiseContext;
+  if (typeof patch !== "function") {
+    return;
+  }
+
+  try {
+    const promiseCtor = new Script("Promise").runInContext(contextifiedObject);
+    patch(promiseCtor);
+  } catch (_) {
+    // Contexts that disable string code generation cannot be patched without
+    // violating their code-generation policy.
+  }
+}
 
 class Script {
   #inner;
@@ -330,6 +345,7 @@ function createContext(
       context,
       importModuleDynamically,
     );
+    patchDomainPromiseContext(context);
     return context;
   }
 
@@ -386,6 +402,7 @@ function createContext(
     contextObject,
     importModuleDynamically,
   );
+  patchDomainPromiseContext(contextObject);
   return contextObject;
 }
 

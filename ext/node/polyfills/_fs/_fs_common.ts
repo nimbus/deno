@@ -68,7 +68,7 @@ const isFd = __reexport.isUint32;
 function maybeCallback(cb) {
   validateFunction(cb, "cb");
 
-  return cb;
+  return wrapCallbackForDomain(cb, false);
 }
 
 // Ensure that callbacks run in the global context. Only use this function
@@ -76,10 +76,31 @@ function maybeCallback(cb) {
 // invoked from JS already run in the proper scope.
 function makeCallback(cb) {
   validateFunction(cb, "cb");
+  cb = wrapCallbackForDomain(cb, true);
   // Callbacks run with `this` = undefined, matching Node.js ESM strict-mode
   // behavior (the original code was an ESM arrow function capturing `this`
   // from makeCallback's call site, which is undefined in strict mode).
   return (...args) => ReflectApply(cb, undefined, args);
+}
+
+function wrapCallbackForDomain(cb, forceUndefinedThis) {
+  const domain = globalThis.process?.domain;
+  if (domain === null || domain === undefined) {
+    return cb;
+  }
+
+  return function (...args) {
+    domain.enter();
+    try {
+      return ReflectApply(
+        cb,
+        forceUndefinedThis ? undefined : this,
+        args,
+      );
+    } finally {
+      domain.exit();
+    }
+  };
 }
 
 return {

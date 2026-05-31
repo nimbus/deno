@@ -226,7 +226,7 @@ function fork(
     throw new ERR_CHILD_PROCESS_IPC_REQUIRED("options.stdio");
   }
 
-  options.execPath = options.execPath || Deno.execPath();
+  options.execPath = options.execPath || process.execPath || Deno.execPath();
   options.shell = false;
 
   // deno-lint-ignore no-explicit-any
