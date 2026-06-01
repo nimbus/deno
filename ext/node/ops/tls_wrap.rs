@@ -236,6 +236,11 @@ struct EmitCtx {
   loop_ptr: *mut uv_compat::uv_loop_t,
 }
 
+struct SniRewrite {
+  placeholder: Vec<u8>,
+  raw: Vec<u8>,
+}
+
 /// Extract callback context from the raw TLSWrapInner pointer.
 /// Returns None if isolate or js_handle are not set.
 ///
@@ -285,6 +290,7 @@ unsafe fn clone_context_global(
 /// Result of `clear_out_process`: describes what JS callbacks to fire.
 struct ClearOutResult {
   handshake_done: bool,
+  keylog_lines: Vec<Vec<u8>>,
   data: Vec<u8>,
   got_eof: bool,
   got_error: bool,
@@ -607,6 +613,43 @@ unsafe fn do_emit_client_hello(ctx: &EmitCtx) {
       && let Ok(func) = v8::Local::<v8::Function>::try_from(val)
     {
       func.call(scope, this.into(), &[]);
+    }
+  }
+}
+
+/// Emit an NSS-format TLS keylog line to JS via the onkeylog callback.
+///
+/// # Safety
+/// EmitCtx must contain valid pointers. No TLSWrapInner reference may be held by the caller.
+unsafe fn do_emit_keylog(ctx: &EmitCtx, line: &[u8]) {
+  unsafe {
+    let mut isolate = v8::Isolate::from_raw_isolate_ptr(ctx.isolate_ptr);
+
+    if ctx.loop_ptr.is_null() {
+      return;
+    }
+    let ctx_ptr = (*ctx.loop_ptr).data;
+    if ctx_ptr.is_null() {
+      return;
+    }
+    let context_global = clone_context_global(&mut isolate, ctx_ptr);
+
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Local::new(handle_scope, context_global);
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let this = v8::Local::new(scope, &ctx.js_handle);
+    let key =
+      v8::String::new_external_onebyte_static(scope, b"onkeylog").unwrap();
+    if let Some(val) = this.get(scope, key.into())
+      && let Ok(func) = v8::Local::<v8::Function>::try_from(val)
+    {
+      let ab = v8::ArrayBuffer::new(scope, line.len());
+      let backing = ab.get_backing_store();
+      for (i, byte) in line.iter().enumerate() {
+        backing[i].set(*byte);
+      }
+      func.call(scope, this.into(), &[ab.into()]);
     }
   }
 }
@@ -982,6 +1025,16 @@ struct TLSWrapInner {
   /// emitted via a fresh ArrayBuffer; the JS callback receives the same
   /// Uint8Array each time. Updated by `TLSWrap::useUserBuffer`.
   user_buffer: Option<crate::ops::stream_wrap::UserBuffer>,
+
+  /// Per-connection keylog sink. rustls writes NSS-format secrets here and the
+  /// callback phase emits them as Node-style `keylog` events.
+  keylog_lines: Option<KeyLogStore>,
+
+  /// Node/OpenSSL sends some SNI names that rustls-pki-types rejects as DNS
+  /// identities (for example, all-numeric final labels in `sni.0`). For those
+  /// cases rustls verifies against a valid same-length placeholder and the
+  /// plaintext ClientHello SNI extension is rewritten to the requested value.
+  sni_rewrite: Option<SniRewrite>,
 }
 
 /// Convert a rustls error to a (message, code) pair that matches Node's
@@ -1122,6 +1175,8 @@ impl TLSWrapInner {
       client_hello_servername: None,
       client_hello_alpn: Vec::new(),
       user_buffer: None,
+      keylog_lines: None,
+      sni_rewrite: None,
     }
   }
 
@@ -1201,13 +1256,14 @@ impl TLSWrapInner {
   /// Feed encrypted input to the Acceptor and try to extract the ClientHello.
   /// Returns true if the ClientHello was received and onclienthello should fire.
   fn process_acceptor(&mut self) -> bool {
-    let acceptor = match self.acceptor.as_mut() {
-      Some(a) => a,
-      None => return false,
-    };
+    if self.acceptor.is_none() {
+      return false;
+    }
 
     // Feed buffered encrypted data to the acceptor.
     if !self.enc_in.is_empty() {
+      self.normalize_incoming_server_sni();
+      let acceptor = self.acceptor.as_mut().unwrap();
       let mut cursor = std::io::Cursor::new(&self.enc_in[..]);
       match acceptor.read_tls(&mut cursor) {
         Ok(n) => {
@@ -1226,8 +1282,10 @@ impl TLSWrapInner {
     match acceptor.accept() {
       Ok(Some(accepted)) => {
         let hello = accepted.client_hello();
-        self.client_hello_servername =
-          hello.server_name().map(|s| s.to_string());
+        if self.client_hello_servername.is_none() {
+          self.client_hello_servername =
+            hello.server_name().map(|s| s.to_string());
+        }
         self.client_hello_alpn = hello
           .alpn()
           .map(|iter| iter.map(|p| p.to_vec()).collect())
@@ -1307,6 +1365,7 @@ impl TLSWrapInner {
   fn clear_out_process(&mut self) -> ClearOutResult {
     let empty = ClearOutResult {
       handshake_done: false,
+      keylog_lines: Vec::new(),
       data: Vec::new(),
       got_eof: false,
       got_error: false,
@@ -1315,6 +1374,12 @@ impl TLSWrapInner {
 
     if self.eof {
       return empty;
+    }
+
+    if !self.enc_in.is_empty() {
+      if self.kind == Kind::Server && !self.established {
+        self.normalize_incoming_server_sni();
+      }
     }
 
     let Some(ref mut conn) = self.tls_conn else {
@@ -1365,6 +1430,7 @@ impl TLSWrapInner {
             self.enc_out_flush_only();
             return ClearOutResult {
               handshake_done: false,
+              keylog_lines: self.drain_keylog_lines(),
               data: Vec::new(),
               got_eof: false,
               got_error: false,
@@ -1413,6 +1479,7 @@ impl TLSWrapInner {
 
     ClearOutResult {
       handshake_done,
+      keylog_lines: self.drain_keylog_lines(),
       data,
       got_eof,
       got_error,
@@ -1420,22 +1487,37 @@ impl TLSWrapInner {
     }
   }
 
+  fn drain_keylog_lines(&mut self) -> Vec<Vec<u8>> {
+    let Some(lines) = &self.keylog_lines else {
+      return Vec::new();
+    };
+    std::mem::take(&mut *lines.lock().unwrap_or_else(|e| e.into_inner()))
+  }
+
   /// Collect encrypted output from rustls and determine what action to take.
   /// Does NOT call any JS callbacks or invoke_queued.
   fn enc_out_collect(&mut self) -> EncOutAction {
-    let Some(ref mut conn) = self.tls_conn else {
-      return EncOutAction::None;
-    };
+    let wrote_encrypted_output = {
+      let Some(ref mut conn) = self.tls_conn else {
+        return EncOutAction::None;
+      };
 
-    // Collect ALL encrypted output from rustls into pending buffer.
-    while conn.wants_write() {
-      let mut tmp = Vec::with_capacity(16384);
-      match conn.write_tls(&mut tmp) {
-        Ok(n) if n > 0 => {
-          self.pending_enc_out.extend_from_slice(&tmp);
+      // Collect ALL encrypted output from rustls into pending buffer.
+      let mut wrote = false;
+      while conn.wants_write() {
+        let mut tmp = Vec::with_capacity(16384);
+        match conn.write_tls(&mut tmp) {
+          Ok(n) if n > 0 => {
+            self.pending_enc_out.extend_from_slice(&tmp);
+            wrote = true;
+          }
+          _ => break,
         }
-        _ => break,
       }
+      wrote
+    };
+    if wrote_encrypted_output {
+      self.rewrite_pending_sni();
     }
 
     if self.pending_enc_out.is_empty() {
@@ -1462,6 +1544,46 @@ impl TLSWrapInner {
       UnderlyingStream::Js { .. } => EncOutAction::WriteJs,
       UnderlyingStream::None => EncOutAction::None,
     }
+  }
+
+  fn rewrite_pending_sni(&mut self) {
+    let Some(rewrite) = self.sni_rewrite.take() else {
+      return;
+    };
+    if rewrite.raw.len() != rewrite.placeholder.len() {
+      self.sni_rewrite = Some(rewrite);
+      return;
+    }
+    if let Some(index) = self
+      .pending_enc_out
+      .windows(rewrite.placeholder.len())
+      .position(|window| window == rewrite.placeholder.as_slice())
+    {
+      self.pending_enc_out[index..index + rewrite.raw.len()]
+        .copy_from_slice(&rewrite.raw);
+    } else {
+      self.sni_rewrite = Some(rewrite);
+    }
+  }
+
+  fn normalize_incoming_server_sni(&mut self) {
+    if self.client_hello_servername.is_some() {
+      return;
+    }
+    let Some((offset, len, raw)) = find_client_hello_sni(&self.enc_in) else {
+      return;
+    };
+    let Ok(raw_name) = String::from_utf8(raw) else {
+      return;
+    };
+    if rustls::pki_types::ServerName::try_from(raw_name.clone()).is_ok() {
+      return;
+    }
+    let Some(placeholder) = valid_sni_placeholder(len) else {
+      return;
+    };
+    self.enc_in[offset..offset + len].copy_from_slice(placeholder.as_bytes());
+    self.client_hello_servername = Some(raw_name);
   }
 
   /// Flush encrypted data from rustls to the underlying stream without
@@ -1502,9 +1624,20 @@ impl TLSWrapInner {
     unsafe {
       if let Some((ref error_msg, ref error_code)) = result.tls_error {
         if let Some(ctx) = extract_emit_ctx(ptr) {
+          for line in &result.keylog_lines {
+            do_emit_keylog(&ctx, line);
+          }
           do_emit_error(&ctx, error_msg, error_code);
         }
         return;
+      }
+
+      if !result.keylog_lines.is_empty()
+        && let Some(ctx) = extract_emit_ctx(ptr)
+      {
+        for line in &result.keylog_lines {
+          do_emit_keylog(&ctx, line);
+        }
       }
 
       if result.handshake_done {
@@ -1994,27 +2127,41 @@ impl TLSWrap {
     op_state: &mut OpState,
   ) -> i32 {
     // Empty string means no SNI (caller passes "" when servername is not set).
-    let server_name = if server_name.is_empty() {
-      None
+    let (server_name, sni_rewrite) = if server_name.is_empty() {
+      (None, None)
+    } else if let Ok(name) =
+      rustls::pki_types::ServerName::try_from(server_name.clone())
+    {
+      (Some(name), None)
+    } else if let Some(placeholder) = valid_sni_placeholder(server_name.len()) {
+      match rustls::pki_types::ServerName::try_from(placeholder.clone()) {
+        Ok(name) => (
+          Some(name),
+          Some(SniRewrite {
+            placeholder: placeholder.into_bytes(),
+            raw: server_name.into_bytes(),
+          }),
+        ),
+        Err(_) => (None, None),
+      }
     } else {
-      // If the hostname is not a valid DNS name or IP address, skip SNI
-      // rather than failing TLS initialization entirely.  Node.js allows
-      // invalid hostnames through TLS setup and lets DNS resolution fail
-      // later with the proper error code (ENOTFOUND / EAI_FAIL).
-      rustls::pki_types::ServerName::try_from(server_name).ok()
+      (None, None)
     };
 
     let inner = unsafe { &mut *self.inner.as_mut_ptr() };
-    let client_config = match build_client_config(scope, context, op_state) {
-      Some((c, _)) => c,
-      None => return -1,
-    };
+    let (client_config, keylog_lines) =
+      match build_client_config(scope, context, op_state) {
+        Some((c, _, keylog_lines)) => (c, keylog_lines),
+        None => return -1,
+      };
     // The verifier in `client_config` writes errors via the per-connection
     // `CURRENT_VERIFY_ERROR` thread-local set by `cycle`, so `inner`'s own
     // pre-allocated `verify_error` slot stays correctly scoped per
     // connection even when the verifier `Arc` is cached process-wide.
     inner.pending_client_config = Some(Arc::new(client_config));
+    inner.keylog_lines = Some(keylog_lines);
     inner.pending_server_name = server_name;
+    inner.sni_rewrite = sni_rewrite;
     0
   }
 
@@ -2028,7 +2175,7 @@ impl TLSWrap {
     scope: &mut v8::PinScope,
     op_state: &mut OpState,
   ) -> i32 {
-    let (server_config, client_cert_verify_error) =
+    let (server_config, client_cert_verify_error, keylog_lines) =
       match build_server_config(scope, context, op_state) {
         Some(c) => c,
         None => {
@@ -2041,6 +2188,7 @@ impl TLSWrap {
     // Share the client cert verify error store with the TLSWrap so that
     // `verifyError()` on the server side returns client cert errors.
     inner.verify_error = client_cert_verify_error;
+    inner.keylog_lines = Some(keylog_lines);
     0
   }
 
@@ -2857,14 +3005,16 @@ impl TLSWrap {
   #[string]
   fn get_servername(&self) -> Option<String> {
     let inner = unsafe { &*self.inner.as_mut_ptr() };
+    if let Some(name) = &inner.client_hello_servername {
+      return Some(name.clone());
+    }
     // Try established connection first
     if let Some(ref conn) = inner.tls_conn
       && let Some(name) = conn.server_name()
     {
       return Some(name.to_string());
     }
-    // Fall back to client hello info (during acceptor phase)
-    inner.client_hello_servername.clone()
+    None
   }
 
   /// Get the client's offered ALPN protocols from the ClientHello.
@@ -2910,7 +3060,7 @@ impl TLSWrap {
     // any reentrant V8 calls (cycle / do_emit_error) which may trigger
     // prepare_stack_trace_callback, which also borrows op_state.
     let op_state_rc = deno_core::JsRuntime::op_state_from(scope);
-    let (mut server_config, client_cert_verify_error) = {
+    let (mut server_config, client_cert_verify_error, keylog_lines) = {
       let mut op_state = op_state_rc.borrow_mut();
       match build_server_config(scope, context, &mut op_state) {
         Some(c) => c,
@@ -2921,6 +3071,7 @@ impl TLSWrap {
       }
     };
     inner.verify_error = client_cert_verify_error;
+    inner.keylog_lines = Some(keylog_lines);
 
     // Determine ALPN protocols
     if let Ok(s) = v8::Local::<v8::String>::try_from(alpn_protocol) {
@@ -3217,6 +3368,60 @@ fn get_protocol_versions(
 /// The verifier stores errors here instead of failing the handshake,
 /// and `verifyError()` reads them later — matching Node/OpenSSL behavior.
 type VerifyErrorStore = Arc<std::sync::Mutex<Option<String>>>;
+type KeyLogStore = Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
+
+#[derive(Debug)]
+struct NodeKeyLog {
+  lines: KeyLogStore,
+  inner: Arc<dyn rustls::KeyLog>,
+}
+
+impl NodeKeyLog {
+  fn new(lines: KeyLogStore) -> Self {
+    Self {
+      lines,
+      inner: deno_tls::get_ssl_key_log(),
+    }
+  }
+}
+
+impl rustls::KeyLog for NodeKeyLog {
+  fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
+    self.inner.log(label, client_random, secret);
+    // OpenSSL/Node does not emit this line for ordinary TLS 1.3 handshakes
+    // without early data, while rustls exposes its early-data read secret.
+    if label == "CLIENT_EARLY_TRAFFIC_SECRET" {
+      return;
+    }
+
+    let mut line = Vec::with_capacity(
+      label.len() + 1 + client_random.len() * 2 + 1 + secret.len() * 2 + 1,
+    );
+    line.extend_from_slice(label.as_bytes());
+    line.push(b' ');
+    append_hex(&mut line, client_random);
+    line.push(b' ');
+    append_hex(&mut line, secret);
+    line.push(b'\n');
+    self
+      .lines
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .push(line);
+  }
+
+  fn will_log(&self, _label: &str) -> bool {
+    true
+  }
+}
+
+fn append_hex(out: &mut Vec<u8>, bytes: &[u8]) {
+  const HEX: &[u8; 16] = b"0123456789abcdef";
+  for byte in bytes {
+    out.push(HEX[(byte >> 4) as usize]);
+    out.push(HEX[(byte & 0x0f) as usize]);
+  }
+}
 
 thread_local! {
   /// Per-connection cert-verification error sink, set just before each
@@ -3775,12 +3980,98 @@ fn normalize_pem_headers(pem: &[u8]) -> std::borrow::Cow<'_, [u8]> {
   std::borrow::Cow::Owned(s.into_bytes())
 }
 
+fn valid_sni_placeholder(len: usize) -> Option<String> {
+  if len == 0 || len > 253 {
+    return None;
+  }
+  let candidate = if len >= 5 {
+    format!("{}.com", "a".repeat(len - 4))
+  } else {
+    "a".repeat(len)
+  };
+  rustls::pki_types::ServerName::try_from(candidate.clone())
+    .ok()
+    .map(|_| candidate)
+}
+
+fn read_u16_be(buf: &[u8], offset: usize) -> Option<usize> {
+  Some(((*buf.get(offset)? as usize) << 8) | (*buf.get(offset + 1)? as usize))
+}
+
+fn read_u24_be(buf: &[u8], offset: usize) -> Option<usize> {
+  Some(
+    ((*buf.get(offset)? as usize) << 16)
+      | ((*buf.get(offset + 1)? as usize) << 8)
+      | (*buf.get(offset + 2)? as usize),
+  )
+}
+
+fn find_client_hello_sni(buf: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+  if *buf.first()? != 22 {
+    return None;
+  }
+  let record_len = read_u16_be(buf, 3)?;
+  if buf.len() < 5 + record_len || *buf.get(5)? != 1 {
+    return None;
+  }
+  let handshake_len = read_u24_be(buf, 6)?;
+  if handshake_len + 4 > record_len {
+    return None;
+  }
+
+  let mut offset = 9 + 2 + 32;
+  let session_id_len = *buf.get(offset)? as usize;
+  offset += 1 + session_id_len;
+  let cipher_suites_len = read_u16_be(buf, offset)?;
+  offset += 2 + cipher_suites_len;
+  let compression_methods_len = *buf.get(offset)? as usize;
+  offset += 1 + compression_methods_len;
+  let extensions_len = read_u16_be(buf, offset)?;
+  offset += 2;
+  let extensions_end = offset.checked_add(extensions_len)?;
+  if extensions_end > buf.len() {
+    return None;
+  }
+
+  while offset + 4 <= extensions_end {
+    let ext_type = read_u16_be(buf, offset)?;
+    let ext_len = read_u16_be(buf, offset + 2)?;
+    offset += 4;
+    let ext_end = offset.checked_add(ext_len)?;
+    if ext_end > extensions_end {
+      return None;
+    }
+    if ext_type == 0 {
+      let list_len = read_u16_be(buf, offset)?;
+      let mut name_offset = offset + 2;
+      let list_end = name_offset.checked_add(list_len)?;
+      if list_end > ext_end || name_offset + 3 > list_end {
+        return None;
+      }
+      let name_type = *buf.get(name_offset)?;
+      name_offset += 1;
+      let name_len = read_u16_be(buf, name_offset)?;
+      name_offset += 2;
+      if name_type == 0 && name_offset + name_len <= list_end {
+        return Some((
+          name_offset,
+          name_len,
+          buf[name_offset..name_offset + name_len].to_vec(),
+        ));
+      }
+      return None;
+    }
+    offset = ext_end;
+  }
+  None
+}
+
 /// Build a rustls ClientConfig from a SecureContext JS object.
 fn build_client_config(
   scope: &mut v8::PinScope,
   context: v8::Local<v8::Object>,
   op_state: &mut OpState,
-) -> Option<(rustls::ClientConfig, VerifyErrorStore)> {
+) -> Option<(rustls::ClientConfig, VerifyErrorStore, KeyLogStore)> {
   use deno_net::DefaultTlsOptions;
   use deno_tls::TlsKeys;
   use deno_tls::TlsKeysHolder;
@@ -4053,7 +4344,10 @@ fn build_client_config(
     config.client_auth_cert_resolver = resolver;
   }
 
-  Some((config, final_verify_error))
+  let keylog_lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+  config.key_log = Arc::new(NodeKeyLog::new(keylog_lines.clone()));
+
+  Some((config, final_verify_error, keylog_lines))
 }
 
 /// A `ClientCertVerifier` for `node:tls` servers that wraps
@@ -4206,14 +4500,20 @@ impl rustls::server::danger::ClientCertVerifier
 
   fn verify_client_cert(
     &self,
-    _end_entity: &rustls::pki_types::CertificateDer<'_>,
+    end_entity: &rustls::pki_types::CertificateDer<'_>,
     _intermediates: &[rustls::pki_types::CertificateDer<'_>],
     _now: rustls::pki_types::UnixTime,
   ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
     // No root CAs — we cannot verify anything.  Store an error for
-    // verifyError() and let the JS layer decide via `authorized`.
+    // verifyError() and let the JS layer decide via `authorized`.  OpenSSL
+    // reports self-signed leaf client certificates precisely even when the
+    // trust store is empty.
+    let code = extract_issuer_and_subject(end_entity.as_ref())
+      .filter(|(issuer, subject)| issuer == subject)
+      .map(|_| "DEPTH_ZERO_SELF_SIGNED_CERT")
+      .unwrap_or("UNABLE_TO_GET_ISSUER_CERT");
     *self.verify_error.lock().unwrap_or_else(|p| p.into_inner()) =
-      Some("UNABLE_TO_GET_ISSUER_CERT".to_string());
+      Some(code.to_string());
     Ok(rustls::server::danger::ClientCertVerified::assertion())
   }
 
@@ -4271,13 +4571,14 @@ impl rustls::server::danger::ClientCertVerifier
 }
 
 /// Build a rustls ServerConfig from a SecureContext JS object.
-/// Returns (config, verify_error_store) where the store is shared with
-/// `NodeClientCertVerifier` so the server-side JS can read client cert errors.
+/// Returns (config, verify_error_store, keylog_store). The verify store is
+/// shared with `NodeClientCertVerifier` so the server-side JS can read client
+/// cert errors; the keylog store is drained into Node-style `keylog` events.
 fn build_server_config(
   scope: &mut v8::PinScope,
   context: v8::Local<v8::Object>,
   op_state: &mut OpState,
-) -> Option<(rustls::ServerConfig, VerifyErrorStore)> {
+) -> Option<(rustls::ServerConfig, VerifyErrorStore, KeyLogStore)> {
   let protocol_versions = match get_protocol_versions(scope, context) {
     ProtocolVersionSelection::Default => {
       &[&rustls::version::TLS13, &rustls::version::TLS12][..]
@@ -4450,11 +4751,12 @@ fn build_server_config(
   // with a fatal alert and surfaces `Error::General("no server certificate
   // chain resolved")`, which `rustls_error_to_node_error` translates back
   // to Node's "no suitable signature algorithm" error.
+  let keylog_lines = Arc::new(std::sync::Mutex::new(Vec::new()));
   let Some(private_key) = private_key else {
-    return Some((
-      builder.with_cert_resolver(Arc::new(NoCertResolver)),
-      client_cert_verify_error,
-    ));
+    let mut server_config =
+      builder.with_cert_resolver(Arc::new(NoCertResolver));
+    server_config.key_log = Arc::new(NodeKeyLog::new(keylog_lines.clone()));
+    return Some((server_config, client_cert_verify_error, keylog_lines));
   };
 
   // `with_single_cert` runs `CertifiedKey::keys_match()`, which parses the
@@ -4516,7 +4818,8 @@ fn build_server_config(
   // ticketer above, so this only matters for TLS 1.2 peers.
   server_config.session_storage =
     rustls::server::ServerSessionMemoryCache::new(256);
-  Some((server_config, client_cert_verify_error))
+  server_config.key_log = Arc::new(NodeKeyLog::new(keylog_lines.clone()));
+  Some((server_config, client_cert_verify_error, keylog_lines))
 }
 
 /// A `ResolvesClientCert` that always returns the same `CertifiedKey`.

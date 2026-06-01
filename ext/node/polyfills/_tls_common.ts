@@ -22,7 +22,8 @@ const { isArrayBufferView } = core.loadExtScript(
 const { validateString } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
-const { op_node_validate_crl, op_node_validate_pfx } = core.ops;
+const { op_node_extract_pfx, op_node_validate_crl, op_node_validate_pfx } =
+  core.ops;
 const { createPrivateKey } = core.loadExtScript(
   "ext:deno_node/internal/crypto/keys.ts",
 );
@@ -379,6 +380,8 @@ class SecureContext {
     passphrase?: string;
     sigalgs?: string;
     ecdhCurve?: string;
+    enableTicketKeyCallback?: () => void;
+    _ticketKeyCallbackEnabled?: boolean;
   };
 
   constructor(options: any = {}) {
@@ -431,13 +434,15 @@ class SecureContext {
     validateKeyCertOption(options.key, "options.key", true);
     validateKeyCertOption(options.ca, "options.ca", false);
 
-    // Validate PFX / PKCS#12 data.
+    // Validate and unpack PFX / PKCS#12 data.
+    let pfxMaterial: { cert: string; key: string; ca: string[] } | null = null;
     if (options.pfx != null) {
       const pfxData = toUint8Array(options.pfx);
       const pfxPassphrase = options.passphrase != null
         ? String(options.passphrase)
         : null;
       op_node_validate_pfx(pfxData, pfxPassphrase);
+      pfxMaterial = op_node_extract_pfx(pfxData, pfxPassphrase);
     }
 
     // Validate CRL data.
@@ -458,12 +463,14 @@ class SecureContext {
 
     const { minVersion, maxVersion } = getProtocolRange(options);
 
-    const useDefaultCA = !options.ca;
+    const useDefaultCA = !options.ca && !pfxMaterial?.ca.length;
     this.context = {
-      ca: useDefaultCA ? undefined : normalizeCertValue(options.ca),
+      ca: useDefaultCA
+        ? undefined
+        : normalizeCertValue(options.ca ?? pfxMaterial?.ca),
       useDefaultCA,
-      cert: toStringOrUndefined(options.cert),
-      key: toStringOrUndefined(options.key),
+      cert: toStringOrUndefined(options.cert) ?? pfxMaterial?.cert,
+      key: toStringOrUndefined(options.key) ?? pfxMaterial?.key,
       minVersion,
       maxVersion,
       ciphers: options.ciphers,
@@ -491,6 +498,13 @@ class SecureContext {
         throw new TypeError("Illegal invocation");
       }
     };
+    (this.context as any).enableTicketKeyCallback =
+      function enableTicketKeyCallback(this: any) {
+        if (!secureContextBrand.has(this)) {
+          throw new TypeError("Illegal invocation");
+        }
+        this._ticketKeyCallbackEnabled = true;
+      };
     (this.context as any).addCACert = function addCACert(
       this: any,
       cert: any,

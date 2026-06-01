@@ -37,6 +37,7 @@ const {
   ERR_HTTP_HEADERS_SENT,
   ERR_HTTP_INVALID_HEADER_VALUE,
   ERR_HTTP_TRAILER_INVALID,
+  ERR_INVALID_ARG_VALUE,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_CHAR,
   ERR_INVALID_HTTP_TOKEN,
@@ -735,19 +736,22 @@ Object.defineProperties(
           // deno-lint-ignore guard-for-in
           for (const key in headers) {
             const entry = headers[key];
-            this._storeHeaderEntry(state, entry[0], entry[1]);
+            this._processHeader(state, entry[0], entry[1], false);
           }
         } else if (Array.isArray(headers)) {
           if (headers.length && Array.isArray(headers[0])) {
             // Array of arrays: [[name, value], ...]
             for (let i = 0; i < headers.length; i++) {
               const entry = headers[i];
-              this._storeHeaderEntry(state, entry[0], entry[1]);
+              this._processHeader(state, entry[0], entry[1], true);
             }
           } else {
             // Flat array: [name, value, name, value, ...]
+            if (headers.length % 2 !== 0) {
+              throw new ERR_INVALID_ARG_VALUE("headers", headers);
+            }
             for (let n = 0; n < headers.length; n += 2) {
-              this._storeHeaderEntry(state, headers[n], headers[n + 1]);
+              this._processHeader(state, headers[n], headers[n + 1], true);
             }
           }
         } else {
@@ -755,7 +759,7 @@ Object.defineProperties(
           const keys = Object.keys(headers);
           for (let i = 0; i < keys.length; i++) {
             const k = keys[i];
-            this._storeHeaderEntry(state, k, headers[k]);
+            this._processHeader(state, k, headers[k], true);
           }
         }
       }
@@ -854,19 +858,44 @@ Object.defineProperties(
       if (state.expect) this._send("");
     },
 
-    _storeHeaderEntry(state: any, field: string, value: any) {
-      if (Array.isArray(value)) {
-        // RFC 6265: join multiple Cookie values with '; '
-        if (isCookieField(field)) {
-          state.header += field + ": " + value.join("; ") + "\r\n";
-        } else {
-          for (let j = 0; j < value.length; j++) {
-            state.header += field + ": " + value[j] + "\r\n";
-          }
-        }
-      } else {
-        state.header += field + ": " + value + "\r\n";
+    _processHeader(
+      state: any,
+      field: string,
+      value: any,
+      validate: boolean,
+    ) {
+      if (validate) {
+        validateHeaderName(field);
       }
+
+      if (
+        Array.isArray(value) &&
+        (value.length < 2 || !isCookieField(field)) &&
+        (!this[kUniqueHeaders] ||
+          !this[kUniqueHeaders].has(field.toLowerCase()))
+      ) {
+        for (let i = 0; i < value.length; i++) {
+          this._storeHeaderEntry(state, field, value[i], validate);
+        }
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        value = value.join("; ");
+      }
+      this._storeHeaderEntry(state, field, value, validate);
+    },
+
+    _storeHeaderEntry(
+      state: any,
+      field: string,
+      value: any,
+      validate: boolean,
+    ) {
+      if (validate) {
+        validateHeaderValue(field, value);
+      }
+      state.header += field + ": " + value + "\r\n";
       this._matchHeader(state, field, value);
     },
 

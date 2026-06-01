@@ -4158,6 +4158,37 @@ pub enum PfxValidationError {
   #[class(generic)]
   #[error("mac verify failure")]
   MacVerifyFailure,
+  #[class(generic)]
+  #[error("missing key or certificate")]
+  MissingKeyOrCertificate,
+  #[class(type)]
+  #[error("very large data")]
+  VeryLargeData,
+  #[class(generic)]
+  #[error(transparent)]
+  Der(#[from] der::Error),
+}
+
+#[derive(deno_core::serde::Serialize)]
+pub struct PfxKeyMaterial {
+  cert: String,
+  key: String,
+  ca: Vec<String>,
+}
+
+fn pfx_der_to_pem(
+  label: &'static str,
+  data: &[u8],
+) -> Result<String, PfxValidationError> {
+  let pem_len = der::pem::encapsulated_len(label, LineEnding::LF, data.len())
+    .map_err(|_| PfxValidationError::VeryLargeData)?;
+  let mut out = vec![0; pem_len];
+  let mut writer = PemWriter::new(label, LineEnding::LF, &mut out)?;
+  writer.write(data)?;
+  let len = writer.finish()?;
+  out.truncate(len);
+
+  Ok(String::from_utf8(out).expect("invalid pem is not possible"))
 }
 
 #[op2]
@@ -4172,6 +4203,43 @@ pub fn op_node_validate_pfx(
     return Err(PfxValidationError::MacVerifyFailure);
   }
   Ok(())
+}
+
+#[op2]
+#[serde]
+pub fn op_node_extract_pfx(
+  #[buffer] pfx: &[u8],
+  #[string] passphrase: Option<String>,
+) -> Result<PfxKeyMaterial, PfxValidationError> {
+  let parsed =
+    Pkcs12::parse(pfx).map_err(|_| PfxValidationError::NotEnoughData)?;
+  let password = passphrase.as_deref().unwrap_or("");
+  if !parsed.verify_mac(password) {
+    return Err(PfxValidationError::MacVerifyFailure);
+  }
+
+  let certs = parsed
+    .cert_x509_bags(password)
+    .map_err(|_| PfxValidationError::NotEnoughData)?;
+  let keys = parsed
+    .key_bags(password)
+    .map_err(|_| PfxValidationError::NotEnoughData)?;
+  let cert = certs
+    .first()
+    .ok_or(PfxValidationError::MissingKeyOrCertificate)?;
+  let key = keys
+    .first()
+    .ok_or(PfxValidationError::MissingKeyOrCertificate)?;
+
+  Ok(PfxKeyMaterial {
+    cert: pfx_der_to_pem("CERTIFICATE", cert)?,
+    key: pfx_der_to_pem("PRIVATE KEY", key)?,
+    ca: certs
+      .iter()
+      .skip(1)
+      .map(|cert| pfx_der_to_pem("CERTIFICATE", cert))
+      .collect::<Result<Vec<_>, _>>()?,
+  })
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]

@@ -63,8 +63,8 @@ import { IncomingMessage } from "node:_http_incoming";
 const {
   connResetException,
   ERR_HTTP_HEADERS_SENT,
+  ERR_HTTP_INVALID_STATUS_CODE,
   ERR_HTTP_SOCKET_ASSIGNED,
-  ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
   ERR_INVALID_CHAR,
   ERR_OUT_OF_RANGE,
@@ -412,13 +412,11 @@ ServerResponse.prototype.writeHead = function writeHead(
     throw new ERR_HTTP_HEADERS_SENT("write");
   }
 
+  const originalStatusCode = statusCode;
+
   statusCode |= 0;
   if (statusCode < 100 || statusCode > 999) {
-    throw new ERR_INVALID_ARG_TYPE(
-      "statusCode",
-      "integer [100, 999]",
-      statusCode,
-    );
+    throw new ERR_HTTP_INVALID_STATUS_CODE(originalStatusCode);
   }
 
   if (typeof reason === "string") {
@@ -620,7 +618,6 @@ function socketOnEnd(server, socket, parser, state) {
   }
 
   if (!server.httpAllowHalfOpen) {
-    abortIncoming(state.incoming);
     if (socket.writable) socket.end();
   } else if (state.outgoing.length) {
     state.outgoing[state.outgoing.length - 1]._last = true;

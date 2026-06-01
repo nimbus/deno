@@ -78,6 +78,7 @@ const { X509Certificate } = core.loadExtScript(
 );
 
 const lazyTls = core.createLazyLoader("node:tls");
+const lazyProcess = core.createLazyLoader("node:process");
 
 const kConnectOptions = Symbol("connect-options");
 const kHandshakeTimer = Symbol("handshake-timer");
@@ -90,6 +91,7 @@ const noop = () => {};
 let debug = debuglog("tls", (fn) => {
   debug = fn;
 });
+let hasWarnedAboutAllowUnauthorized = false;
 
 function canonicalizeIP(ip) {
   return op_tls_canonicalize_ipv4_address(ip);
@@ -775,6 +777,15 @@ TLSSocket.prototype._init = function (socket, wrap) {
   }
 
   ssl.onerror = onerror;
+  ssl.onkeylog = function (line) {
+    const owner = this._owner;
+    if (!owner) return;
+    const keylog = Buffer.from(line);
+    owner.emit("keylog", keylog);
+    if (owner._tlsOptions?.isServer) {
+      owner._tlsOptions.server?.emit("keylog", keylog, owner);
+    }
+  };
 
   // Set SNICallback (already validated in constructor)
   if (options.isServer && options.SNICallback) {
@@ -890,7 +901,9 @@ TLSSocket.prototype._finishInit = function () {
       const sni = this._handle.getServername?.();
       this.servername = (sni !== undefined && sni !== null && sni !== "")
         ? sni
-        : (this._tlsOptions?.servername ?? null);
+        : (this._tlsOptions?.isServer
+          ? false
+          : (this._tlsOptions?.servername ?? null));
     }
   } catch (_e) {
     // getAlpnNegotiatedProtocol/getServername may not be available
@@ -1612,7 +1625,18 @@ function connect(...args) {
 }
 
 function getAllowUnauthorized() {
-  return false;
+  const process = lazyProcess().default;
+  const allowUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0";
+  if (allowUnauthorized && !hasWarnedAboutAllowUnauthorized) {
+    hasWarnedAboutAllowUnauthorized = true;
+    process.emitWarning(
+      "Setting the NODE_TLS_REJECT_UNAUTHORIZED environment variable to '0' " +
+        "makes TLS connections and HTTPS requests insecure by disabling " +
+        "certificate verification.",
+      "Warning",
+    );
+  }
+  return allowUnauthorized;
 }
 
 function createServer(options, listener) {
