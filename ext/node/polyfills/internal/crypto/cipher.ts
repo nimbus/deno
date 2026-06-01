@@ -90,8 +90,14 @@ function opensslError(code: string, reason: string): NodeError {
 
 function isAesWrap(cipher: string): boolean {
   return cipher === "aes128-wrap" || cipher === "aes192-wrap" ||
-    cipher === "aes256-wrap" || cipher === "id-aes128-wrap-pad" ||
+    cipher === "aes256-wrap" || cipher === "id-aes128-wrap" ||
+    cipher === "id-aes192-wrap" || cipher === "id-aes256-wrap" ||
+    cipher === "id-aes128-wrap-pad" ||
     cipher === "id-aes192-wrap-pad" || cipher === "id-aes256-wrap-pad";
+}
+
+function isEcbMode(cipher: string): boolean {
+  return cipher.endsWith("-ecb");
 }
 
 function isStringOrBuffer(
@@ -119,7 +125,7 @@ function validateCipherUpdateData(data: unknown): void {
 const NO_TAG = new Uint8Array();
 
 function toU8(
-  input: string | Uint8Array | KeyObject | null,
+  input: string | Uint8Array | KeyObject | null | undefined,
 ): Uint8Array {
   if (input == null) {
     return new Uint8Array(0);
@@ -128,6 +134,36 @@ function toU8(
     return op_node_export_secret_key(input[kHandle]);
   }
   return typeof input === "string" ? encode(input) : input;
+}
+
+function normalizeCipherIv(cipher: string, iv: any): Uint8Array {
+  if (iv === undefined) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "iv",
+      ["string", "ArrayBuffer", "Buffer", "TypedArray", "DataView"],
+      iv,
+    );
+  }
+
+  const ivBytes = toU8(iv);
+  if (isEcbMode(cipher) && ivBytes.byteLength !== 0) {
+    throw opensslError(
+      "ERR_CRYPTO_INVALID_IV",
+      "Invalid initialization vector",
+    );
+  }
+  return ivBytes;
+}
+
+function normalizeUnknownCipherError(err: unknown): never {
+  if (
+    err instanceof Error &&
+    typeof err.message === "string" &&
+    err.message.startsWith("Unknown cipher")
+  ) {
+    throw opensslError("ERR_CRYPTO_UNKNOWN_CIPHER", "Unknown cipher");
+  }
+  throw err;
 }
 
 function Cipheriv(
@@ -164,14 +200,19 @@ function Cipheriv(
     this._aesWrapIv = toU8(iv);
     this._context = 1; // non-zero sentinel; not used for wrap ops
   } else {
-    this._context = op_node_create_cipheriv(
-      cipher,
-      toU8(key),
-      toU8(iv),
-      authTagLength,
-    );
+    const ivBytes = normalizeCipherIv(cipher, iv);
+    try {
+      this._context = op_node_create_cipheriv(
+        cipher,
+        toU8(key),
+        ivBytes,
+        authTagLength,
+      );
+    } catch (err) {
+      normalizeUnknownCipherError(err);
+    }
     if (this._context == 0) {
-      throw new TypeError("Unknown cipher");
+      throw opensslError("ERR_CRYPTO_UNKNOWN_CIPHER", "Unknown cipher");
     }
   }
 
@@ -446,14 +487,19 @@ function Decipheriv(
     this._aesWrapIv = toU8(iv);
     this._context = 1; // non-zero sentinel; not used for wrap ops
   } else {
-    this._context = op_node_create_decipheriv(
-      cipher,
-      toU8(key),
-      toU8(iv),
-      authTagLength,
-    );
+    const ivBytes = normalizeCipherIv(cipher, iv);
+    try {
+      this._context = op_node_create_decipheriv(
+        cipher,
+        toU8(key),
+        ivBytes,
+        authTagLength,
+      );
+    } catch (err) {
+      normalizeUnknownCipherError(err);
+    }
     if (this._context == 0) {
-      throw new TypeError("Unknown cipher");
+      throw opensslError("ERR_CRYPTO_UNKNOWN_CIPHER", "Unknown cipher");
     }
   }
 
