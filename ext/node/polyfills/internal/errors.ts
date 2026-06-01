@@ -1652,8 +1652,8 @@ class ERR_HTTP_INVALID_HEADER_VALUE extends NodeTypeError {
   }
 }
 class ERR_HTTP_INVALID_STATUS_CODE extends NodeRangeError {
-  constructor(x: string) {
-    super("ERR_HTTP_INVALID_STATUS_CODE", `Invalid status code: ${x}`);
+  constructor(x: unknown) {
+    super("ERR_HTTP_INVALID_STATUS_CODE", format("Invalid status code: %s", x));
   }
 }
 class ERR_HTTP_SOCKET_ENCODING extends NodeError {

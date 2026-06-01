@@ -302,7 +302,7 @@ Agent.prototype.createConnection = function createConnection(
   return socket;
 };
 
-const globalAgent = new (Agent as any)({
+let globalAgent = new (Agent as any)({
   keepAlive: true,
   scheduling: "lifo",
   timeout: 5000,
@@ -349,7 +349,12 @@ return {
   Server,
   createServer,
   get,
-  globalAgent,
+  get globalAgent() {
+    return globalAgent;
+  },
+  set globalAgent(value) {
+    globalAgent = value;
+  },
   request,
 };
 })();
