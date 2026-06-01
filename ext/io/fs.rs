@@ -142,6 +142,7 @@ pub struct FsStat {
 pub struct FsStatFs {
   pub typ: u64,
   pub bsize: u64,
+  pub frsize: u64,
   pub blocks: u64,
   pub bfree: u64,
   pub bavail: u64,

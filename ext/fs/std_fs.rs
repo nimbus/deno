@@ -1021,6 +1021,7 @@ fn statfs(path: &Path, bigint: bool) -> FsResult<FsStatFs> {
         #[cfg(target_os = "openbsd")]
         typ: 0 as _,
         bsize: result.f_bsize as _,
+        frsize: result.f_bsize as _,
         blocks: result.f_blocks as _,
         bfree: result.f_bfree as _,
         bavail: result.f_bavail as _,
@@ -1042,6 +1043,7 @@ fn statfs(path: &Path, bigint: bool) -> FsResult<FsStatFs> {
         #[cfg(target_os = "openbsd")]
         typ: 0 as _,
         bsize: result.f_bsize as _,
+        frsize: result.f_bsize as _,
         blocks: result.f_blocks as _,
         bfree: result.f_bfree as _,
         bavail: result.f_bavail as _,
@@ -1090,6 +1092,7 @@ fn statfs(path: &Path, bigint: bool) -> FsResult<FsStatFs> {
     Ok(FsStatFs {
       typ: 0,
       bsize: (bytes_per_sector * sectors_per_cluster) as _,
+      frsize: (bytes_per_sector * sectors_per_cluster) as _,
       blocks: total_clusters as _,
       bfree: available_clusters as _,
       bavail: available_clusters as _,

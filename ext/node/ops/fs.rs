@@ -487,6 +487,7 @@ pub struct StatFs {
   #[to_v8(rename = "type")]
   pub typ: u64,
   pub bsize: u64,
+  pub frsize: u64,
   pub blocks: u64,
   pub bfree: u64,
   pub bavail: u64,
@@ -499,6 +500,7 @@ impl From<FsStatFs> for StatFs {
     StatFs {
       typ: s.typ,
       bsize: s.bsize,
+      frsize: s.frsize,
       blocks: s.blocks,
       bfree: s.bfree,
       bavail: s.bavail,
