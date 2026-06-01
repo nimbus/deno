@@ -1317,10 +1317,12 @@ Module._findPath = function (request, paths, isMain, parentPath) {
       const isDenoDirPackage = op_require_is_deno_dir_package(
         curPath,
       );
+      const isCommonJsNodeModulesRoot = curPath.length > 0 &&
+        op_require_path_basename(curPath) === "node_modules";
       const isRelative = op_require_is_request_relative(
         request,
       );
-      basePath = (isDenoDirPackage && !isRelative)
+      basePath = (isDenoDirPackage && !isCommonJsNodeModulesRoot && !isRelative)
         ? pathResolve(curPath, packageSpecifierSubPath(request))
         : pathResolve(curPath, request);
     }
@@ -1399,14 +1401,27 @@ Module._resolveLookupPaths = function (request, parent) {
   }
 
   if (
-    !usesLocalNodeModulesDir && parent?.filename && parent.filename.length > 0
+    !op_require_is_request_relative(request) &&
+    parent?.filename &&
+    parent.filename.length > 0
   ) {
-    const denoDirPath = op_require_resolve_deno_dir(
-      request,
-      parent.filename,
-    );
-    if (denoDirPath) {
-      ArrayPrototypePush(paths, denoDirPath);
+    const parentSearchRoots = [
+      parent.path,
+      op_require_path_dirname(parent.filename),
+    ];
+    for (const parentSearchRoot of new SafeArrayIterator(parentSearchRoots)) {
+      if (
+        typeof parentSearchRoot !== "string" ||
+        parentSearchRoot.length === 0
+      ) {
+        continue;
+      }
+      const parentNodeModulePaths = Module._nodeModulePaths(parentSearchRoot);
+      for (const parentPath of new SafeArrayIterator(parentNodeModulePaths)) {
+        if (!ArrayPrototypeIncludes(paths, parentPath)) {
+          ArrayPrototypePush(paths, parentPath);
+        }
+      }
     }
   }
   const lookupPathsResult = op_require_resolve_lookup_paths(
@@ -1415,7 +1430,27 @@ Module._resolveLookupPaths = function (request, parent) {
     parent?.filename ?? "",
   );
   if (lookupPathsResult) {
-    ArrayPrototypePush(paths, ...new SafeArrayIterator(lookupPathsResult));
+    for (const lookupPath of new SafeArrayIterator(lookupPathsResult)) {
+      if (!ArrayPrototypeIncludes(paths, lookupPath)) {
+        ArrayPrototypePush(paths, lookupPath);
+      }
+    }
+  }
+  if (
+    !usesLocalNodeModulesDir && parent?.filename && parent.filename.length > 0
+  ) {
+    const denoDirPath = op_require_resolve_deno_dir(
+      request,
+      parent.filename,
+    );
+    if (denoDirPath && !ArrayPrototypeIncludes(paths, denoDirPath)) {
+      ArrayPrototypePush(paths, denoDirPath);
+    }
+  }
+  for (const globalPath of new SafeArrayIterator(modulePaths)) {
+    if (!ArrayPrototypeIncludes(paths, globalPath)) {
+      ArrayPrototypePush(paths, globalPath);
+    }
   }
   return paths;
 };
@@ -2503,8 +2538,53 @@ Module.isBuiltin = isBuiltin;
 
 Module.createRequire = createRequire;
 
+function initGlobalPaths() {
+  const process = globalThis.process;
+  if (typeof process !== "object" || process === null) {
+    return op_require_init_paths();
+  }
+
+  const env = typeof process.env === "object" && process.env !== null
+    ? process.env
+    : {};
+  const isWindows = process.platform === "win32";
+  const delimiter = isWindows ? ";" : ":";
+  const homeDir = isWindows ? env.USERPROFILE : env.HOME;
+  const nodePath = env.NODE_PATH;
+  const paths = [];
+
+  if (typeof nodePath === "string" && nodePath.length > 0) {
+    for (const entry of StringPrototypeSplit(nodePath, delimiter)) {
+      if (entry.length > 0) {
+        ArrayPrototypePush(paths, entry);
+      }
+    }
+  }
+
+  if (typeof homeDir === "string" && homeDir.length > 0) {
+    ArrayPrototypePush(
+      paths,
+      op_require_path_resolve([homeDir, ".node_modules"]),
+    );
+    ArrayPrototypePush(
+      paths,
+      op_require_path_resolve([homeDir, ".node_libraries"]),
+    );
+  }
+
+  if (typeof process.execPath === "string" && process.execPath.length > 0) {
+    const prefixDir = op_require_path_resolve([process.execPath, "..", ".."]);
+    ArrayPrototypePush(
+      paths,
+      op_require_path_resolve([prefixDir, "lib", "node"]),
+    );
+  }
+
+  return paths;
+}
+
 Module._initPaths = function () {
-  const paths = op_require_init_paths();
+  const paths = initGlobalPaths();
   modulePaths = paths;
   Module.globalPaths = ArrayPrototypeSlice(modulePaths);
 };

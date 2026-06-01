@@ -379,6 +379,21 @@ const verify = verifyOneShot;
 /* Deprecated in Node.js, alias of randomBytes */
 const pseudoRandomBytes = randomBytes;
 
+function pendingDeprecationEnabled() {
+  if (getOptionValue("--pending-deprecation")) {
+    return true;
+  }
+  const nodeOptions = globalThis.process?.env?.NODE_OPTIONS;
+  if (
+    typeof nodeOptions === "string" &&
+    nodeOptions.split(/\s+/).includes("--pending-deprecation")
+  ) {
+    return true;
+  }
+  return Array.isArray(globalThis.process?.execArgv) &&
+    globalThis.process.execArgv.includes("--pending-deprecation");
+}
+
 const defaultExport = {
   Certificate,
   checkPrime,
@@ -455,7 +470,7 @@ function defineRandomBytesAlias(target: object, key: string) {
     enumerable: false,
     configurable: true,
     get() {
-      const value = getOptionValue("--pending-deprecation")
+      const value = pendingDeprecationEnabled()
         ? deprecate(randomBytes, `crypto.${key} is deprecated.`, "DEP0115")
         : randomBytes;
       Object.defineProperty(this, key, {

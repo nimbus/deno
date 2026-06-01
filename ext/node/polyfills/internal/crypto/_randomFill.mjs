@@ -5,7 +5,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_node_fill_random, op_node_fill_random_async } = core.ops;
+const { op_node_fill_random } = core.ops;
 
 const { Buffer, kMaxLength } = core.loadExtScript(
   "ext:deno_node/internal/buffer.mjs",
@@ -21,6 +21,8 @@ const {
   validateFunction,
   validateNumber,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
+
+const lazyProcess = core.createLazyLoader("node:process");
 
 const kMaxInt32 = 2 ** 31 - 1;
 const kMaxPossibleLength = Math.min(kMaxLength, kMaxInt32);
@@ -93,22 +95,18 @@ function randomFill(buf, offset, size, cb) {
     size = assertSize(size, elementSize, offset, buf.byteLength);
   }
 
-  if (size === 0) {
-    cb(null, buf);
-    return;
-  }
-
-  op_node_fill_random_async(size).then((randomData) => {
-    const randomBuf = Buffer.from(randomData.buffer);
-    const target = isAnyArrayBuffer(buf)
-      ? new Uint8Array(buf, offset, size)
-      : new Uint8Array(
-        buf.buffer,
-        buf.byteOffset + offset,
-        size,
-      );
-    target.set(new Uint8Array(randomBuf.buffer, 0, size));
-    cb(null, buf);
+  lazyProcess().default.nextTick(() => {
+    try {
+      if (size !== 0) {
+        const bytes = isAnyArrayBuffer(buf)
+          ? new Uint8Array(buf, offset, size)
+          : new Uint8Array(buf.buffer, buf.byteOffset + offset, size);
+        op_node_fill_random(bytes);
+      }
+      cb(null, buf);
+    } catch (err) {
+      cb(err);
+    }
   });
 }
 

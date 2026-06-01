@@ -9,6 +9,7 @@ const {
 const { validateFunction } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
+const lazyProcess = core.createLazyLoader("node:process");
 const {
   MathCeil,
   MathFloor,
@@ -81,7 +82,7 @@ function randomInt(
   const result = op_node_random_int(min, MathFloor(max as number));
 
   if (!isSync) {
-    callback!(null, result);
+    lazyProcess().default.nextTick(() => callback!(null, result));
     return;
   }
 
