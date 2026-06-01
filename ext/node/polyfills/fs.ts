@@ -70,6 +70,7 @@ const { clearTimeout, setTimeout } = lazyTimers();
 const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
 type MaybeEmpty<T> = T | null | undefined;
 const { deprecate, promisify } = core.loadExtScript("ext:deno_node/util.ts");
+const denoFs = core.loadExtScript("ext:deno_fs/30_fs.js");
 // internal/fs/{promises,streams,handle}.ts call `lazyFs()` at top-level to
 // build promisified wrappers around members of `node:fs`. Loading them
 // eagerly from inside fs.ts would re-enter the partially-loaded `node:fs`
@@ -186,8 +187,14 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/util.mjs");
 const lazyPath = core.createLazyLoader("node:path");
 const pathModule = lazyPath();
-const { basename, relative, resolve, toNamespacedPath } = pathModule;
+const { basename, isAbsolute, relative, resolve, toNamespacedPath } = pathModule;
 type Encoding = any;
+
+function resolvePathFromProcessCwd(path: string): string {
+  const cwd = denoFs.cwd();
+  return isAbsolute(path) ? path : resolve(cwd, path);
+}
+
 const {
   parseFileMode,
   validateAbortSignal,
@@ -786,7 +793,9 @@ function readFile(
   ) {
     pathOrRid = (pathOrRid as FileHandle).fd;
   } else if (typeof pathOrRid !== "number") {
-    pathOrRid = getValidatedPathToString(pathOrRid as string);
+    pathOrRid = resolvePathFromProcessCwd(
+      getValidatedPathToString(pathOrRid as string),
+    );
   }
 
   let cb: ReadFileCallback | undefined;
@@ -861,7 +870,9 @@ function readFileSync(
     data = op_node_fs_read_file_sync(path);
   } else {
     // Validate/convert path to string (throws on invalid types)
-    path = getValidatedPathToString(path as unknown as string);
+    path = resolvePathFromProcessCwd(
+      getValidatedPathToString(path as unknown as string),
+    );
 
     const flagsNumber = stringToFlags(options?.flag, "options.flag");
     try {
@@ -986,6 +997,7 @@ type StatFsOptions = {
 class StatFs<T> {
   type: T;
   bsize: T;
+  frsize: T;
   blocks: T;
   bfree: T;
   bavail: T;
@@ -994,6 +1006,7 @@ class StatFs<T> {
   constructor(
     type: T,
     bsize: T,
+    frsize: T,
     blocks: T,
     bfree: T,
     bavail: T,
@@ -1002,6 +1015,7 @@ class StatFs<T> {
   ) {
     this.type = type;
     this.bsize = bsize;
+    this.frsize = frsize;
     this.blocks = blocks;
     this.bfree = bfree;
     this.bavail = bavail;
@@ -1013,6 +1027,7 @@ class StatFs<T> {
 type StatFsOpResult = {
   type: number;
   bsize: number;
+  frsize: number;
   blocks: number;
   bfree: number;
   bavail: number;
@@ -1036,6 +1051,7 @@ function opResultToStatFs(
     return new StatFs(
       result.type,
       result.bsize,
+      result.frsize,
       result.blocks,
       result.bfree,
       result.bavail,
@@ -1046,6 +1062,7 @@ function opResultToStatFs(
   return new StatFs(
     BigInt(result.type),
     BigInt(result.bsize),
+    BigInt(result.frsize),
     BigInt(result.blocks),
     BigInt(result.bfree),
     BigInt(result.bavail),
@@ -1824,6 +1841,15 @@ type rmdirOptions = {
 
 type rmdirCallback = (err?: Error) => void;
 
+function moveDenoCwdBeforeRemovingLogicalCwd(path: string) {
+  const cwd = denoFs.cwd();
+  const target = resolve(path);
+  if (resolve(cwd) !== target) {
+    return;
+  }
+  denoFs.chdir(resolve(target, ".."));
+}
+
 function rmdir(
   path: string | Buffer | URL,
   callback: rmdirCallback,
@@ -1857,6 +1883,7 @@ function rmdir(
   path = getValidatedPathToString(path);
 
   validateRmdirOptions(options);
+  moveDenoCwdBeforeRemovingLogicalCwd(path);
   PromisePrototypeThen(
     op_node_rmdir(path),
     (_) => callback(),
@@ -1880,6 +1907,7 @@ function rmdirSync(path: string | Buffer | URL, options?: rmdirOptions) {
 
   validateRmdirOptions(options);
   try {
+    moveDenoCwdBeforeRemovingLogicalCwd(path);
     op_node_rmdir_sync(path);
   } catch (err) {
     throw (denoErrorToNodeError(err as Error, { syscall: "rmdir", path }));
@@ -1946,6 +1974,22 @@ function findFirstNonExistent(path: string): string | undefined {
   }
 }
 
+function mkdirDeletedCwdError(path: string): Error | null {
+  if (isAbsolute(path)) {
+    return null;
+  }
+  try {
+    Deno.statSync(process.cwd());
+    return null;
+  } catch (_err) {
+    return uvException({
+      errno: codeMap.get("ENOENT")!,
+      syscall: "mkdir",
+      path,
+    });
+  }
+}
+
 type MkdirOptions =
   | { recursive?: boolean; mode?: number | undefined }
   | number
@@ -1976,6 +2020,14 @@ function mkdir(
     }
   }
   validateBoolean(recursive, "options.recursive");
+
+  const deletedCwdError = mkdirDeletedCwdError(path);
+  if (deletedCwdError !== null) {
+    if (typeof callback === "function") {
+      callback(deletedCwdError);
+      return;
+    }
+  }
 
   let firstNonExistent: string | undefined;
   try {
@@ -2030,6 +2082,11 @@ function mkdirSync(
     }
   }
   validateBoolean(recursive, "options.recursive");
+
+  const deletedCwdError = mkdirDeletedCwdError(path);
+  if (deletedCwdError !== null) {
+    throw deletedCwdError;
+  }
 
   let firstNonExistent: string | undefined;
   try {
@@ -2219,6 +2276,81 @@ type OpenFlags =
 
 type OpenCallback = (err: Error | null, fd?: number) => void;
 
+function openFlagsRequireExclusiveCreate(flags: number): boolean {
+  return (flags & fsConstants.O_EXCL) !== 0;
+}
+
+function openPathStatus(path: string): "exists" | "missing" | "unknown" {
+  try {
+    Deno.statSync(path);
+    return "exists";
+  } catch (err) {
+    const nodeError = denoErrorToNodeError(err as Error, {
+      syscall: "stat",
+      path,
+    }) as NodeJS.ErrnoException;
+    const message = String(nodeError.message ?? (err as Error).message ?? "");
+    if (
+      nodeError.code === "ENOENT" ||
+      message.includes("ENOENT") ||
+      message.includes("os error 2")
+    ) {
+      return "missing";
+    }
+    return "unknown";
+  }
+}
+
+function openPathError(
+  code: "EEXIST" | "ENOENT",
+  path: string,
+): NodeJS.ErrnoException {
+  const error = uvException({
+    errno: codeMap.get(code)!,
+    syscall: "open",
+    path,
+  }) as NodeJS.ErrnoException;
+  if (error.code === undefined) {
+    error.code = code;
+  }
+  if (error.path === undefined) {
+    error.path = path;
+  }
+  if (error.syscall === undefined) {
+    error.syscall = "open";
+  }
+  return error;
+}
+
+function normalizeOpenError(
+  err: Error,
+  path: string,
+  flags: number,
+): NodeJS.ErrnoException {
+  const nodeError = denoErrorToNodeError(err, { syscall: "open", path }) as
+    NodeJS.ErrnoException;
+  const message = String(nodeError.message ?? err.message ?? "");
+  const invalidArgument = message === "invalid_argument";
+  const missingLike = nodeError.code === "ENOENT" ||
+    message.includes("ENOENT") ||
+    message.includes("os error 2");
+
+  if (invalidArgument || missingLike) {
+    const status = openPathStatus(path);
+    if (openFlagsRequireExclusiveCreate(flags) && status === "exists") {
+      return openPathError("EEXIST", path);
+    }
+    if (status === "missing" || missingLike) {
+      return openPathError("ENOENT", path);
+    }
+  }
+
+  if (nodeError.path === undefined) {
+    nodeError.path = path;
+  }
+  return nodeError;
+}
+
 function open(path: string | Buffer | URL, callback: OpenCallback): void;
 function open(
   path: string | Buffer | URL,
@@ -2237,7 +2369,7 @@ function open(
   mode?: OpenCallback | number,
   callback?: OpenCallback,
 ) {
-  path = getValidatedPathToString(path);
+  path = resolvePathFromProcessCwd(getValidatedPathToString(path));
   if (arguments.length < 3) {
     callback = flags as any;
     flags = "r";
@@ -2267,7 +2399,7 @@ function open(
     },
     (err: Error) => {
       unregisterActiveRequest(request);
-      callback(denoErrorToNodeError(err, { syscall: "open", path }));
+      callback(normalizeOpenError(err, path, flags));
     },
   );
 }
@@ -2288,7 +2420,7 @@ function openSync(
   flags: OpenFlags = "r",
   maybeMode?: number,
 ) {
-  path = getValidatedPathToString(path);
+  path = resolvePathFromProcessCwd(getValidatedPathToString(path));
   flags = stringToFlags(flags);
   const mode = parseFileMode(maybeMode, "mode", 0o666);
 
@@ -2711,6 +2843,7 @@ async function _writeFileGetRid(
   if (typeof pathOrRid === "number") {
     return pathOrRid;
   }
+  pathOrRid = resolvePathFromProcessCwd(pathOrRid);
   try {
     return await op_node_open(pathOrRid, stringToFlags(flag), 0o666);
   } catch (err) {
@@ -2728,6 +2861,7 @@ function _writeFileGetRidSync(
   if (typeof pathOrRid === "number") {
     return pathOrRid;
   }
+  pathOrRid = resolvePathFromProcessCwd(pathOrRid);
   try {
     return op_node_open_sync(pathOrRid, stringToFlags(flag), 0o666);
   } catch (err) {
@@ -3002,6 +3136,7 @@ function truncate(
   lenOrCallback: number | CallbackWithError = 0,
   maybeCallback?: CallbackWithError,
 ) {
+  path = getValidatedPathToString(path);
   let len: number = 0;
   let callback: CallbackWithError | undefined;
   if (typeof lenOrCallback === "function") {
@@ -3022,6 +3157,27 @@ function truncate(
   // truncate error.
   open(path, "r+", (openErr, fd) => {
     if (openErr) {
+      const code = (openErr as NodeJS.ErrnoException).code;
+      const message = String((openErr as Error).message ?? "");
+      if (
+        code === "ENOENT" ||
+        message === "invalid_argument" ||
+        message.includes("ENOENT") ||
+        message.includes("os error 2")
+      ) {
+        const enoent = new Error(
+          `ENOENT: no such file or directory, open '${path}'`,
+        ) as NodeJS.ErrnoException;
+        enoent.code = "ENOENT";
+        enoent.errno = codeMap.get("ENOENT");
+        enoent.syscall = "open";
+        enoent.path = path;
+        callback(enoent);
+        return;
+      }
+      if ((openErr as NodeJS.ErrnoException).path === undefined) {
+        (openErr as NodeJS.ErrnoException).path = path;
+      }
       callback(openErr);
       return;
     }
@@ -3379,22 +3535,26 @@ type watchOptions = {
   persistent?: boolean;
   recursive?: boolean;
   encoding?: string;
+  throwIfNoEntry?: boolean;
   signal?: AbortSignal;
   ignore?: IgnoreOption;
 };
 
 type watchListener = (
   eventType: string,
-  filename: string | Buffer,
+  filename: string | Buffer | null,
 ) => void;
 
 // Match Node: `encoding: 'buffer'` returns a Buffer, any other named encoding
 // returns the filename re-encoded from utf8. Default ('utf8' or absent) leaves
 // the string unchanged. https://github.com/nodejs/node/blob/main/lib/internal/fs/watchers.js
 function encodeWatchFilename(
-  filename: string,
+  filename: string | null,
   encoding: string | undefined,
-): string | Buffer {
+): string | Buffer | null {
+  if (filename === null) {
+    return null;
+  }
   if (!encoding || encoding === "utf8" || encoding === "utf-8") {
     return filename;
   }
@@ -3451,11 +3611,32 @@ function watch(
   }
   const recursive = options?.recursive || false;
   const encoding = options?.encoding;
+  const throwIfNoEntry = options?.throwIfNoEntry ?? true;
   validateIgnoreOption(options?.ignore, "options.ignore");
   const ignoreMatcher = createIgnoreMatcher(options?.ignore);
-  const iterator: Deno.FsWatcher = Deno.watchFs(watchPath, {
-    recursive,
-  });
+  let iterator: Deno.FsWatcher;
+  try {
+    iterator = Deno.watchFs(watchPath, {
+      recursive,
+    });
+  } catch (err) {
+    const nodeErr = denoErrorToNodeError(err as Error, {
+      syscall: "watch",
+      path: watchPath,
+    }) as NodeJS.ErrnoException;
+    if (!throwIfNoEntry && nodeErr.code === "ENOENT") {
+      return new FSWatcher(
+        () => {},
+        () =>
+          ({
+            close() {},
+            ref() {},
+            unref() {},
+          }) as Deno.FsWatcher,
+      );
+    }
+    throw nodeErr;
+  }
 
   // Resolve the watched path once so we can compute relative paths.
   // Use realPathSync to resolve symlinks (e.g. macOS /var -> /private/var)
@@ -3466,9 +3647,12 @@ function watch(
     if (done) return;
     // Node.js returns the relative path from the watched directory for
     // recursive watches, but just the basename for non-recursive watches.
-    const filename = recursive
-      ? relative(resolvedWatchPath, val.paths[0])
-      : basename(val.paths[0]);
+    const eventPath = val.paths[0] ?? null;
+    const filename = eventPath === null
+      ? null
+      : recursive
+      ? relative(resolvedWatchPath, eventPath)
+      : basename(eventPath);
     if (ignoreMatcher !== null && ignoreMatcher(filename)) {
       return;
     }

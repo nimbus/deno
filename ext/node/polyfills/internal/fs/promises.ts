@@ -14,7 +14,10 @@ import { readdirPromise } from "ext:deno_node/_fs/_fs_readdir.ts";
 const { lstatPromise } = core.loadExtScript("ext:deno_node/_fs/_fs_lstat.ts");
 const lazyFs = core.createLazyLoader("node:fs");
 import { globPromise } from "ext:deno_node/_fs/_fs_glob.ts";
-import { getValidatedPathToString } from "ext:deno_node/internal/fs/utils.mjs";
+import {
+  getValidatedPathToString,
+  validateStringAfterArrayBufferView,
+} from "ext:deno_node/internal/fs/utils.mjs";
 import type { Buffer } from "node:buffer";
 import Dir from "ext:deno_node/_fs/_fs_dir.ts";
 import { FileHandle } from "ext:deno_node/internal/fs/handle.ts";
@@ -29,8 +32,12 @@ const { ERR_METHOD_NOT_IMPLEMENTED, aggregateTwoErrors } = core.loadExtScript(
 );
 const lazyPath = core.createLazyLoader("node:path");
 const lazyProcess = core.createLazyLoader("node:process");
+const { isIterable } = core.loadExtScript(
+  "ext:deno_node/internal/streams/utils.js",
+);
 
 const {
+  ArrayBufferIsView,
   ObjectPrototypeIsPrototypeOf,
   Promise,
   PromiseReject,
@@ -326,6 +333,16 @@ const rawWriteFilePromise = lazyPromisifyFs("writeFile") as (
   options?: Encodings | WriteFileOptions,
 ) => Promise<void>;
 
+function isCustomIterable(obj: unknown): boolean {
+  return isIterable(obj) && !ArrayBufferIsView(obj) && typeof obj !== "string";
+}
+
+function validateWriteFileData(data: unknown) {
+  if (!ArrayBufferIsView(data) && !isCustomIterable(data)) {
+    validateStringAfterArrayBufferView(data, "data");
+  }
+}
+
 // Mirrors Node's lib/internal/fs/promises.js writeFile(): when given a path,
 // open a FileHandle and delegate via handleFdClose so the close error
 // semantics are observable; when given an fd/FileHandle, write directly.
@@ -338,6 +355,7 @@ function writeFilePromise(
     | AsyncIterable<NodeJS.TypedArray | string>,
   options?: Encodings | WriteFileOptions,
 ): Promise<void> {
+  validateWriteFileData(data);
   if (
     typeof pathOrRid === "number" ||
     ObjectPrototypeIsPrototypeOf(FileHandle.prototype, pathOrRid)

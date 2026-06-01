@@ -272,7 +272,14 @@ function fromAsyncGen(fn) {
       _resolve({ done: true, cb });
     },
     destroy(err, cb) {
-      ac.abort();
+      ac.abort(err);
+
+      if (resolve !== null) {
+        const _resolve = resolve;
+        resolve = null;
+        _resolve({ done: true, cb() {} });
+      }
+
       cb(err);
     },
   };
@@ -358,7 +365,7 @@ function _duplexify(pair) {
     eos(r, (err) => {
       readable = false;
       if (err) {
-        destroyer(r, err);
+        destroyer(w, err);
       }
       onfinished(err);
     });
