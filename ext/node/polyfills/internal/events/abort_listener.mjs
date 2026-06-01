@@ -6,6 +6,7 @@ const { queueMicrotask, SymbolDispose } = primordials;
 const { validateAbortSignal, validateFunction } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
+const abortSignal = core.loadExtScript("ext:deno_web/03_abort_signal.js");
 const { codes } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { ERR_INVALID_ARG_TYPE } = codes;
 
@@ -25,12 +26,13 @@ function addAbortListener(signal, listener) {
   if (signal.aborted) {
     queueMicrotask(() => listener({ target: signal }));
   } else {
-    signal.addEventListener("abort", listener, {
-      __proto__: null,
-      once: true,
-    });
+    const handler = () => {
+      removeEventListener?.();
+      listener({ target: signal });
+    };
+    signal[abortSignal.add](handler);
     removeEventListener = () => {
-      signal.removeEventListener("abort", listener);
+      signal[abortSignal.remove](handler);
     };
   }
   return {
