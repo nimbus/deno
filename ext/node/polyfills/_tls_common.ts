@@ -444,6 +444,8 @@ class SecureContext {
     passphrase?: string;
     sigalgs?: string;
     ecdhCurve?: string;
+    enableTicketKeyCallback?: () => void;
+    _ticketKeyCallbackEnabled?: boolean;
   };
 
   constructor(options: any = {}) {
@@ -595,6 +597,13 @@ class SecureContext {
         throw new TypeError("Illegal invocation");
       }
     };
+    (this.context as any).enableTicketKeyCallback =
+      function enableTicketKeyCallback(this: any) {
+        if (!secureContextBrand.has(this)) {
+          throw new TypeError("Illegal invocation");
+        }
+        this._ticketKeyCallbackEnabled = true;
+      };
     (this.context as any).addCACert = function addCACert(
       this: any,
       cert: any,

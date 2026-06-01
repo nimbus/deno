@@ -187,7 +187,8 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/util.mjs");
 const lazyPath = core.createLazyLoader("node:path");
 const pathModule = lazyPath();
-const { basename, isAbsolute, relative, resolve, toNamespacedPath } = pathModule;
+const { basename, isAbsolute, relative, resolve, toNamespacedPath } =
+  pathModule;
 type Encoding = any;
 
 function resolvePathFromProcessCwd(path: string): string {
@@ -2327,8 +2328,10 @@ function normalizeOpenError(
   path: string,
   flags: number,
 ): NodeJS.ErrnoException {
-  const nodeError = denoErrorToNodeError(err, { syscall: "open", path }) as
-    NodeJS.ErrnoException;
+  const nodeError = denoErrorToNodeError(err, {
+    syscall: "open",
+    path,
+  }) as NodeJS.ErrnoException;
   const message = String(nodeError.message ?? err.message ?? "");
   const invalidArgument = message === "invalid_argument";
   const missingLike = nodeError.code === "ENOENT" ||

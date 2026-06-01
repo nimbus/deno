@@ -2217,7 +2217,9 @@ function formatProperty(
 ) {
   let name, str;
   let extra = " ";
-  if (desc === undefined && key === "byteLength" && isAnyArrayBuffer(original)) {
+  if (
+    desc === undefined && key === "byteLength" && isAnyArrayBuffer(original)
+  ) {
     let byteLength;
     try {
       byteLength = ArrayBufferPrototypeGetByteLength(original);
