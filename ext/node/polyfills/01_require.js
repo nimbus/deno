@@ -1311,8 +1311,9 @@ Module._findPath = function (request, paths, isMain, parentPath) {
       const isDenoDirPackage = op_require_is_deno_dir_package(
         curPath,
       );
-      const isCommonJsNodeModulesRoot = curPath.length > 0 &&
-        op_require_path_basename(curPath) === "node_modules";
+      const isCommonJsNodeModulesRoot = curPath === "node_modules" ||
+        StringPrototypeEndsWith(curPath, "/node_modules") ||
+        StringPrototypeEndsWith(curPath, "\\node_modules");
       const isRelative = op_require_is_request_relative(
         request,
       );

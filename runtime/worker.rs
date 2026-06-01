@@ -1171,6 +1171,7 @@ fn common_runtime(opts: CommonRuntimeOptions) -> JsRuntime {
       .enable_stack_trace_arg_in_ops
       .then(create_permissions_stack_trace_callback),
     extension_code_cache: None,
+    use_locker: false,
     v8_platform: None,
     custom_module_evaluation_cb: None,
     eval_context_code_cache_cbs: None,

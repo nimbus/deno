@@ -301,12 +301,13 @@ Deno.test({
 Deno.test({
   name: "createCipheriv - invalid algorithm",
   fn() {
-    assertThrows(
+    const err = assertThrows(
       () =>
         crypto.createCipheriv("foo", new Uint8Array(16), new Uint8Array(16)),
-      TypeError,
+      Error,
       "Unknown cipher",
-    );
+    ) as Error & { code?: string };
+    assertEquals(err.code, "ERR_CRYPTO_UNKNOWN_CIPHER");
   },
 });
 
@@ -356,12 +357,13 @@ Deno.test({
 Deno.test({
   name: "createDecipheriv - invalid algorithm",
   fn() {
-    assertThrows(
+    const err = assertThrows(
       () =>
         crypto.createDecipheriv("foo", new Uint8Array(16), new Uint8Array(16)),
-      TypeError,
+      Error,
       "Unknown cipher",
-    );
+    ) as Error & { code?: string };
+    assertEquals(err.code, "ERR_CRYPTO_UNKNOWN_CIPHER");
   },
 });
 
@@ -418,7 +420,8 @@ Deno.test({
       return zeros(+cipher.match(/\d+/)![0] / 8);
     };
     const getZeroIv = (cipher: string) => {
-      if (cipher.includes("gcm") || cipher.includes("ecb")) {
+      if (cipher.includes("ecb")) return zeros(0);
+      if (cipher.includes("gcm")) {
         return zeros(12);
       }
       if (cipher === "chacha20-poly1305") return zeros(12);

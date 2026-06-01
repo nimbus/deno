@@ -634,6 +634,7 @@ impl WebWorker {
         .then(crate::worker::create_permissions_stack_trace_callback),
       extension_code_cache: None,
       skip_op_registration: false,
+      use_locker: false,
       v8_platform: None,
       is_main: false,
       worker_id: Some(options.worker_id.0),

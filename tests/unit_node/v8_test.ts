@@ -25,7 +25,6 @@ Deno.test({
       "number_of_detached_contexts",
       "number_of_native_contexts",
       "peak_malloced_memory",
-      "total_allocated_bytes",
       "total_available_size",
       "total_global_handles_size",
       "total_heap_size",
@@ -34,6 +33,11 @@ Deno.test({
       "used_global_handles_size",
       "used_heap_size",
     ];
+    const nodeMajor = Number(process.versions.node.split(".")[0]);
+    if (nodeMajor >= 26) {
+      keys.push("total_allocated_bytes");
+      keys.sort();
+    }
     assertEquals(Object.keys(s).sort(), keys);
     for (const k of keys) {
       assertEquals(
@@ -86,6 +90,8 @@ Deno.test({
       format: "count",
     });
     assertEquals(after - before >= 50, true);
+    const defaultCount = v8.queryObjects(QueryObjectsTestFixture) as number;
+    assertEquals(defaultCount >= after, true);
 
     const summary = v8.queryObjects(QueryObjectsTestFixture, {
       format: "summary",
