@@ -999,7 +999,7 @@ function formatRaw(ctx, value, recurseTimes, typedArray, proxyDetails) {
           formatter = formatArrayBuffer;
         } else if (keys.length === 0 && protoProps === undefined) {
           return prefix +
-            `{ byteLength: ${
+            `{ [byteLength]: ${
               formatNumber(ctx.stylize, TypedArrayPrototypeGetByteLength(value))
             } }`;
         }
@@ -2204,6 +2204,15 @@ function formatProperty(
 ) {
   let name, str;
   let extra = " ";
+  if (desc === undefined && key === "byteLength" && isAnyArrayBuffer(original)) {
+    let byteLength;
+    try {
+      byteLength = ArrayBufferPrototypeGetByteLength(original);
+    } catch {
+      byteLength = getSharedArrayBufferByteLength(original);
+    }
+    desc = { value: byteLength, enumerable: false };
+  }
   desc = desc || ObjectGetOwnPropertyDescriptor(value, key) ||
     { value: value[key], enumerable: true };
   if (desc.value !== undefined) {
