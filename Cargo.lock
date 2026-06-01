@@ -6550,7 +6550,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -11291,8 +11291,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "149.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46dccf61a364b61bbaac70a8ba64a1a1006e87123b7d62eaeec999a3ba31ecdb"
+source = "git+https://github.com/nimbus/rusty_v8?tag=v149.2.0-nimbus.1#ce6663111a3ff8fde06bc04ba19bbbced60dbc8d"
 dependencies = [
  "bindgen 0.72.1",
  "bitflags 2.9.3",
