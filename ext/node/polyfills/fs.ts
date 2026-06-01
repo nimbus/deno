@@ -220,6 +220,15 @@ const {
   createFSReqCallback,
   unregisterActiveRequest,
 } = core.loadExtScript("ext:deno_node/internal/process/active_resources.ts");
+const {
+  emitAfter,
+  emitBefore,
+  emitDestroy,
+  emitInit,
+  enabledHooksExist,
+  executionAsyncId,
+  newAsyncId,
+} = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 
 const {
   ArrayBufferIsView,
@@ -257,6 +266,13 @@ const {
   Uint8Array,
   queueMicrotask,
 } = primordials;
+
+const nimbusAsyncHooksSuppressionDepth = SymbolFor(
+  "nimbus.asyncHooksSuppressionDepth",
+);
+const nimbusAsyncHooksSuppressedPromises = SymbolFor(
+  "nimbus.asyncHooksSuppressedPromises",
+);
 
 const { TextEncoder } = core.loadExtScript(
   "ext:deno_web/08_text_encoding.js",
@@ -1159,52 +1175,114 @@ function access(
   path = getValidatedPath(path).toString();
   mode = getValidMode(mode, "access");
   const cb = makeCallback(callback);
+  const request = createFSReqCallback();
+  const asyncHooksEnabled = enabledHooksExist();
+  const asyncId = asyncHooksEnabled ? newAsyncId() : 0;
+  const triggerAsyncId = asyncHooksEnabled ? executionAsyncId() : 0;
 
-  // deno-lint-ignore prefer-primordials
-  Deno.lstat(path).then(
-    (info) => {
-      if (info.mode === null) {
-        cb(null);
-        return;
-      }
-      let m = +mode || 0;
-      let fileMode = +info.mode || 0;
+  if (asyncHooksEnabled) {
+    emitInit(asyncId, "FSREQCALLBACK", triggerAsyncId, request);
+  }
 
-      if (Deno.build.os === "windows") {
-        m &= ~fsConstants.X_OK;
-      } else if (info.uid === Deno.uid()) {
-        fileMode >>= 6;
-      }
+  function finish(err: Error | null) {
+    unregisterActiveRequest(request);
+    if (!asyncHooksEnabled) {
+      cb(err);
+      return;
+    }
+    emitBefore(asyncId);
+    try {
+      cb(err);
+    } finally {
+      emitAfter(asyncId);
+      emitDestroy(asyncId);
+    }
+  }
 
-      if ((m & fileMode) === m) {
-        cb(null);
-      } else {
-        const e: any = new Error(
-          `EACCES: permission denied, access '${path}'`,
-        );
-        e.path = path;
-        e.syscall = "access";
-        e.errno = codeMap.get("EACCES");
-        e.code = "EACCES";
-        cb(e);
-      }
-    },
-    (err) => {
-      // deno-lint-ignore prefer-primordials
-      if (err instanceof Deno.errors.NotFound) {
-        const e: any = new Error(
-          `ENOENT: no such file or directory, access '${path}'`,
-        );
-        e.path = path;
-        e.syscall = "access";
-        e.errno = codeMap.get("ENOENT");
-        e.code = "ENOENT";
-        cb(e);
-      } else {
-        cb(err);
-      }
-    },
-  );
+  function queueFinish(err: Error | null) {
+    queueMicrotask(() => finish(err));
+  }
+
+  function suppressInternalPromise(promise: Promise<unknown>) {
+    let suppressedPromises = globalThis[nimbusAsyncHooksSuppressedPromises];
+    if (suppressedPromises === undefined) {
+      suppressedPromises = new WeakSet();
+      ObjectDefineProperty(globalThis, nimbusAsyncHooksSuppressedPromises, {
+        __proto__: null,
+        value: suppressedPromises,
+        configurable: true,
+        enumerable: false,
+        writable: false,
+      });
+    }
+    suppressedPromises.add(promise);
+    return promise;
+  }
+
+  const previousSuppressionDepth =
+    globalThis[nimbusAsyncHooksSuppressionDepth] || 0;
+  globalThis[nimbusAsyncHooksSuppressionDepth] = previousSuppressionDepth + 1;
+  try {
+    const accessPromise = suppressInternalPromise(Deno.lstat(path));
+    suppressInternalPromise(PromisePrototypeThen(
+      accessPromise,
+      (info) => {
+        if (info.mode === null) {
+          queueFinish(null);
+          return;
+        }
+        let m = +mode || 0;
+        let fileMode = +info.mode || 0;
+
+        if (Deno.build.os === "windows") {
+          m &= ~fsConstants.X_OK;
+        } else if (info.uid === Deno.uid()) {
+          fileMode >>= 6;
+        }
+
+        if ((m & fileMode) === m) {
+          queueFinish(null);
+        } else {
+          const e: any = new Error(
+            `EACCES: permission denied, access '${path}'`,
+          );
+          e.path = path;
+          e.syscall = "access";
+          e.errno = codeMap.get("EACCES");
+          e.code = "EACCES";
+          queueFinish(e);
+        }
+      },
+      (err) => {
+        // deno-lint-ignore prefer-primordials
+        if (err instanceof Deno.errors.NotFound) {
+          const e: any = new Error(
+            `ENOENT: no such file or directory, access '${path}'`,
+          );
+          e.path = path;
+          e.syscall = "access";
+          e.errno = codeMap.get("ENOENT");
+          e.code = "ENOENT";
+          queueFinish(e);
+        } else {
+          queueFinish(err);
+        }
+      },
+    ));
+  } catch (err) {
+    unregisterActiveRequest(request);
+    if (asyncHooksEnabled) {
+      emitDestroy(asyncId);
+    }
+    throw err;
+  } finally {
+    if (previousSuppressionDepth === 0) {
+      delete globalThis[nimbusAsyncHooksSuppressionDepth];
+    } else {
+      globalThis[nimbusAsyncHooksSuppressionDepth] =
+        previousSuppressionDepth;
+    }
+  }
 }
 
 function accessSync(path: string | Buffer | URL, mode?: number) {
