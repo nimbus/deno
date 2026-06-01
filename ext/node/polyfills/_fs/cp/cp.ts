@@ -246,6 +246,16 @@ function onDir(
     const srcMode = Number(statInfo & CpEntryFlags.SrcModeMask);
     return mkDirAndCopy(srcMode, src, dest, opts);
   }
+  if (opts.errorOnExist && !opts.force) {
+    const { EEXIST } = lazyConstants();
+    throw new ERR_FS_CP_EEXIST({
+      message: `${dest} already exists`,
+      path: dest,
+      syscall: "cp",
+      errno: EEXIST,
+      code: "EEXIST",
+    });
+  }
   return copyDir(src, dest, opts);
 }
 
