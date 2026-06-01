@@ -37,19 +37,15 @@ const { validateString } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
 const {
-  CHAR_0,
-  CHAR_9,
   CHAR_AT,
   CHAR_BACKWARD_SLASH,
   CHAR_CARRIAGE_RETURN,
+  CHAR_COLON,
   CHAR_CIRCUMFLEX_ACCENT,
-  CHAR_DOT,
   CHAR_DOUBLE_QUOTE,
-  CHAR_FORM_FEED,
   CHAR_FORWARD_SLASH,
   CHAR_GRAVE_ACCENT,
   CHAR_HASH,
-  CHAR_HYPHEN_MINUS,
   CHAR_LEFT_ANGLE_BRACKET,
   CHAR_LEFT_CURLY_BRACKET,
   CHAR_LEFT_SQUARE_BRACKET,
@@ -58,7 +54,6 @@ const {
   CHAR_LOWERCASE_Z,
   CHAR_NO_BREAK_SPACE,
   CHAR_PERCENT,
-  CHAR_PLUS,
   CHAR_QUESTION_MARK,
   CHAR_RIGHT_ANGLE_BRACKET,
   CHAR_RIGHT_CURLY_BRACKET,
@@ -67,9 +62,6 @@ const {
   CHAR_SINGLE_QUOTE,
   CHAR_SPACE,
   CHAR_TAB,
-  CHAR_UNDERSCORE,
-  CHAR_UPPERCASE_A,
-  CHAR_UPPERCASE_Z,
   CHAR_VERTICAL_LINE,
   CHAR_ZERO_WIDTH_NOBREAK_SPACE,
 } = core.loadExtScript("ext:deno_node/path/_constants.ts");
@@ -129,6 +121,21 @@ const slashedProtocol = new Set([
   "wss",
   "wss:",
 ]);
+
+let urlParseInvalidPortWarned = false;
+
+function emitInvalidPortUrlParseWarning() {
+  if (urlParseInvalidPortWarned) {
+    return;
+  }
+  urlParseInvalidPortWarned = true;
+  process.emitWarning(
+    "`url.parse()` accepts URLs with invalid ports. This behavior is " +
+      "deprecated and will throw in a future version of Node.js.",
+    "DeprecationWarning",
+    "DEP0170",
+  );
+}
 
 const hostnameMaxLen = 255;
 
@@ -608,6 +615,7 @@ class Url {
     // Back slashes before the query string get converted to forward slashes
     // See: https://code.google.com/p/chromium/issues/detail?id=25916
     let hasHash = false;
+    let hasAt = false;
     let start = -1;
     let end = -1;
     let rest = "";
@@ -616,11 +624,7 @@ class Url {
       const code = url.charCodeAt(i);
 
       // Find first and last non-whitespace characters for trimming
-      const isWs = code === CHAR_SPACE ||
-        code === CHAR_TAB ||
-        code === CHAR_CARRIAGE_RETURN ||
-        code === CHAR_LINE_FEED ||
-        code === CHAR_FORM_FEED ||
+      const isWs = code < 33 ||
         code === CHAR_NO_BREAK_SPACE ||
         code === CHAR_ZERO_WIDTH_NOBREAK_SPACE;
       if (start === -1) {
@@ -639,6 +643,9 @@ class Url {
       // Only convert backslashes while we haven't seen a split character
       if (!split) {
         switch (code) {
+          case CHAR_AT:
+            hasAt = true;
+            break;
           case CHAR_HASH:
             hasHash = true;
           // Fall through
@@ -676,7 +683,7 @@ class Url {
       }
     }
 
-    if (!slashesDenoteHost && !hasHash) {
+    if (!slashesDenoteHost && !hasHash && !hasAt) {
       // Try fast path regexp
       const simplePath = simplePathPattern.exec(rest);
       if (simplePath) {
@@ -745,6 +752,9 @@ class Url {
           case CHAR_TAB:
           case CHAR_LINE_FEED:
           case CHAR_CARRIAGE_RETURN:
+            rest = rest.slice(0, i) + rest.slice(i + 1);
+            i -= 1;
+            break;
           case CHAR_SPACE:
           case CHAR_DOUBLE_QUOTE:
           case CHAR_PERCENT:
@@ -1044,17 +1054,17 @@ function isIpv6Hostname(hostname: string) {
 function getHostname(self: Url, rest: string, hostname: string) {
   for (let i = 0; i < hostname.length; ++i) {
     const code = hostname.charCodeAt(i);
-    const isValid = (code >= CHAR_LOWERCASE_A && code <= CHAR_LOWERCASE_Z) ||
-      code === CHAR_DOT ||
-      (code >= CHAR_UPPERCASE_A && code <= CHAR_UPPERCASE_Z) ||
-      (code >= CHAR_0 && code <= CHAR_9) ||
-      code === CHAR_HYPHEN_MINUS ||
-      code === CHAR_PLUS ||
-      code === CHAR_UNDERSCORE ||
-      code > 127;
+    const isValid = code !== CHAR_FORWARD_SLASH &&
+      code !== CHAR_BACKWARD_SLASH &&
+      code !== CHAR_HASH &&
+      code !== CHAR_QUESTION_MARK &&
+      code !== CHAR_COLON;
 
     // Invalid host character
     if (!isValid) {
+      if (code === CHAR_COLON) {
+        emitInvalidPortUrlParseWarning();
+      }
       self.hostname = hostname.slice(0, i);
       return `/${hostname.slice(i)}${rest}`;
     }
@@ -1453,8 +1463,12 @@ function pathToFileURL(
     }
     const hostname = filepath.slice(prefixLength, hostnameEndIndex);
     const rest = filepath.slice(hostnameEndIndex + 1);
+    const asciiHostname = idnaToASCII(hostname);
+    if (asciiHostname === "" || forbiddenHostChars.test(asciiHostname)) {
+      throw new ERR_INVALID_URL(filepath);
+    }
 
-    outURL.hostname = idnaToASCII(hostname);
+    outURL.hostname = asciiHostname;
     outURL.pathname = encodePathChars(rest.replace(backslashRegEx, "/"), {
       windows,
     });
