@@ -260,10 +260,10 @@ function queryObjects(
 
   const name = typeof ctor.name === "string" ? ctor.name : "";
   if (name === "") {
-    return format === "count" ? 0 : [];
+    return format === "summary" ? [] : 0;
   }
   const count = op_v8_query_objects_count(name);
-  if (format === "count") {
+  if (format === undefined || format === "count") {
     return count;
   }
   if (format === "summary") {

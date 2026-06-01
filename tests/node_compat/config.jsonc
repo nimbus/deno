@@ -655,10 +655,7 @@
     "parallel/test-crypto-authenticated-stream.js": {},
     "parallel/test-crypto-classes.js": {},
     "parallel/test-crypto-certificate.js": {},
-    "parallel/test-crypto-cipheriv-decipheriv.js": {
-      "exitCode": 1,
-      "output": "[WILDCARD]Unknown cipher id-aes128-wrap[WILDCARD]"
-    },
+    "parallel/test-crypto-cipheriv-decipheriv.js": {},
     "parallel/test-crypto-default-shake-lengths.js": {},
     "parallel/test-crypto-default-shake-lengths-oneshot.js": {},
     "parallel/test-crypto-des3-wrap.js": {},
@@ -2438,10 +2435,7 @@
       "ignore": true,
       "reason": "Tests Node.js internal modules (require('internal/...')) which are not exposed in Deno"
     },
-    "parallel/test-js-stream-call-properties.js": {
-      "ignore": true,
-      "reason": "Tests Node.js internal C++ binding (internalBinding('js_stream').JSStream) which is not implemented in Deno"
-    },
+    "parallel/test-js-stream-call-properties.js": {},
     "parallel/test-kill-segfault-freebsd.js": {},
     "parallel/test-listen-fd-detached-inherit.js": {},
     "parallel/test-listen-fd-detached.js": {},

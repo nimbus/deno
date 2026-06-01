@@ -59,6 +59,7 @@ pub fn create_basic_runtime() -> tokio::runtime::Runtime {
 #[inline(always)]
 fn create_and_run_current_thread_inner<F, R>(
   future: F,
+  #[cfg_attr(not(tokio_unstable), allow(unused_variables))]
   metrics_enabled: bool,
 ) -> R
 where
