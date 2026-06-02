@@ -582,6 +582,32 @@ let esmLoadLoopRunning = false;
 const requireResolveOptionsMarker = Symbol("require.resolve");
 const kSourceURL = Symbol("kSourceURL");
 
+function conditionsFromResolveOptions(options) {
+  const conditions = options?.conditions;
+  if (conditions === undefined) {
+    return undefined;
+  }
+  if (!ArrayIsArray(conditions)) {
+    throw new internalErrors.ERR_INVALID_ARG_VALUE(
+      "context.conditions",
+      conditions,
+      "expected an array",
+    );
+  }
+  return conditions;
+}
+
+function withResolveHookConditions(options, context) {
+  if (context?.conditions === undefined) {
+    return options;
+  }
+  return {
+    __proto__: null,
+    ...(options ?? {}),
+    conditions: context.conditions,
+  };
+}
+
 function executeResolveHookChain(specifier, context, parent, isMain, options) {
   // Collect resolve hooks from hookEntries in LIFO order
   const resolveHooks = [];
@@ -617,7 +643,7 @@ function executeResolveHookChain(specifier, context, parent, isMain, options) {
           spec,
           parent,
           isMain,
-          options,
+          withResolveHookConditions(options, currentContext),
         );
         let resolvedUrl;
         if (StringPrototypeStartsWith(resolved, "node:")) {
@@ -771,6 +797,7 @@ function executeEsmResolveHookChain(specifier, context) {
         const resolved = op_module_default_resolve(
           spec,
           currentContext.parentURL ?? "",
+          conditionsFromResolveOptions(currentContext),
         );
         return { url: resolved, shortCircuit: true };
       } catch {
@@ -1245,6 +1272,7 @@ function resolveExports(
   request,
   parentPath,
   usesLocalNodeModulesDir,
+  conditions,
 ) {
   // The implementation's behavior is meant to mirror resolution in ESM.
   const [, name, expansion = ""] =
@@ -1260,10 +1288,11 @@ function resolveExports(
     name,
     expansion,
     parentPath ?? "",
+    conditions,
   ) ?? false;
 }
 
-Module._findPath = function (request, paths, isMain, parentPath) {
+Module._findPath = function (request, paths, isMain, parentPath, conditions) {
   const absoluteRequest = op_require_path_is_absolute(request);
   if (absoluteRequest) {
     paths = [""];
@@ -1297,6 +1326,7 @@ Module._findPath = function (request, paths, isMain, parentPath) {
         request,
         parentPath,
         usesLocalNodeModulesDir,
+        conditions,
       );
       if (exportsResolved) {
         return exportsResolved;
@@ -1826,11 +1856,12 @@ Module._resolveFilename = function (
       }
     }
   }
+  const conditions = conditionsFromResolveOptions(options);
 
   // Try module self resolution first
   const parentPath = trySelfParentPath(parent);
   const selfResolved = parentPath != null
-    ? op_require_try_self(parentPath, request)
+    ? op_require_try_self(parentPath, request, conditions)
     : undefined;
   if (selfResolved) {
     const cacheKey = request + "\x00" +
@@ -1845,6 +1876,7 @@ Module._resolveFilename = function (
     paths,
     isMain,
     parentPath,
+    conditions,
   );
   if (filename) {
     return op_require_real_path(filename);

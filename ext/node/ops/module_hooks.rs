@@ -29,7 +29,7 @@ type LoadSender =
 /// exports, import maps, npm/jsr, etc.) the same way an un-hooked import
 /// would.
 pub type DefaultResolveCb =
-  Rc<dyn Fn(&str, &str) -> Result<String, JsErrorBox>>;
+  Rc<dyn Fn(&str, &str, Option<Vec<String>>) -> Result<String, JsErrorBox>>;
 
 /// Shared hook registry between ops and the module loader.
 ///
@@ -74,10 +74,11 @@ impl LoaderHookRegistry {
     &self,
     specifier: &str,
     referrer: &str,
+    conditions: Option<Vec<String>>,
   ) -> Result<String, JsErrorBox> {
     let cb = self.default_resolve.borrow().clone();
     match cb {
-      Some(cb) => cb(specifier, referrer),
+      Some(cb) => cb(specifier, referrer, conditions),
       None => Err(JsErrorBox::generic(
         "default module resolver is not available",
       )),
@@ -209,9 +210,10 @@ pub fn op_module_default_resolve(
   state: &mut OpState,
   #[string] specifier: &str,
   #[string] referrer: &str,
+  #[serde] conditions: Option<Vec<String>>,
 ) -> Result<String, JsErrorBox> {
   let registry = state.borrow::<LoaderHookRegistry>().clone();
-  registry.default_resolve(specifier, referrer)
+  registry.default_resolve(specifier, referrer, conditions)
 }
 
 /// Respond to a load request. `source` is null to delegate to default loading.
