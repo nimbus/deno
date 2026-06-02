@@ -184,6 +184,7 @@ pub struct NodeExtInitServices<
   pub node_resolver:
     NodeResolverRc<TInNpmPackageChecker, TNpmPackageFolderResolver, TSys>,
   pub pkg_json_resolver: PackageJsonResolverRc<TSys>,
+  pub loader_hook_registry: Option<ops::module_hooks::LoaderHookRegistry>,
   pub sys: TSys,
 }
 
@@ -778,7 +779,13 @@ deno_core::extension!(deno_node,
   },
   state = |state, options| {
     state.put(options.fs.clone());
-    state.put(ops::module_hooks::LoaderHookRegistry::default());
+    state.put(
+      options
+        .maybe_init
+        .as_ref()
+        .and_then(|init| init.loader_hook_registry.clone())
+        .unwrap_or_default(),
+    );
 
     if let Some(init) = &options.maybe_init {
       state.put(init.sys.clone());

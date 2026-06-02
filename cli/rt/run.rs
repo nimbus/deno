@@ -999,7 +999,7 @@ impl StandaloneModuleLoaderFactory {
     {
       let loader = loader.clone();
       hook_registry.set_default_resolve(Rc::new(
-        move |specifier: &str, referrer: &str| {
+        move |specifier: &str, referrer: &str, _conditions| {
           loader
             .resolve_inner(specifier, referrer, ResolutionKind::Import)
             .map(|s| s.to_string())

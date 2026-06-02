@@ -50,6 +50,17 @@ fn ensure_read_permission<'a>(
   loader.ensure_read_permission(permissions, file_path)
 }
 
+fn js_conditions_to_cow(
+  conditions: Option<Vec<String>>,
+) -> Option<Vec<Cow<'static, str>>> {
+  conditions.map(|conditions| {
+    conditions
+      .into_iter()
+      .map(Cow::Owned)
+      .collect::<Vec<Cow<'static, str>>>()
+  })
+}
+
 #[derive(Debug, Boxed, deno_error::JsError)]
 pub struct RequireError(pub Box<RequireErrorKind>);
 
@@ -509,6 +520,7 @@ pub fn op_require_try_self<
   state: &mut OpState,
   #[string] parent_path: &str,
   #[string] request: &str,
+  #[serde] conditions: Option<Vec<String>>,
 ) -> Result<Option<String>, RequireError> {
   let pkg_json_resolver = state.borrow::<PackageJsonResolverRc<TSys>>();
   let pkg = pkg_json_resolver
@@ -546,13 +558,17 @@ pub fn op_require_try_self<
     let referrer = UrlOrPathRef::from_path(&pkg.path);
     // invalidate the resolution cache in case things have changed
     NodeResolutionThreadLocalCache::clear();
+    let hook_conditions = js_conditions_to_cow(conditions);
+    let conditions = hook_conditions
+      .as_deref()
+      .unwrap_or_else(|| node_resolver.require_conditions());
     let r = node_resolver.package_exports_resolve(
       &pkg.path,
       &expansion,
       exports,
       Some(&referrer),
       ResolutionMode::Require,
-      node_resolver.require_conditions(),
+      conditions,
       NodeResolutionKind::Execution,
     )?;
     Ok(Some(url_or_path_to_string(r)?))
@@ -619,6 +635,7 @@ pub fn op_require_resolve_exports<
   #[string] name: &str,
   #[string] expansion: &str,
   #[string] parent_path: &str,
+  #[serde] conditions: Option<Vec<String>>,
 ) -> Result<Option<String>, RequireError> {
   let sys = state.borrow::<TSys>();
   let node_resolver = state.borrow::<NodeResolverRc<
@@ -630,8 +647,12 @@ pub fn op_require_resolve_exports<
 
   let modules_path = Path::new(&modules_path_str);
   let modules_specifier = deno_path_util::url_from_file_path(modules_path)?;
+  let is_node_modules_root = modules_path
+    .file_name()
+    .is_some_and(|name| name == "node_modules");
   let pkg_path = if node_resolver.in_npm_package(&modules_specifier)
     && !uses_local_node_modules_dir
+    && !is_node_modules_root
   {
     Cow::Borrowed(modules_path)
   } else {
@@ -657,6 +678,10 @@ pub fn op_require_resolve_exports<
     Some(PathBuf::from(parent_path))
   };
   NodeResolutionThreadLocalCache::clear();
+  let hook_conditions = js_conditions_to_cow(conditions);
+  let conditions = hook_conditions
+    .as_deref()
+    .unwrap_or_else(|| node_resolver.require_conditions());
   let r = node_resolver.package_exports_resolve(
     &pkg.path,
     &format!(".{expansion}"),
@@ -666,7 +691,7 @@ pub fn op_require_resolve_exports<
       .map(|r| UrlOrPathRef::from_path(r))
       .as_ref(),
     ResolutionMode::Require,
-    node_resolver.require_conditions(),
+    conditions,
     NodeResolutionKind::Execution,
   )?;
   Ok(Some(url_or_path_to_string(r)?))

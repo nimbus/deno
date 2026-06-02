@@ -330,6 +330,7 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
       node_require_loader,
       node_resolver: self.node_resolver.clone(),
       pkg_json_resolver: self.pkg_json_resolver.clone(),
+      loader_hook_registry: None,
       sys: self.sys.clone(),
     }
   }

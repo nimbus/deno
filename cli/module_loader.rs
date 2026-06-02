@@ -481,7 +481,7 @@ impl CliModuleLoaderFactory {
     {
       let inner = module_loader.0.clone();
       hook_registry.set_default_resolve(Rc::new(
-        move |specifier: &str, referrer: &str| {
+        move |specifier: &str, referrer: &str, _conditions| {
           inner
             .inner_resolve(
               specifier,
