@@ -1279,8 +1279,7 @@ function access(
     if (previousSuppressionDepth === 0) {
       delete globalThis[nimbusAsyncHooksSuppressionDepth];
     } else {
-      globalThis[nimbusAsyncHooksSuppressionDepth] =
-        previousSuppressionDepth;
+      globalThis[nimbusAsyncHooksSuppressionDepth] = previousSuppressionDepth;
     }
   }
 }
