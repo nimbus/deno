@@ -653,6 +653,9 @@ const buildJobs = buildItems.map((rawBuildItem) => {
   });
   const isRelease = buildItem.profile.equals("release");
   const isDebug = buildItem.profile.equals("debug");
+  const buildsBinary = isDebug.or(
+    isRelease.and(isDenoland.or(buildItem.use_sysroot)),
+  );
   const sysRootStep = step({
     if: buildItem.use_sysroot,
     ...sysRootConfig,
@@ -931,6 +934,7 @@ const buildJobs = buildItems.map((rawBuildItem) => {
               // Run a minimal check to ensure that binary is not corrupted, regardless
               // of our build mode
               name: "Check deno binary",
+              if: buildsBinary,
               run:
                 `target/${buildItem.profile}/deno eval "console.log(1+2)" | grep 3`,
               env: { NO_COLOR: 1 },
@@ -942,9 +946,9 @@ const buildJobs = buildItems.map((rawBuildItem) => {
               run:
                 `sudo chroot /sysroot "$(pwd)/target/${buildItem.profile}/deno" --version`,
             },
-            denoArtifact.upload(),
-            denortArtifact.upload(),
-            testServerArtifact.upload(),
+            denoArtifact.upload().if(buildsBinary),
+            denortArtifact.upload().if(buildsBinary),
+            testServerArtifact.upload().if(buildsBinary),
           );
 
         const shouldPublishCondition = isRelease.and(isDenoland)

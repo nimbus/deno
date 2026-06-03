@@ -833,27 +833,27 @@ jobs:
           du -ha  "./target/release/deno"
           du -ha  "./target/release/denort"
       - name: Check deno binary
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         env:
           NO_COLOR: 1
         run: target/release/deno eval "console.log(1+2)" | grep 3
       - name: Upload artifact release-macos-x86_64-deno
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-macos-x86_64-deno
           path: target/release/deno
           retention-days: 3
       - name: Upload artifact release-macos-x86_64-denort
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-macos-x86_64-denort
           path: target/release/denort
           retention-days: 3
       - name: Upload artifact release-macos-x86_64-test-server
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-macos-x86_64-test-server
           path: target/release/test_server
@@ -1845,27 +1845,27 @@ jobs:
           du -ha  "./target/release/deno"
           du -ha  "./target/release/denort"
       - name: Check deno binary
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         env:
           NO_COLOR: 1
         run: target/release/deno eval "console.log(1+2)" | grep 3
       - name: Upload artifact release-macos-aarch64-deno
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-macos-aarch64-deno
           path: target/release/deno
           retention-days: 3
       - name: Upload artifact release-macos-aarch64-denort
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-macos-aarch64-denort
           path: target/release/denort
           retention-days: 3
       - name: Upload artifact release-macos-aarch64-test-server
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-macos-aarch64-test-server
           path: target/release/test_server
@@ -2811,27 +2811,27 @@ jobs:
           du -ha  "./target/release/deno"
           du -ha  "./target/release/denort"
       - name: Check deno binary
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         env:
           NO_COLOR: 1
         run: target/release/deno eval "console.log(1+2)" | grep 3
       - name: Upload artifact release-windows-x86_64-deno
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-windows-x86_64-deno
           path: target/release/deno.exe
           retention-days: 3
       - name: Upload artifact release-windows-x86_64-denort
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-windows-x86_64-denort
           path: target/release/denort.exe
           retention-days: 3
       - name: Upload artifact release-windows-x86_64-test-server
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-windows-x86_64-test-server
           path: target/release/test_server.exe
@@ -3635,27 +3635,27 @@ jobs:
           du -ha  "./target/release/deno"
           du -ha  "./target/release/denort"
       - name: Check deno binary
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         env:
           NO_COLOR: 1
         run: target/release/deno eval "console.log(1+2)" | grep 3
       - name: Upload artifact release-windows-aarch64-deno
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-windows-aarch64-deno
           path: target/release/deno.exe
           retention-days: 3
       - name: Upload artifact release-windows-aarch64-denort
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-windows-aarch64-denort
           path: target/release/denort.exe
           retention-days: 3
       - name: Upload artifact release-windows-aarch64-test-server
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'')'
+        if: '!(!contains(github.event.pull_request.labels.*.name, ''ci-full'') && github.event_name == ''pull_request'') && github.repository == ''denoland/deno'''
         with:
           name: release-windows-aarch64-test-server
           path: target/release/test_server.exe
