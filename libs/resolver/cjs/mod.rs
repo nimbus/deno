@@ -1,5 +1,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::ffi::OsStr;
+use std::path::Path;
+use std::path::PathBuf;
+
 use deno_maybe_sync::MaybeDashMap;
 use deno_media_type::MediaType;
 use node_resolver::InNpmPackageChecker;
@@ -173,6 +177,34 @@ pub enum IsCjsResolutionMode {
   Disabled,
 }
 
+fn find_package_root_from_node_modules(path: &Path) -> Option<PathBuf> {
+  let components: Vec<_> = path.components().collect();
+  let nm_idx = components
+    .iter()
+    .rposition(|c| c.as_os_str() == OsStr::new("node_modules"))?;
+  let package_name_idx = nm_idx + 1;
+  let first = components.get(package_name_idx)?;
+  let mut root = PathBuf::new();
+  for component in &components[..=nm_idx] {
+    root.push(component);
+  }
+  root.push(first);
+  if first.as_os_str().to_string_lossy().starts_with('@') {
+    root.push(components.get(package_name_idx + 1)?);
+  }
+  Some(root)
+}
+
+fn package_json_applies_to_path(path: &Path, package_json_path: &Path) -> bool {
+  let Some(package_json_dir) = package_json_path.parent() else {
+    return false;
+  };
+  let Some(package_root) = find_package_root_from_node_modules(path) else {
+    return true;
+  };
+  package_json_dir.starts_with(package_root)
+}
+
 /// Resolves whether a module is CJS or ESM.
 #[derive(Debug)]
 pub struct IsCjsResolver<
@@ -316,12 +348,16 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       if let Some(pkg_json) =
         self.pkg_json_resolver.get_closest_package_json(&path)?
       {
-        let is_file_location_cjs = pkg_json.typ != "module";
-        Ok(if is_file_location_cjs || path.extension().is_none() {
-          ResolutionMode::Require
+        if package_json_applies_to_path(&path, &pkg_json.path) {
+          let is_file_location_cjs = pkg_json.typ != "module";
+          Ok(if is_file_location_cjs || path.extension().is_none() {
+            ResolutionMode::Require
+          } else {
+            ResolutionMode::Import
+          })
         } else {
-          ResolutionMode::Import
-        })
+          Ok(ResolutionMode::Require)
+        }
       } else {
         Ok(ResolutionMode::Require)
       }
@@ -332,14 +368,20 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       if let Some(pkg_json) =
         self.pkg_json_resolver.get_closest_package_json(&path)?
       {
-        let is_cjs_type = pkg_json.typ == "commonjs"
-          || self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs
-            && pkg_json.typ == "none";
-        Ok(if is_cjs_type {
-          ResolutionMode::Require
+        if package_json_applies_to_path(&path, &pkg_json.path) {
+          let is_cjs_type = pkg_json.typ == "commonjs"
+            || self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs
+              && pkg_json.typ == "none";
+          Ok(if is_cjs_type {
+            ResolutionMode::Require
+          } else {
+            ResolutionMode::Import
+          })
+        } else if self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs {
+          Ok(ResolutionMode::Require)
         } else {
-          ResolutionMode::Import
-        })
+          Ok(ResolutionMode::Import)
+        }
       } else if self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs {
         Ok(ResolutionMode::Require)
       } else {
@@ -395,5 +437,43 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         })
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn package_json_scope_does_not_cross_node_modules_root() {
+    let path = Path::new("/app/pkg/node_modules/dep/file.js");
+    let package_json_path = Path::new("/app/pkg/package.json");
+
+    assert!(!package_json_applies_to_path(path, package_json_path));
+  }
+
+  #[test]
+  fn package_json_scope_applies_within_node_modules_package() {
+    let path = Path::new("/app/pkg/node_modules/dep/file.js");
+    let package_json_path = Path::new("/app/pkg/node_modules/dep/package.json");
+
+    assert!(package_json_applies_to_path(path, package_json_path));
+  }
+
+  #[test]
+  fn package_json_scope_applies_within_scoped_node_modules_package() {
+    let path = Path::new("/app/pkg/node_modules/@scope/dep/file.js");
+    let package_json_path =
+      Path::new("/app/pkg/node_modules/@scope/dep/package.json");
+
+    assert!(package_json_applies_to_path(path, package_json_path));
+  }
+
+  #[test]
+  fn package_json_scope_applies_outside_node_modules() {
+    let path = Path::new("/app/pkg/src/file.js");
+    let package_json_path = Path::new("/app/pkg/package.json");
+
+    assert!(package_json_applies_to_path(path, package_json_path));
   }
 }

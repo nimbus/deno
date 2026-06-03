@@ -811,14 +811,12 @@ impl<
     resolution_kind: NodeResolutionKind,
     maybe_referrer: Option<&UrlOrPathRef>,
   ) -> Result<UrlOrPath, FinalizeResolutionError> {
-    let encoded_sep_re = lazy_regex::regex!(r"%2F|%2C");
-
     let resolved = resolved.0;
     let text = match &resolved {
       LocalUrlOrPath::Url(url) => Cow::Borrowed(url.as_str()),
       LocalUrlOrPath::Path(LocalPath { path, .. }) => path.to_string_lossy(),
     };
-    if encoded_sep_re.is_match(&text) {
+    if has_encoded_path_separator(&text) {
       return Err(
         errors::InvalidModuleSpecifierError {
           request: text.into_owned(),
@@ -1441,7 +1439,7 @@ impl<
           }
           Err(_) => {
             let export_target = if pattern {
-              pattern_re.replace(target, |_caps: &regex::Captures| subpath)
+              replace_package_target_pattern(pattern_re, target, subpath)
             } else if subpath.is_empty() {
               Cow::Borrowed(target)
             } else {
@@ -1556,6 +1554,7 @@ impl<
       return Err(
         throw_invalid_subpath(
           request,
+          match_,
           package_json_path,
           internal,
           maybe_referrer,
@@ -1564,8 +1563,8 @@ impl<
       );
     } else if pattern {
       let resolved_path_str = resolved_path.to_string_lossy();
-      let replaced = pattern_re
-        .replace(&resolved_path_str, |_caps: &regex::Captures| subpath);
+      let replaced =
+        replace_package_target_pattern(pattern_re, &resolved_path_str, subpath);
       LocalPath {
         path: PathBuf::from(replaced.as_ref()),
         known_exists: false,
@@ -1742,6 +1741,17 @@ impl<
           }
         }
       }
+    } else if !target.is_null() {
+      return Err(
+        InvalidPackageTargetError {
+          pkg_json_path: package_json_path.to_path_buf(),
+          sub_path: package_subpath.to_string(),
+          target: target.to_string(),
+          is_import: internal,
+          maybe_referrer: maybe_referrer.map(|r| r.display()),
+        }
+        .into(),
+      );
     }
 
     Ok(None)
@@ -2779,15 +2789,21 @@ fn to_specifier_display_string(url: &UrlOrPathRef) -> String {
   }
 }
 
+fn has_encoded_path_separator(text: &str) -> bool {
+  lazy_regex::regex!(r"(?i)%2f|%5c").is_match(text)
+}
+
 fn throw_invalid_subpath(
   subpath: String,
+  match_: &str,
   package_json_path: &Path,
   internal: bool,
   maybe_referrer: Option<&UrlOrPathRef>,
 ) -> InvalidModuleSpecifierError {
   let ie = if internal { "imports" } else { "exports" };
   let reason = format!(
-    "request is not a valid subpath for the \"{}\" resolution of {}",
+    "request is not a valid match in pattern \"{}\" for the \"{}\" resolution of {}",
+    match_,
     ie,
     package_json_path.display(),
   );
@@ -2905,6 +2921,14 @@ fn pattern_key_compare(a: &str, b: &str) -> i32 {
   }
 
   0
+}
+
+fn replace_package_target_pattern<'a>(
+  pattern_re: &regex::Regex,
+  target: &'a str,
+  subpath: &str,
+) -> Cow<'a, str> {
+  pattern_re.replace_all(target, |_caps: &regex::Captures| subpath)
 }
 
 /// Gets the corresponding @types package for the provided package name
@@ -3427,6 +3451,14 @@ mod tests {
   }
 
   #[test]
+  fn test_has_encoded_path_separator() {
+    for text in ["x%2Fy", "x%2fy", "x%5Cy", "x%5cy"] {
+      assert!(has_encoded_path_separator(text));
+    }
+    assert!(!has_encoded_path_separator("x%2Cy"));
+  }
+
+  #[test]
   fn test_with_known_extension() {
     let cases = &[
       ("test", "d.ts", "test.d.ts"),
@@ -3553,6 +3585,20 @@ mod tests {
         "ts3.1/file.d.ts"
       );
     }
+  }
+
+  #[test]
+  fn test_replace_package_target_pattern_replaces_all_stars() {
+    let pattern_re = lazy_regex::regex!(r"\*");
+
+    assert_eq!(
+      replace_package_target_pattern(pattern_re, "./subpath/*/*.js", "dir1",),
+      "./subpath/dir1/dir1.js",
+    );
+    assert_eq!(
+      replace_package_target_pattern(pattern_re, "./subpath/*.js", "$$"),
+      "./subpath/$$.js",
+    );
   }
 
   #[test]

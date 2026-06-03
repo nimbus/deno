@@ -22,10 +22,24 @@
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 (function () {
-const { core } = __bootstrap;
+const { core, primordials } = __bootstrap;
+const { ObjectGetOwnPropertyDescriptor } = primordials;
+
+const HOST_OBJECT_MARKER = "__node_internal_js_stream_host_object__";
+
+function isExternal(value) {
+  if (
+    (typeof value !== "object" && typeof value !== "function") ||
+    value === null
+  ) {
+    return false;
+  }
+
+  return ObjectGetOwnPropertyDescriptor(value, HOST_OBJECT_MARKER)?.value ===
+    true;
+}
 
 const {
-  // isExternal,
   isAnyArrayBuffer,
   isArgumentsObject,
   isArrayBuffer,
@@ -56,6 +70,7 @@ const {
 } = core;
 
 return {
+  isExternal,
   isAnyArrayBuffer,
   isArgumentsObject,
   isArrayBuffer,

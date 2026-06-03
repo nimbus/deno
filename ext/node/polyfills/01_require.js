@@ -84,6 +84,7 @@ const {
   StringPrototypeStartsWith,
   SyntaxError,
   TypeError,
+  decodeURIComponent,
 } = primordials;
 
 const _httpAgent = core.createLazyLoader("node:_http_agent");
@@ -976,10 +977,22 @@ function findPackageRootFromNodeModules(filepath) {
   return StringPrototypeSlice(filepath, 0, afterNm) + parts[0];
 }
 
-function tryFile(requestPath, _isMain) {
+function shouldPreserveSymlinks(isMain) {
+  return getOptionValue(
+    isMain ? "--preserve-symlinks-main" : "--preserve-symlinks",
+  );
+}
+
+function finalizeModulePath(requestPath, isMain) {
+  return shouldPreserveSymlinks(isMain)
+    ? pathResolve(requestPath)
+    : toRealPath(requestPath);
+}
+
+function tryFile(requestPath, isMain) {
   const rc = stat(requestPath);
   if (rc !== 0) return;
-  return toRealPath(requestPath);
+  return finalizeModulePath(requestPath, isMain);
 }
 
 function tryPackage(requestPath, exts, isMain, originalPath) {
@@ -1068,6 +1081,10 @@ function toRealPath(requestPath) {
   const rp = op_require_real_path(requestPath);
   realpathCache.set(requestPath, rp);
   return rp;
+}
+
+function defaultExtensionLookupOrder() {
+  return [".js", ".json", ".node"];
 }
 
 function tryExtensions(p, exts, isMain) {
@@ -1230,6 +1247,22 @@ const TRAILING_SLASH_REGEX = /(?:^|\/)\.?\.$/;
 // 1. name/.*
 // 2. @scope/name/.*
 const EXPORTS_PATTERN = /^((?:@[^/\\%]+\/)?[^./\\%][^/\\%]*)(\/.*)?$/;
+const ENCODED_PATH_SEPARATOR_PATTERN = /%2f|%2F|%5c|%5C/;
+
+function decodePackageExportsPath(resolvedPath) {
+  if (!StringPrototypeIncludes(resolvedPath, "%")) {
+    return resolvedPath;
+  }
+  if (RegExpPrototypeTest(ENCODED_PATH_SEPARATOR_PATTERN, resolvedPath)) {
+    return resolvedPath;
+  }
+  try {
+    return decodeURIComponent(resolvedPath);
+  } catch {
+    return resolvedPath;
+  }
+}
+
 function resolveExports(
   modulesPath,
   request,
@@ -1244,7 +1277,7 @@ function resolveExports(
     return;
   }
 
-  return op_require_resolve_exports(
+  const resolved = op_require_resolve_exports(
     usesLocalNodeModulesDir,
     modulesPath,
     request,
@@ -1252,7 +1285,8 @@ function resolveExports(
     expansion,
     parentPath ?? "",
     conditions,
-  ) ?? false;
+  );
+  return resolved ? decodePackageExportsPath(resolved) : false;
 }
 
 Module._findPath = function (request, paths, isMain, parentPath, conditions) {
@@ -1319,13 +1353,13 @@ Module._findPath = function (request, paths, isMain, parentPath, conditions) {
     const rc = stat(basePath);
     if (!trailingSlash) {
       if (rc === 0) { // File.
-        filename = toRealPath(basePath);
+        filename = finalizeModulePath(basePath, isMain);
       }
 
       if (!filename) {
         // Try it with each of the extensions
         if (exts === undefined) {
-          exts = ObjectKeys(Module._extensions);
+          exts = defaultExtensionLookupOrder();
         }
         filename = tryExtensions(basePath, exts, isMain);
       }
@@ -1334,7 +1368,7 @@ Module._findPath = function (request, paths, isMain, parentPath, conditions) {
     if (!filename && rc === 1) { // Directory.
       // try it with each of the extensions at "index"
       if (exts === undefined) {
-        exts = ObjectKeys(Module._extensions);
+        exts = defaultExtensionLookupOrder();
       }
       filename = tryPackage(basePath, exts, isMain, request);
     }
@@ -1842,7 +1876,7 @@ Module._resolveFilename = function (
     conditions,
   );
   if (filename) {
-    return op_require_real_path(filename);
+    return filename;
   }
   // fallback and attempt to resolve bare specifiers using
   // the global cache when not using --node-modules-dir
@@ -1928,10 +1962,9 @@ Module.prototype.load = function (filename) {
     throw new Error("Module already loaded");
   }
 
-  // Canonicalize the path so it's not pointing to the symlinked directory
-  // in `node_modules` directory of the referrer.
-  // When load hooks are active, the file may not exist on disk (virtual
-  // modules), so we fall back to the original filename.
+  // Resolution already chooses either a real path or symlink-preserved path.
+  // Preserve that identity here so --preserve-symlinks can influence module
+  // lookup paths and cache keys the same way it does in Node.
   let hasLoadHooks = false;
   if (hookEntries.length > 0 && !insideLoadHook) {
     for (let i = 0; i < hookEntries.length; i++) {
@@ -1941,15 +1974,7 @@ Module.prototype.load = function (filename) {
       }
     }
   }
-  if (hasLoadHooks) {
-    try {
-      this.filename = op_require_real_path(filename);
-    } catch {
-      this.filename = filename;
-    }
-  } else {
-    this.filename = op_require_real_path(filename);
-  }
+  this.filename = filename;
   this.paths = Module._nodeModulePaths(pathDirname(this.filename));
 
   // Run load hooks if registered
@@ -2118,6 +2143,10 @@ function enrichCJSError(error) {
   }
 }
 
+function requireEsmEnabled() {
+  return getOptionValue("--experimental-require-module") !== false;
+}
+
 function wrapSafe(
   filename,
   content,
@@ -2207,6 +2236,7 @@ Module.prototype._compile = function (
     compiledWrapper = wrapSafe(filename, content, this, format);
   } catch (err) {
     if (
+      requireEsmEnabled() &&
       format !== "commonjs" && err instanceof SyntaxError &&
       (op_require_can_parse_as_esm(content) || isEsmSyntaxError(err))
     ) {
@@ -2284,6 +2314,29 @@ function _throwRequireAsyncModule(specifier, module) {
   throw new internalErrors.ERR_REQUIRE_ASYNC_MODULE(specifier, parent);
 }
 
+const REQUIRE_ESM_FORMATTED_STACK_RE =
+  /^(Error|TypeError|ReferenceError|RangeError|SyntaxError|URIError): ([^\n]*)\n\s+at /;
+
+function normalizeRequireESMThrownError(error) {
+  if (!(error instanceof Error) || typeof error.message !== "string") {
+    return error;
+  }
+
+  const match = RegExpPrototypeExec(
+    REQUIRE_ESM_FORMATTED_STACK_RE,
+    error.message,
+  );
+  if (match === null) {
+    return error;
+  }
+
+  const normalized = new Error(match[2]);
+  if (match[1] !== "Error") {
+    normalized.name = match[1];
+  }
+  return normalized;
+}
+
 function loadESMFromCJS(module, filename, code, sourceFromHook = false) {
   const specifier = url.pathToFileURL(filename).toString();
   let namespace;
@@ -2301,7 +2354,7 @@ function loadESMFromCJS(module, filename, code, sourceFromHook = false) {
     ) {
       _throwRequireAsyncModule(specifier, module);
     }
-    throw e;
+    throw normalizeRequireESMThrownError(e);
   }
   if (ObjectHasOwn(namespace, "module.exports")) {
     module.exports = namespace["module.exports"];

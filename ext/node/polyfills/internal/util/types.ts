@@ -101,7 +101,7 @@ function isUint32Array(value: unknown): value is Uint32Array {
 }
 
 const {
-  // isExternal,
+  isExternal,
   isAnyArrayBuffer,
   isArgumentsObject,
   isArrayBuffer,
@@ -132,6 +132,7 @@ const {
 } = bindingTypes;
 
 return {
+  isExternal,
   isCryptoKey: cryptoKeys.isCryptoKey,
   isKeyObject: cryptoKeys.isKeyObject,
   isArrayBufferView,

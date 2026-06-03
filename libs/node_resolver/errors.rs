@@ -1,7 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::borrow::Cow;
-use std::fmt::Write;
 use std::path::PathBuf;
 
 use boxed_error::Boxed;
@@ -71,8 +70,7 @@ pub trait NodeJsErrorCoded {
 
 #[derive(Debug, Clone, Error, JsError)]
 #[error(
-  "[{}] Invalid module '{}' {}{}",
-  self.code(),
+  "Invalid module '{}' {}{}",
   request,
   reason,
   maybe_imported_from_msg(maybe_referrer)
@@ -550,8 +548,7 @@ impl NodeJsErrorCoded for PackageJsonLoadError {
 #[derive(Debug, Error, JsError)]
 #[class(type)]
 #[error(
-  "[{}] Package import specifier \"{}\" is not defined{}{}",
-  self.code(),
+  "Package import specifier \"{}\" is not defined{}{}",
   name,
   package_json_path.as_ref().map(|p| format!(" in package {}", p.display())).unwrap_or_default(),
   maybe_imported_from_msg(maybe_referrer),
@@ -958,15 +955,12 @@ impl std::fmt::Display for InvalidPackageTargetError {
     let rel_error = !self.is_import
       && !self.target.is_empty()
       && !self.target.starts_with("./");
-    f.write_char('[')?;
-    f.write_str(self.code().as_str())?;
-    f.write_char(']')?;
 
     if self.sub_path == "." {
       assert!(!self.is_import);
       write!(
         f,
-        " Invalid \"exports\" main target {} defined in the package config {}",
+        "Invalid \"exports\" main target {} defined in the package config {}",
         self.target,
         self.pkg_json_path.display()
       )?;
@@ -974,7 +968,7 @@ impl std::fmt::Display for InvalidPackageTargetError {
       let ie = if self.is_import { "imports" } else { "exports" };
       write!(
         f,
-        " Invalid \"{}\" target {} defined for '{}' in the package config {}",
+        "Invalid \"{}\" target {} defined for '{}' in the package config {}",
         ie,
         self.target,
         self.sub_path,
@@ -986,7 +980,7 @@ impl std::fmt::Display for InvalidPackageTargetError {
       write_imported_from(f, referrer)?;
     }
     if rel_error {
-      write!(f, "; target must start with \"./\"")?;
+      write!(f, "; targets must start with \"./\"")?;
     }
     Ok(())
   }
@@ -1018,10 +1012,6 @@ impl std::error::Error for PackagePathNotExportedError {}
 
 impl std::fmt::Display for PackagePathNotExportedError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.write_char('[')?;
-    f.write_str(self.code().as_str())?;
-    f.write_char(']')?;
-
     let types_msg = match self.resolution_kind {
       NodeResolutionKind::Execution => String::new(),
       NodeResolutionKind::Types => " for types".to_string(),
@@ -1029,14 +1019,14 @@ impl std::fmt::Display for PackagePathNotExportedError {
     if self.subpath == "." {
       write!(
         f,
-        " No \"exports\" main defined{} in '{}'",
+        "No \"exports\" main defined{} in '{}'",
         types_msg,
         self.pkg_json_path.display()
       )?;
     } else {
       write!(
         f,
-        " Package subpath '{}' is not defined{} by \"exports\" in '{}'",
+        "Package subpath '{}' is not defined{} by \"exports\" in '{}'",
         self.subpath,
         types_msg,
         self.pkg_json_path.display()
@@ -1152,7 +1142,7 @@ mod test {
       }
       .to_string(),
       format!(
-        "[ERR_PACKAGE_PATH_NOT_EXPORTED] Package subpath './jsx-runtime' is not defined for types by \"exports\" in 'test_path{separator_char}package.json'"
+        "Package subpath './jsx-runtime' is not defined for types by \"exports\" in 'test_path{separator_char}package.json'"
       )
     );
     assert_eq!(
@@ -1164,8 +1154,9 @@ mod test {
       }
       .to_string(),
       format!(
-        "[ERR_PACKAGE_PATH_NOT_EXPORTED] No \"exports\" main defined for types in 'test_path{separator_char}package.json'"
+        "No \"exports\" main defined for types in 'test_path{separator_char}package.json'"
       )
     );
   }
+
 }

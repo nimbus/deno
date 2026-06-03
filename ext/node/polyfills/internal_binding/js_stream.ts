@@ -77,7 +77,7 @@ class JSStream extends AsyncWrap {
   constructor() {
     super(providerType.JSSTREAM);
     Object.defineProperty(this, "_externalStream", {
-      value: undefined,
+      value: this,
       configurable: true,
       enumerable: false,
       writable: false,

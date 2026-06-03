@@ -670,6 +670,41 @@ const kStyleTextEscape = "\x1b[";
 const kStyleTextEscapeEnd = "m";
 const kStyleTextDimCode = 2;
 const kStyleTextBoldCode = 1;
+const kStyleTextHexColorPattern = new SafeRegExp(
+  /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/,
+);
+
+function parseHexByte(value) {
+  return NumberParseInt(value, 16);
+}
+
+function getHexStyle(format) {
+  if (!RegExpPrototypeTest(kStyleTextHexColorPattern, format)) {
+    throw new codes.ERR_INVALID_ARG_VALUE(
+      "format",
+      format,
+      "must be a valid hex color (#RGB or #RRGGBB)",
+    );
+  }
+
+  let red;
+  let green;
+  let blue;
+  if (format.length === 4) {
+    const redChar = StringPrototypeAt(format, 1);
+    const greenChar = StringPrototypeAt(format, 2);
+    const blueChar = StringPrototypeAt(format, 3);
+    red = parseHexByte(`${redChar}${redChar}`);
+    green = parseHexByte(`${greenChar}${greenChar}`);
+    blue = parseHexByte(`${blueChar}${blueChar}`);
+  } else {
+    red = parseHexByte(StringPrototypeSlice(format, 1, 3));
+    green = parseHexByte(StringPrototypeSlice(format, 3, 5));
+    blue = parseHexByte(StringPrototypeSlice(format, 5, 7));
+  }
+
+  return [`38;2;${red};${green};${blue}`, defaultFG];
+}
 
 function replaceCloseCode(str, closeSeq, openSeq, keepClose) {
   const closeLen = closeSeq.length;
@@ -732,9 +767,13 @@ function styleText(format, text, options) {
     const key = formatArray[i];
     if (key === "none") continue;
 
-    const formatCodes = inspect.colors[key];
+    let formatCodes = inspect.colors[key];
     if (formatCodes == null) {
-      validateOneOf(key, "format", ObjectKeys(inspect.colors));
+      if (typeof key === "string" && StringPrototypeAt(key, 0) === "#") {
+        formatCodes = getHexStyle(key);
+      } else {
+        validateOneOf(key, "format", ObjectKeys(inspect.colors));
+      }
     }
     const openNum = formatCodes[0];
     const closeNum = formatCodes[1];

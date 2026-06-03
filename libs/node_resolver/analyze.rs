@@ -721,6 +721,7 @@ pub enum NodeCodeTranslatorMode {
   Disabled,
   #[default]
   ModuleLoader,
+  ModuleLoaderWithoutModuleExports,
 }
 
 impl<
@@ -778,9 +779,15 @@ impl<
         ResolvedCjsAnalysis::Cjs(all_exports) => all_exports,
       }
     };
+    let include_module_exports = match self.mode {
+      NodeCodeTranslatorMode::Disabled => unreachable!(),
+      NodeCodeTranslatorMode::ModuleLoader => true,
+      NodeCodeTranslatorMode::ModuleLoaderWithoutModuleExports => false,
+    };
     Ok(Cow::Owned(exports_to_wrapper_module(
       entry_specifier,
       &all_exports,
+      include_module_exports,
     )))
   }
 }
@@ -861,6 +868,7 @@ static RESERVED_WORDS: Lazy<HashSet<&str>> = Lazy::new(|| {
 fn exports_to_wrapper_module(
   entry_specifier: &Url,
   all_exports: &BTreeSet<String>,
+  include_module_exports: bool,
 ) -> String {
   let quoted_entry_specifier_text = to_double_quote_string(
     url_to_file_path(entry_specifier).unwrap().to_str().unwrap(),
@@ -906,13 +914,15 @@ if (import.meta.main) {
       }
 
       builder.append("export default mod;\n");
-      add_export(
-        builder,
-        "module.exports",
-        "\"module.exports\"",
-        |builder| builder.append("mod"),
-        &mut temp_var_count,
-      );
+      if include_module_exports {
+        add_export(
+          builder,
+          "module.exports",
+          "\"module.exports\"",
+          |builder| builder.append("mod"),
+          &mut temp_var_count,
+        );
+      }
     }).unwrap()
 }
 
@@ -984,7 +994,7 @@ mod tests {
     let exports = BTreeSet::from(
       ["static", "server", "app", "dashed-export", "3d"].map(|s| s.to_string()),
     );
-    let text = exports_to_wrapper_module(&url, &exports);
+    let text = exports_to_wrapper_module(&url, &exports, true);
     assert_eq!(
       text,
       r#"import { createRequire as __internalCreateRequire, Module as __internalModule } from "node:module";
@@ -1006,6 +1016,36 @@ export { __deno_export_3__ as "static" };
 export default mod;
 const __deno_export_4__ = mod;
 export { __deno_export_4__ as "module.exports" };
+"#
+    );
+  }
+
+  #[test]
+  fn test_exports_to_wrapper_module_without_module_exports() {
+    let url = Url::parse("file:///test/test.ts").unwrap();
+    let exports = BTreeSet::from(
+      ["static", "server", "app", "dashed-export", "3d"].map(|s| s.to_string()),
+    );
+    let text = exports_to_wrapper_module(&url, &exports, false);
+    assert_eq!(
+      text,
+      r#"import { createRequire as __internalCreateRequire, Module as __internalModule } from "node:module";
+const require = __internalCreateRequire(import.meta.url);
+let mod;
+if (import.meta.main) {
+  mod = __internalModule._load("/test/test.ts", null, true)
+} else {
+  mod = require("/test/test.ts");
+}
+const __deno_export_1__ = mod["3d"];
+export { __deno_export_1__ as "3d" };
+export const app = mod["app"];
+const __deno_export_2__ = mod["dashed-export"];
+export { __deno_export_2__ as "dashed-export" };
+export const server = mod["server"];
+const __deno_export_3__ = mod["static"];
+export { __deno_export_3__ as "static" };
+export default mod;
 "#
     );
   }

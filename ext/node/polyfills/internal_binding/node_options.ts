@@ -4,6 +4,7 @@ const { primordials } = __bootstrap;
 const {
   SafeMap,
   ArrayPrototypeForEach,
+  ArrayPrototypeJoin,
   ArrayPrototypePush,
   ArrayPrototypeConcat,
   ArrayPrototypeSlice,
@@ -57,11 +58,15 @@ type OptionValue = { value: string | boolean };
 let optionsMap: Map<string, OptionValue> | undefined;
 let execArgvOptionsMap: Map<string, OptionValue> | undefined;
 let execArgvSnapshot: string[] | undefined;
+let optionsMapCacheKey: string | undefined;
+let execArgvOptionsMapCacheKey: string | undefined;
 
 function setOptionSourceExecArgv(execArgv: string[]) {
   execArgvSnapshot = ArrayPrototypeSlice(execArgv);
   optionsMap = undefined;
   execArgvOptionsMap = undefined;
+  optionsMapCacheKey = undefined;
+  execArgvOptionsMapCacheKey = undefined;
 }
 
 function createDefaultOptions() {
@@ -69,6 +74,9 @@ function createDefaultOptions() {
     ["--warnings", { value: true }],
     ["--pending-deprecation", { value: false }],
     ["--expose-internals", { value: false }],
+    ["--experimental-require-module", { value: true }],
+    ["--preserve-symlinks", { value: false }],
+    ["--preserve-symlinks-main", { value: false }],
     ["--title", { value: "" }],
   ]);
 }
@@ -94,6 +102,26 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     case "--expose-internals":
     case "--expose_internals":
       options.set("--expose-internals", { value: true });
+      break;
+    case "--experimental-require-module":
+    case "--require-module":
+      options.set("--experimental-require-module", { value: true });
+      break;
+    case "--no-experimental-require-module":
+    case "--no-require-module":
+      options.set("--experimental-require-module", { value: false });
+      break;
+    case "--preserve-symlinks":
+      options.set("--preserve-symlinks", { value: true });
+      break;
+    case "--preserve-symlinks-main":
+      options.set("--preserve-symlinks-main", { value: true });
+      break;
+    case "--no-preserve-symlinks":
+      options.set("--preserve-symlinks", { value: false });
+      break;
+    case "--no-preserve-symlinks-main":
+      options.set("--preserve-symlinks-main", { value: false });
       break;
     case "--tls-min-v1.0":
     case "--tls-min-v1.1":
@@ -149,28 +177,45 @@ function getExecArgv() {
   return execArgvSnapshot ?? globalThis.process?.execArgv ?? [];
 }
 
+function getNodeOptionsEnv() {
+  try {
+    return Deno.env.get("NODE_OPTIONS") ?? "";
+  } catch {
+    return globalThis.process?.env?.NODE_OPTIONS ?? "";
+  }
+}
+
+function getExecArgvCacheKey(execArgv: string[]) {
+  return ArrayPrototypeJoin(execArgv, "\0");
+}
+
 function getOptions() {
-  if (optionsMap) {
+  const nodeOptions = getNodeOptionsEnv();
+  const execArgv = getExecArgv();
+  const cacheKey = nodeOptions + "\0" + getExecArgvCacheKey(execArgv);
+  if (optionsMap && optionsMapCacheKey === cacheKey) {
     return { options: optionsMap };
   }
 
   const options = createDefaultOptions();
-  const nodeOptions = Deno.env.get("NODE_OPTIONS");
   const envArgs = nodeOptions ? splitNodeOptions(nodeOptions) : [];
-  const execArgv = getExecArgv();
   const args = ArrayPrototypeConcat(envArgs, execArgv);
   ArrayPrototypeForEach(args, (arg) => parseOption(options, arg));
   optionsMap = options;
+  optionsMapCacheKey = cacheKey;
   return { options };
 }
 
 function getExecArgvOptions() {
-  if (execArgvOptionsMap) {
+  const execArgv = getExecArgv();
+  const cacheKey = getExecArgvCacheKey(execArgv);
+  if (execArgvOptionsMap && execArgvOptionsMapCacheKey === cacheKey) {
     return { options: execArgvOptionsMap };
   }
   const options = new SafeMap();
-  ArrayPrototypeForEach(getExecArgv(), (arg) => parseOption(options, arg));
+  ArrayPrototypeForEach(execArgv, (arg) => parseOption(options, arg));
   execArgvOptionsMap = options;
+  execArgvOptionsMapCacheKey = cacheKey;
   return { options };
 }
 
