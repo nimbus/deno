@@ -30,6 +30,7 @@ const {
   op_v8_read_uint64,
   op_v8_read_value,
   op_v8_release_buffer,
+  op_v8_set_flags_from_string,
   op_v8_set_treat_array_buffer_views_as_host_objects,
   op_v8_query_objects_count,
   op_v8_take_heap_snapshot,
@@ -187,6 +188,7 @@ function setFlagsFromString(flags: string) {
   // after that point aborts the process, so the runtime keeps the documented
   // no-op behavior while updating the cache tag observable that Node uses to
   // invalidate cached bytecode after flag changes.
+  op_v8_set_flags_from_string(flags);
   for (const token of flags.split(/\s+/)) {
     if (token.length === 0) {
       continue;

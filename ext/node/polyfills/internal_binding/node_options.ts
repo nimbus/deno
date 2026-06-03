@@ -58,6 +58,8 @@ type OptionValue = { value: string | boolean };
 let optionsMap: Map<string, OptionValue> | undefined;
 let execArgvOptionsMap: Map<string, OptionValue> | undefined;
 let execArgvSnapshot: string[] | undefined;
+let defaultExecArgvSnapshot: string[] | undefined;
+let nodeOptionsSnapshot: string | undefined;
 let optionsMapCacheKey: string | undefined;
 let execArgvOptionsMapCacheKey: string | undefined;
 
@@ -174,15 +176,26 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
 }
 
 function getExecArgv() {
-  return execArgvSnapshot ?? globalThis.process?.execArgv ?? [];
+  if (execArgvSnapshot !== undefined) {
+    return execArgvSnapshot;
+  }
+  if (defaultExecArgvSnapshot === undefined) {
+    defaultExecArgvSnapshot = ArrayPrototypeSlice(
+      globalThis.process?.execArgv ?? [],
+    );
+  }
+  return defaultExecArgvSnapshot;
 }
 
 function getNodeOptionsEnv() {
-  try {
-    return Deno.env.get("NODE_OPTIONS") ?? "";
-  } catch {
-    return globalThis.process?.env?.NODE_OPTIONS ?? "";
+  if (nodeOptionsSnapshot === undefined) {
+    try {
+      nodeOptionsSnapshot = Deno.env.get("NODE_OPTIONS") ?? "";
+    } catch {
+      nodeOptionsSnapshot = globalThis.process?.env?.NODE_OPTIONS ?? "";
+    }
   }
+  return nodeOptionsSnapshot;
 }
 
 function getExecArgvCacheKey(execArgv: string[]) {

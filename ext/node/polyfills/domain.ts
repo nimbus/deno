@@ -130,13 +130,29 @@ class Domain extends EventEmitter {
     const self = this;
     const runBound = function () {
       self.enter();
-      const ret = FunctionPrototypeApply(
-        fn,
-        this,
-        ArrayPrototypeSlice(arguments),
-      );
-      self.exit();
-      return ret;
+      try {
+        const ret = FunctionPrototypeApply(
+          fn,
+          this,
+          ArrayPrototypeSlice(arguments),
+        );
+        self.exit();
+        return ret;
+      } catch (e) {
+        self.exit();
+        if (typeof e === "object" && e !== null) {
+          e.domainBound = fn;
+          e.domainThrown = false;
+          ObjectDefineProperty(e, "domain", {
+            __proto__: null,
+            configurable: true,
+            enumerable: false,
+            value: self,
+            writable: true,
+          });
+        }
+        FunctionPrototypeCall(emitError, self, e);
+      }
     };
     ObjectDefineProperty(runBound, "domain", {
       __proto__: null,
