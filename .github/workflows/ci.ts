@@ -268,6 +268,7 @@ const cloneRepoStep = step({
   name: "Configure git",
   run: [
     "git config --global core.symlinks true",
+    "git config --global core.longpaths true",
     "git config --global fetch.parallel 32",
   ],
 }, {
