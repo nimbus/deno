@@ -6,6 +6,17 @@ import domain from "node:domain";
 import { EventEmitter } from "node:events";
 import { assertEquals } from "@std/assert";
 
+Deno.test("[node/domain] Promise.reject keeps subclass receiver", async () => {
+  class DomainPromise<T> extends Promise<T> {}
+  const error = new Error("subclass rejection");
+  const rejected = DomainPromise.reject(error);
+
+  assertEquals(rejected instanceof DomainPromise, true);
+  await rejected.catch((err) => {
+    assertEquals(err, error);
+  });
+});
+
 Deno.test("should work on throws", async function () {
   const deferred = Promise.withResolvers<void>();
   const d = domain.create();

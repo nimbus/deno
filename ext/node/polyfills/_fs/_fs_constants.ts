@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 (function () {
 const { core, primordials } = __bootstrap;
-const { ObjectCreate, ObjectKeys } = primordials;
+const { ObjectCreate, ObjectKeys, SafeArrayIterator } = primordials;
 const { fs } = core.loadExtScript(
   "ext:deno_node/internal_binding/constants.ts",
 );
@@ -68,7 +68,7 @@ const {
 
 function copyDefinedConstants(source: Record<string, number | undefined>) {
   const constants = ObjectCreate(null) as Record<string, number>;
-  for (const key of ObjectKeys(source)) {
+  for (const key of new SafeArrayIterator(ObjectKeys(source))) {
     const value = source[key];
     if (value !== undefined) {
       constants[key] = value;

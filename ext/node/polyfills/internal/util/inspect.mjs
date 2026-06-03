@@ -62,12 +62,10 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const { codes } = core.loadExtScript("ext:deno_node/internal/error_codes.ts");
 const {
-  colors,
   createStylizeWithColor,
   formatBigInt,
   formatNumber,
   formatValue,
-  styles,
 } = core.loadExtScript("ext:deno_web/01_console.js");
 
 // Set Graphics Rendition https://en.wikipedia.org/wiki/ANSI_escape_code#graphics
@@ -486,12 +484,12 @@ function addNumericSeparators(value) {
     : value;
   const sign = withoutSuffix[0] === "-" ? "-" : "";
   const digits = sign ? StringPrototypeSlice(withoutSuffix, 1) : withoutSuffix;
-  if (!RegExpPrototypeTest(/^\d+$/, digits)) {
+  if (!RegExpPrototypeTest(new SafeRegExp(/^\d+$/), digits)) {
     return value;
   }
   const separated = StringPrototypeReplace(
     digits,
-    /\B(?=(\d{3})+(?!\d))/g,
+    new SafeRegExp(/\B(?=(\d{3})+(?!\d))/g),
     "_",
   );
   return `${sign}${separated}${hasBigIntSuffix ? "n" : ""}`;

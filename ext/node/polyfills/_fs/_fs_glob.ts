@@ -12,6 +12,7 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const { isMacOS, isWindows } = core.loadExtScript("ext:deno_node/_util/os.ts");
 const { kEmptyObject } = core.loadExtScript("ext:deno_node/internal/util.mjs");
+const lazyFs = core.createLazyLoader("node:fs");
 const lazyProcess = core.createLazyLoader("node:process");
 const lazyReaddir = core.createLazyLoader(
   "ext:deno_node/_fs/_fs_readdir.ts",
@@ -20,10 +21,6 @@ const {
   lstatPromise: lstat,
   lstatSync,
 } = core.loadExtScript("ext:deno_node/_fs/_fs_lstat.ts");
-const lazyStatUtils = core.createLazyLoader(
-  "ext:deno_node/internal/fs/stat_utils.ts",
-);
-
 const {
   basename,
   dirname,
@@ -195,32 +192,30 @@ function cloneSet(values) {
 }
 
 async function getFollowStats(path) {
-  try {
-    return lazyStatUtils().CFISBIS(await Deno.stat(path), false);
-  } catch {
-    return null;
-  }
+  return await new Promise((resolve) => {
+    lazyFs().stat(path, (err, stats) => resolve(err ? null : stats));
+  });
 }
 
 function getFollowStatsSync(path) {
   try {
-    return lazyStatUtils().CFISBIS(Deno.statSync(path), false);
+    return lazyFs().statSync(path, { throwIfNoEntry: false }) ?? null;
   } catch {
     return null;
   }
 }
 
 async function getRealpath(path) {
-  try {
-    return await Deno.realPath(path);
-  } catch {
-    return null;
-  }
+  return await new Promise((resolve) => {
+    lazyFs().realpath(path, (err, realPath) => {
+      resolve(err ? null : realPath);
+    });
+  });
 }
 
 function getRealpathSync(path) {
   try {
-    return Deno.realPathSync(path);
+    return lazyFs().realpathSync(path);
   } catch {
     return null;
   }

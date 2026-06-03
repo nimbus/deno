@@ -96,7 +96,7 @@ export class Interface extends _Interface {
           signal.removeEventListener("abort", onAbort);
         }
       };
-      let cb = (answer: string) => {
+      const cb = (answer: string) => {
         if (settled) {
           return;
         }

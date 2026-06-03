@@ -421,7 +421,7 @@ class ProgrammaticRun {
   #terminalDetails(type, error) {
     const details = {
       __proto__: null,
-      duration_ms: 0,
+      "duration_ms": 0,
       type,
     };
     if (error !== undefined) {
@@ -681,7 +681,7 @@ class ProgrammaticRun {
     }
     const record = {
       __proto__: null,
-      passed_on_attempt: this.#rerunAttempt,
+      "passed_on_attempt": this.#rerunAttempt,
       name: meta.name,
     };
     const childKeys = MapPrototypeGet(this.#rerunChildKeysByParentKey, key);

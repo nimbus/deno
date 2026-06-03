@@ -33,6 +33,7 @@ const {
   ObjectGetOwnPropertyDescriptors,
   ObjectSetPrototypeOf,
   ObjectValues,
+  PromisePrototypeThen,
 } = primordials;
 
 const { nextTick } = core.loadExtScript("ext:deno_node/_next_tick.ts");
@@ -60,7 +61,8 @@ function callbackify(original) {
     const cb = FunctionPrototypeBind(maybeCb, this);
     // In true node style we process the callback on `nextTick` with all the
     // implications (stack, `uncaughtException`, `async_hooks`)
-    ReflectApply(original, this, args).then(
+    PromisePrototypeThen(
+      ReflectApply(original, this, args),
       (ret) => nextTick(cb, null, ret),
       (rej) => {
         rej = rej || new NodeFalsyValueRejectionError(rej);

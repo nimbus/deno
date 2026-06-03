@@ -16,14 +16,25 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 
 let warningEmitted = false;
+
+type CapturedStdioStream = { write?: (chunk: Uint8Array) => unknown };
+type NodeProcessLike = {
+  emitWarning?: (warning: string, type?: string) => void;
+  stdout?: CapturedStdioStream;
+  stderr?: CapturedStdioStream;
+};
+
+function nodeProcess(): NodeProcessLike | undefined {
+  return (globalThis as { process?: NodeProcessLike }).process;
+}
+
 function emitExperimentalWarning() {
   if (warningEmitted) return;
   warningEmitted = true;
   // Match Node's "WASI is an experimental feature ..." warning. The
   // node_compat test runner asserts on this exact message via
   // common.expectWarning('ExperimentalWarning', ...).
-  // deno-lint-ignore no-explicit-any
-  const proc = (globalThis as any).process;
+  const proc = nodeProcess();
   if (proc && typeof proc.emitWarning === "function") {
     proc.emitWarning(
       "WASI is an experimental feature and might change at any time",
@@ -83,7 +94,7 @@ function shouldCaptureWasiStdio(): boolean {
 }
 
 function writeCapturedWasiStdio(
-  stream: { write?: (chunk: Uint8Array) => unknown } | undefined,
+  stream: CapturedStdioStream | undefined,
   memory: Uint8Array,
   iovsPtr: number,
   iovsLen: number,
@@ -316,7 +327,7 @@ class WASI {
       ) {
         const memoryBuffer = self.#getMemoryBuffer();
         if (shouldCaptureWasiStdio()) {
-          const proc = (globalThis as any).process;
+          const proc = nodeProcess();
           if (fd === stdoutFd) {
             return writeCapturedWasiStdio(
               proc?.stdout,

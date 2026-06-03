@@ -1,9 +1,12 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 (function () {
+const { primordials } = __bootstrap;
+const { Error } = primordials;
+
 function notInSeaError() {
   const err = new Error("Not in single executable application");
-  (err as any).code = "ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION";
+  (err as { code: string }).code = "ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION";
   return err;
 }
 

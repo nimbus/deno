@@ -15,7 +15,6 @@ const {
   DatePrototypeGetSeconds,
   ErrorCaptureStackTrace,
   NumberPrototypeToString,
-  ObjectCreate,
   ObjectDefineProperty,
   ObjectGetOwnPropertyDescriptor,
   ObjectKeys,

@@ -320,7 +320,10 @@ class NodeWorker extends EventEmitter {
     super();
 
     const URLConstructor = lazyUrl().URL;
-    const specifierIsUrl = specifier instanceof URLConstructor;
+    const specifierIsUrl = ObjectPrototypeIsPrototypeOf(
+      URLConstructor.prototype,
+      specifier,
+    );
     if (typeof specifier !== "string" && !specifierIsUrl) {
       throw new ERR_INVALID_ARG_TYPE("filename", ["string", "URL"], specifier);
     }
@@ -2013,10 +2016,11 @@ function receiveMessageOnPort(port: MessagePort): object | undefined {
 // our Node-style `ERR_CONSTRUCT_CALL_REQUIRED` instead of V8's default
 // "Class constructor X cannot be invoked without 'new'" -- the node_compat
 // suite asserts the specific code/constructor for both forms.
-// deno-lint-ignore no-explicit-any
 const nodePortListenersSymbol = Symbol("nodePortListeners");
 
-function NodeMessageChannel(this: any) {
+function NodeMessageChannel(
+  this: { port1?: MessagePort; port2?: MessagePort },
+) {
   if (new.target === undefined) {
     throw new ERR_CONSTRUCT_CALL_REQUIRED("MessageChannel");
   }

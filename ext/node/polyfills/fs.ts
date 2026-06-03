@@ -135,6 +135,13 @@ const { isIterable } = core.loadExtScript(
 type FileHandle = any;
 type ErrnoException = any;
 type BufferEncoding = any;
+
+function currentUserId(): number | undefined {
+  return isWindows || typeof process.getuid !== "function"
+    ? undefined
+    : process.getuid();
+}
+
 const {
   op_fs_read_file_async,
   op_fs_read_file_sync,
@@ -255,6 +262,9 @@ const {
   RegExpPrototype,
   RegExpPrototypeTest,
   SafeMap,
+  SafeWeakSet,
+  String,
+  StringPrototypeIncludes,
   StringPrototypeToString,
   SymbolAsyncIterator,
   SymbolDispose,
@@ -1206,7 +1216,7 @@ function access(
   function suppressInternalPromise(promise: Promise<unknown>) {
     let suppressedPromises = globalThis[nimbusAsyncHooksSuppressedPromises];
     if (suppressedPromises === undefined) {
-      suppressedPromises = new WeakSet();
+      suppressedPromises = new SafeWeakSet();
       ObjectDefineProperty(globalThis, nimbusAsyncHooksSuppressedPromises, {
         __proto__: null,
         value: suppressedPromises,
@@ -1234,9 +1244,9 @@ function access(
         let m = +mode || 0;
         let fileMode = +info.mode || 0;
 
-        if (Deno.build.os === "windows") {
+        if (isWindows) {
           m &= ~fsConstants.X_OK;
-        } else if (info.uid === Deno.uid()) {
+        } else if (info.uid === currentUserId()) {
           fileMode >>= 6;
         }
 
@@ -1296,9 +1306,9 @@ function accessSync(path: string | Buffer | URL, mode?: number) {
     }
     let m = +mode! || 0;
     let fileMode = +info.mode! || 0;
-    if (Deno.build.os === "windows") {
+    if (isWindows) {
       m &= ~fsConstants.X_OK;
-    } else if (info.uid === Deno.uid()) {
+    } else if (info.uid === currentUserId()) {
       fileMode >>= 6;
     }
     if ((m & fileMode) === m) {
@@ -2370,8 +2380,8 @@ function openPathStatus(path: string): "exists" | "missing" | "unknown" {
     const message = String(nodeError.message ?? (err as Error).message ?? "");
     if (
       nodeError.code === "ENOENT" ||
-      message.includes("ENOENT") ||
-      message.includes("os error 2")
+      StringPrototypeIncludes(message, "ENOENT") ||
+      StringPrototypeIncludes(message, "os error 2")
     ) {
       return "missing";
     }
@@ -2412,8 +2422,8 @@ function normalizeOpenError(
   const message = String(nodeError.message ?? err.message ?? "");
   const invalidArgument = message === "invalid_argument";
   const missingLike = nodeError.code === "ENOENT" ||
-    message.includes("ENOENT") ||
-    message.includes("os error 2");
+    StringPrototypeIncludes(message, "ENOENT") ||
+    StringPrototypeIncludes(message, "os error 2");
 
   if (invalidArgument || missingLike) {
     const status = openPathStatus(path);
@@ -3242,8 +3252,8 @@ function truncate(
       if (
         code === "ENOENT" ||
         message === "invalid_argument" ||
-        message.includes("ENOENT") ||
-        message.includes("os error 2")
+        StringPrototypeIncludes(message, "ENOENT") ||
+        StringPrototypeIncludes(message, "os error 2")
       ) {
         const enoent = new Error(
           `ENOENT: no such file or directory, open '${path}'`,

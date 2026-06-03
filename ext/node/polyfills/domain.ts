@@ -21,6 +21,7 @@ const {
   FunctionPrototypeApply,
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
+  Promise,
   ReflectApply,
   SafeMap,
 } = primordials;
@@ -367,6 +368,9 @@ internals.__patchDomainPromiseContext = patchPromisePrototype;
 function patchPromiseReject() {
   if (promiseRejectPatched) return;
   promiseRejectPatched = true;
+  // PromiseReject is Promise-bound in Deno primordials, but this wrapper must
+  // preserve the static method's dynamic constructor receiver.
+  // deno-lint-ignore prefer-primordials
   const originalReject = Promise.reject;
   ObjectDefineProperty(Promise, "reject", {
     __proto__: null,

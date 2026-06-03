@@ -137,11 +137,11 @@ function getHeapSpaceStatistics() {
       continue;
     }
     ArrayPrototypePush(heapSpaceStatistics, {
-      space_name: spaceName,
-      space_size: heapSpaceStatisticsBuffer[0],
-      space_used_size: heapSpaceStatisticsBuffer[1],
-      space_available_size: heapSpaceStatisticsBuffer[2],
-      physical_space_size: heapSpaceStatisticsBuffer[3],
+      "space_name": spaceName,
+      "space_size": heapSpaceStatisticsBuffer[0],
+      "space_used_size": heapSpaceStatisticsBuffer[1],
+      "space_available_size": heapSpaceStatisticsBuffer[2],
+      "physical_space_size": heapSpaceStatisticsBuffer[3],
     });
   }
   return heapSpaceStatistics;
@@ -152,25 +152,25 @@ const buffer = new Float64Array(15);
 function getHeapStatistics() {
   op_v8_get_heap_statistics(buffer);
 
-  const statistics = {
-    total_heap_size: buffer[0],
-    total_heap_size_executable: buffer[1],
-    total_physical_size: buffer[2],
-    total_available_size: buffer[3],
-    used_heap_size: buffer[4],
-    heap_size_limit: buffer[5],
-    malloced_memory: buffer[6],
-    peak_malloced_memory: buffer[7],
-    does_zap_garbage: buffer[8],
-    number_of_native_contexts: buffer[9],
-    number_of_detached_contexts: buffer[10],
-    total_global_handles_size: buffer[11],
-    used_global_handles_size: buffer[12],
-    external_memory: buffer[13],
+  const statistics: Record<string, number> = {
+    "total_heap_size": buffer[0],
+    "total_heap_size_executable": buffer[1],
+    "total_physical_size": buffer[2],
+    "total_available_size": buffer[3],
+    "used_heap_size": buffer[4],
+    "heap_size_limit": buffer[5],
+    "malloced_memory": buffer[6],
+    "peak_malloced_memory": buffer[7],
+    "does_zap_garbage": buffer[8],
+    "number_of_native_contexts": buffer[9],
+    "number_of_detached_contexts": buffer[10],
+    "total_global_handles_size": buffer[11],
+    "used_global_handles_size": buffer[12],
+    "external_memory": buffer[13],
   };
 
   if (currentNodeMajor() >= 26) {
-    statistics.total_allocated_bytes = buffer[14];
+    statistics["total_allocated_bytes"] = buffer[14];
   }
 
   return statistics;

@@ -2,7 +2,13 @@
 
 (function () {
 const { primordials } = __bootstrap;
-const { ObjectAssign, ObjectCreate, ObjectFreeze, ObjectKeys } = primordials;
+const {
+  ObjectAssign,
+  ObjectCreate,
+  ObjectFreeze,
+  ObjectKeys,
+  SafeArrayIterator,
+} = primordials;
 const { core } = __bootstrap;
 const { op_node_build_os, op_node_fs_constants } = core.ops;
 
@@ -896,10 +902,10 @@ const trace = {
 
 function copyBindingConstants(
   source: Record<string, unknown>,
-  options: { hideUvUdpIpv6Only?: boolean } = {},
+  options: { hideUvUdpIpv6Only?: boolean } = { __proto__: null },
 ) {
   const constants = ObjectCreate(null) as Record<string, unknown>;
-  for (const key of ObjectKeys(source)) {
+  for (const key of new SafeArrayIterator(ObjectKeys(source))) {
     if (options.hideUvUdpIpv6Only && key === "UV_UDP_IPV6ONLY") {
       continue;
     }

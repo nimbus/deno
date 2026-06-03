@@ -25,6 +25,7 @@
 
 (function () {
 const { core } = __bootstrap;
+const lazyProcess = core.createLazyLoader("node:process");
 const {
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
@@ -129,7 +130,7 @@ function emitInvalidPortUrlParseWarning() {
     return;
   }
   urlParseInvalidPortWarned = true;
-  process.emitWarning(
+  lazyProcess().default.emitWarning(
     "`url.parse()` accepts URLs with invalid ports. This behavior is " +
       "deprecated and will throw in a future version of Node.js.",
     "DeprecationWarning",
