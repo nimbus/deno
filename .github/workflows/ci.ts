@@ -1126,7 +1126,11 @@ const buildJobs = buildItems.map((rawBuildItem) => {
           matrix: testMatrix,
           failFast: false,
         },
-        steps: step.if(isNotTag.and(buildItem.skip.not()).and(shouldRunShard))(
+        steps: step.if(
+          isNotTag.and(buildItem.skip.not()).and(shouldRunShard).and(
+            buildsBinary,
+          ),
+        )(
           cloneRepoStep,
           cloneSubmodule("./tests/node_compat/runner/suite")
             .if(testCrateNameExpr.equals("node_compat")),
@@ -1335,7 +1339,7 @@ const buildJobs = buildItems.map((rawBuildItem) => {
         timeoutMinutes: 30,
         defaults,
         env,
-        steps: step.if(isNotTag.and(buildItem.skip.not()))(
+        steps: step.if(isNotTag.and(buildItem.skip.not()).and(buildsBinary))(
           cloneRepoStep,
           cloneStdSubmoduleStep,
           cloneSubmodule("./tests/wpt/suite"),
