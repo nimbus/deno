@@ -91,14 +91,29 @@ function wrapCallbackForDomain(cb, forceUndefinedThis) {
 
   return function (...args) {
     domain.enter();
+    let threw = true;
     try {
-      return ReflectApply(
+      const ret = ReflectApply(
         cb,
         forceUndefinedThis ? undefined : this,
         args,
       );
+      threw = false;
+      return ret;
     } finally {
-      domain.exit();
+      // Exit the domain only on the success path. When the callback throws,
+      // leave the domain on the stack so that the runtime's uncaught/
+      // unhandled-rejection dispatch still observes the live
+      // process.setUncaughtExceptionCaptureCallback hook and routes the error
+      // to this domain (test-domain-implicit-fs). domainUncaughtExceptionHandler
+      // removes the errored domain from the stack itself, mirroring Node's
+      // MakeCallback, which does NOT run domain.exit() when the callback throws.
+      // Running domain.exit() here would clear the capture callback before the
+      // (asynchronously dispatched) error is delivered, so it would escape the
+      // domain.
+      if (!threw) {
+        domain.exit();
+      }
     }
   };
 }

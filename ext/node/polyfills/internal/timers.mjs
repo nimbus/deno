@@ -221,32 +221,37 @@ Timeout.prototype[createTimer] = function () {
       // async_hooks lifecycle stays balanced even when the callback throws.
       return ret;
     } catch (e) {
-      // Capture the uncaught exception but do not dispatch it yet: Node's
-      // InternalCallbackScope::Close emits the 'after' hook FIRST, then
-      // triggers the uncaught exception, all while the timer's async context
-      // frame is still active. We mirror that ordering by emitting after/
-      // destroy in the finally and reporting the captured error there, before
-      // `oldContext` is restored, so AsyncLocalStorage.getStore() and
-      // async_hooks observe the timer's store/frame inside the handlers.
+      // Capture the uncaught exception but do not dispatch it from here: the
+      // finally block dispatches it BEFORE emitAfter/emitDestroy so the timer's
+      // async-context frame (and any domain entered by emitBefore) is still
+      // active when the error is delivered. See the finally comment for why the
+      // order is exception-first, then async_hooks teardown.
       didThrow = true;
       caught = e;
     } finally {
-      // Always close the async_hooks lifecycle. emitBefore pushed asyncId
-      // onto executionAsyncIdStack; emitAfter must run on BOTH the success and
-      // throw paths or the stack leaks and 'after' is never delivered to user
-      // hooks (the setInterval-throws case). This matches Node: 'after' fires
-      // whether or not the timer callback threw.
+      // On the throw path, dispatch the uncaught exception BEFORE closing the
+      // async_hooks lifecycle. Node's lib/internal/timers.js calls emitAfter
+      // OUTSIDE the try/finally (listOnTimeout, line ~80), so a throwing timer
+      // callback SKIPS emitAfter and the uncaught exception triggers while the
+      // resource's async-context frame -- and any domain entered by the
+      // emitBefore hook -- is still active. node:domain depends on this: its
+      // `after` hook runs domain.exit(), which clears the
+      // process.setUncaughtExceptionCaptureCallback hook. If emitAfter ran
+      // first the capture callback would already be null and the error would
+      // escape the domain (test-domain-timers-uncaught-exception,
+      // test-domain-implicit-fs). We still emitAfter/emitDestroy afterwards so
+      // the executionAsyncIdStack stays balanced and after()/destroy() fan out
+      // to live user hooks (test-async-hooks late-hook-enable / interval
+      // throws), but only after the error has been delivered to the domain.
+      if (didThrow) {
+        core.__reportException(caught);
+      }
+      // Close the async_hooks lifecycle on BOTH the success and throw paths so
+      // the stack does not leak and 'after' is delivered to user hooks.
       emitAfter(asyncId);
       if (!self._repeat && !self._asyncDestroyed) {
         self._asyncDestroyed = true;
         emitDestroy(asyncId);
-      }
-      // Dispatch the uncaught exception while the timer's context frame is
-      // still active (after 'after', before restoring oldContext), then
-      // swallow it so the 02_timers.js drain loop does not re-dispatch with
-      // the (already restored) outer context.
-      if (didThrow) {
-        core.__reportException(caught);
       }
       setAsyncContext(oldContext);
     }
