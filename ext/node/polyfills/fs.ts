@@ -199,7 +199,7 @@ const { basename, isAbsolute, relative, resolve, toNamespacedPath } =
 type Encoding = any;
 
 function resolvePathFromProcessCwd(path: string): string {
-  const cwd = denoFs.cwd();
+  const cwd = process.cwd();
   return isAbsolute(path) ? path : resolve(cwd, path);
 }
 
