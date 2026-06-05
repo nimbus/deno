@@ -11,6 +11,14 @@ const {
   validateObject,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const {
+  ERR_ASYNC_TYPE,
+  ERR_INVALID_ARG_TYPE,
+  ERR_INVALID_ASYNC_ID,
+} = core.loadExtScript("ext:deno_node/internal/errors.ts");
+const asyncWrapBinding = core.loadExtScript(
+  "ext:deno_node/internal_binding/async_wrap.ts",
+);
+const {
   AsyncHook,
   emitAfter,
   emitBefore,
@@ -19,6 +27,7 @@ const {
   enterAsyncResource,
   exitAsyncResource,
   executionAsyncId: internalExecutionAsyncId,
+  triggerAsyncId: internalTriggerAsyncId,
   executionAsyncResource: internalExecutionAsyncResource,
   newAsyncId,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
@@ -29,6 +38,7 @@ const {
   FunctionPrototypeBind,
   ArrayPrototypeUnshift,
   ObjectFreeze,
+  NumberIsSafeInteger,
 } = primordials;
 
 const {
@@ -47,21 +57,58 @@ class AsyncResource {
   type: string;
   #snapshot: unknown;
   #asyncId: number;
+  #triggerAsyncId: number;
 
-  constructor(type: string) {
+  constructor(
+    type: string,
+    opts: number | { triggerAsyncId?: number; requireManualDestroy?: boolean } =
+      {},
+  ) {
+    if (typeof type !== "string") {
+      throw new ERR_INVALID_ARG_TYPE("type", "string", type);
+    }
+    if (type.length <= 0) {
+      throw new ERR_ASYNC_TYPE(type);
+    }
+
+    let triggerAsyncId: number;
+    let requireManualDestroy = false;
+    if (typeof opts === "number") {
+      triggerAsyncId = opts;
+    } else {
+      const optTrigger = (opts as { triggerAsyncId?: number }).triggerAsyncId;
+      triggerAsyncId = optTrigger === undefined
+        ? internalExecutionAsyncId()
+        : optTrigger;
+      requireManualDestroy =
+        ((opts as { requireManualDestroy?: boolean }).requireManualDestroy) ??
+          false;
+    }
+
+    if (!NumberIsSafeInteger(triggerAsyncId) || triggerAsyncId < -1) {
+      throw new ERR_INVALID_ASYNC_ID("triggerAsyncId", triggerAsyncId);
+    }
+
     this.type = type;
     this.#snapshot = getAsyncContext();
     this.#asyncId = newAsyncId();
+    this.#triggerAsyncId = triggerAsyncId;
     // Fire the init hook so that async_hooks.createHook({ init }) callbacks
     // receive this resource, matching Node.js behaviour.
-    emitInit(this.#asyncId, type, internalExecutionAsyncId(), this);
+    emitInit(this.#asyncId, type, this.#triggerAsyncId, this);
     // Register with the FinalizationRegistry so emitDestroy is called when
-    // this object is garbage collected.
-    asyncResourceRegistry.register(this, this.#asyncId);
+    // this object is garbage collected (unless the caller opts out).
+    if (!requireManualDestroy) {
+      asyncResourceRegistry.register(this, this.#asyncId, this);
+    }
   }
 
   asyncId() {
     return this.#asyncId;
+  }
+
+  triggerAsyncId() {
+    return this.#triggerAsyncId;
   }
 
   runInAsyncScope(
@@ -70,11 +117,18 @@ class AsyncResource {
     ...args: unknown[]
   ) {
     const previousContext = getAsyncContext();
-    emitBefore(this.#asyncId);
+    // Pass `this` as the resource so emitBefore establishes it as the
+    // synchronously-active executionAsyncResource() BEFORE any user before()
+    // hook runs (Node: emitBefore(asyncId, triggerAsyncId, this) ->
+    // pushAsyncContext). emitAfter (in the finally below) pops it only after the
+    // user after() hook has run, so before/during/after all observe `this`.
+    emitBefore(this.#asyncId, this.#triggerAsyncId, this);
     try {
       setAsyncContext(this.#snapshot);
-      // Enter this resource as the current executionAsyncResource() so that
-      // user code inside the scope observes `this` as the active resource.
+      // Also enter this resource into the AsyncVariable so promise continuations
+      // created inside the scope inherit `this` across await transitions. The
+      // synchronous executionAsyncResource() value is already supplied by the
+      // emitBefore resource-stack push above.
       const prevResource = enterAsyncResource(this);
       try {
         return ReflectApply(fn, thisArg, args);
@@ -150,11 +204,15 @@ class AsyncLocalStorage {
   // deno-lint-ignore no-explicit-any
   run(store: any, callback: any, ...args: any[]): any {
     this.enabled = true;
-    const previous = this.#variable.enter(store);
+    // Save just this variable's previous slot value so that nested
+    // enterWith()/run() calls on *other* AsyncLocalStorage instances during
+    // the callback are not reverted when we return - only our slot is.
+    const oldStore = this.#variable.get();
+    this.#variable.enter(store);
     try {
       return ReflectApply(callback, null, args);
     } finally {
-      setAsyncContext(previous);
+      this.#variable.enter(oldStore);
     }
   }
 
@@ -163,12 +221,14 @@ class AsyncLocalStorage {
     if (!this.enabled) {
       return ReflectApply(callback, null, args);
     }
-    this.enabled = false;
-    try {
-      return ReflectApply(callback, null, args);
-    } finally {
-      this.enabled = true;
-    }
+    // Node 24's AsyncContextFrame model implements exit() as run(undefined, fn)
+    // (lib/internal/async_local_storage/async_context_frame.js:71-73). The fork
+    // is backed by AsyncVariable (V8 ContinuationPreservedEmbedderData), the same
+    // frame model, so entering an `undefined` store propagates across `await`
+    // boundaries - unlike the previous flag toggle, whose `finally` restored
+    // `enabled` at the first suspension and leaked the enclosing store
+    // (test/async-hooks/test-async-local-storage-async-functions.js).
+    return this.run(undefined, callback, ...args);
   }
 
   // deno-lint-ignore no-explicit-any
@@ -203,78 +263,17 @@ class AsyncLocalStorage {
 
 // Re-export executionAsyncId from internal
 const executionAsyncId = internalExecutionAsyncId;
-
-function triggerAsyncId() {
-  return 0;
-}
+const triggerAsyncId = internalTriggerAsyncId;
 
 const executionAsyncResource = internalExecutionAsyncResource;
 
+// Derived from the single source of truth in internal_binding/async_wrap.ts so
+// that `asyncWrapProviders` and `internalBinding('async_wrap').Providers` can
+// never drift apart (test/async-hooks/test-async-wrap-providers.js asserts they
+// are deep-equal). Frozen to satisfy the same fixture's "cannot modify" check.
 const asyncWrapProviders = ObjectFreeze({
   __proto__: null,
-  NONE: 0,
-  DIRHANDLE: 1,
-  DNSCHANNEL: 2,
-  ELDHISTOGRAM: 3,
-  FILEHANDLE: 4,
-  FILEHANDLECLOSEREQ: 5,
-  BLOBREADER: 6,
-  FSEVENTWRAP: 7,
-  FSREQCALLBACK: 8,
-  FSREQPROMISE: 9,
-  GETADDRINFOREQWRAP: 10,
-  GETNAMEINFOREQWRAP: 11,
-  HEAPSNAPSHOT: 12,
-  HTTP2SESSION: 13,
-  HTTP2STREAM: 14,
-  HTTP2PING: 15,
-  HTTP2SETTINGS: 16,
-  HTTPINCOMINGMESSAGE: 17,
-  HTTPCLIENTREQUEST: 18,
-  JSSTREAM: 19,
-  JSUDPWRAP: 20,
-  MESSAGEPORT: 21,
-  PIPECONNECTWRAP: 22,
-  PIPESERVERWRAP: 23,
-  PIPEWRAP: 24,
-  PROCESSWRAP: 25,
-  PROMISE: 26,
-  QUERYWRAP: 27,
-  QUIC_ENDPOINT: 28,
-  QUIC_LOGSTREAM: 29,
-  QUIC_PACKET: 30,
-  QUIC_SESSION: 31,
-  QUIC_STREAM: 32,
-  QUIC_UDP: 33,
-  SHUTDOWNWRAP: 34,
-  SIGNALWRAP: 35,
-  STATWATCHER: 36,
-  STREAMPIPE: 37,
-  TCPCONNECTWRAP: 38,
-  TCPSERVERWRAP: 39,
-  TCPWRAP: 40,
-  TTYWRAP: 41,
-  UDPSENDWRAP: 42,
-  UDPWRAP: 43,
-  SIGINTWATCHDOG: 44,
-  WORKER: 45,
-  WORKERHEAPSNAPSHOT: 46,
-  WRITEWRAP: 47,
-  ZLIB: 48,
-  CHECKPRIMEREQUEST: 49,
-  PBKDF2REQUEST: 50,
-  KEYPAIRGENREQUEST: 51,
-  KEYGENREQUEST: 52,
-  KEYEXPORTREQUEST: 53,
-  CIPHERREQUEST: 54,
-  DERIVEBITSREQUEST: 55,
-  HASHREQUEST: 56,
-  RANDOMBYTESREQUEST: 57,
-  RANDOMPRIMEREQUEST: 58,
-  SCRYPTREQUEST: 59,
-  SIGNREQUEST: 60,
-  TLSWRAP: 61,
-  VERIFYREQUEST: 62,
+  ...asyncWrapBinding.Providers,
 });
 
 // Use the AsyncHook from the internal module

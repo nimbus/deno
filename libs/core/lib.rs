@@ -183,6 +183,8 @@ pub use crate::runtime::MODULE_MAP_SLOT_INDEX;
 pub use crate::runtime::PollEventLoopOptions;
 pub use crate::runtime::RuntimeOptions;
 pub use crate::runtime::SharedArrayBufferStore;
+pub use crate::runtime::isolate_ptr_to_key;
+pub use crate::runtime::run_foreground_tasks;
 pub use crate::runtime::V8_WRAPPER_OBJECT_INDEX;
 pub use crate::runtime::V8_WRAPPER_TYPE_INDEX;
 pub use crate::runtime::host_defined_options::HOST_DEFINED_OPTIONS_KEY_INDEX;

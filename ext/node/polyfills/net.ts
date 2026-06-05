@@ -45,9 +45,13 @@ const { Duplex } = core.createLazyLoader("node:stream")();
 const {
   asyncIdSymbol,
   defaultTriggerAsyncIdScope,
+  emitAfter,
+  emitBefore,
   emitDestroy,
   emitInit,
+  enabledHooksExist,
   executionAsyncId,
+  getDefaultTriggerAsyncId,
   newAsyncId,
   ownerSymbol,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
@@ -1323,6 +1327,22 @@ function _afterShutdown(this: ShutdownWrap<TCP>) {
 
   debug("afterShutdown destroyed=%j", self.destroyed, self._readableState);
 
+  // When async_hooks tracked this SHUTDOWNWRAP in _final, bracket the
+  // user-visible completion with before/after and emit destroy once after.
+  // _asyncId is only set when hooks were enabled at init time, so this is a
+  // no-op (zero overhead) otherwise.
+  const asyncId = (this as any)._asyncId;
+  if (asyncId !== undefined) {
+    emitBefore(asyncId, self[asyncIdSymbol]);
+    try {
+      this.callback();
+    } finally {
+      emitAfter(asyncId);
+    }
+    emitDestroy(asyncId);
+    return;
+  }
+
   this.callback();
 }
 
@@ -1892,11 +1912,34 @@ Socket.prototype._final = function (cb) {
   req.oncomplete = _afterShutdown;
   req.handle = this._handle;
   req.callback = cb;
+  // Node tracks the native SHUTDOWNWRAP request through async_hooks. Our
+  // ShutdownWrap is a plain JS object, so emit the init lifecycle event here
+  // to match. Gated on enabledHooksExist() for zero overhead when no
+  // AsyncHook is active. The before/after/destroy events fire in
+  // _afterShutdown once the request completes.
+  if (enabledHooksExist()) {
+    (req as any)._asyncId = newAsyncId();
+    emitInit(
+      (req as any)._asyncId,
+      "SHUTDOWNWRAP",
+      getDefaultTriggerAsyncId(),
+      req,
+    );
+  }
   const err = this._handle.shutdown(req);
 
-  if (err === 1 || err === codeMap.get("ENOTCONN")) {
-    return cb();
-  } else if (err !== 0) {
+  if (err !== 0) {
+    // Synchronous finish (err === 1 / ENOTCONN) or error: _afterShutdown will
+    // not run, so the request is disposed here. Mirror Node's native
+    // ShutdownWrap::Dispose() by emitting destroy once for the init above
+    // (no before/after, since the completion callback never fires).
+    const asyncId = (req as any)._asyncId;
+    if (asyncId !== undefined) {
+      emitDestroy(asyncId);
+    }
+    if (err === 1 || err === codeMap.get("ENOTCONN")) {
+      return cb();
+    }
     return cb(errnoException(err, "shutdown"));
   }
 };

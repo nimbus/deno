@@ -355,6 +355,22 @@ const lazyNodeModules = {
   "sea": () => sea().default,
   "internal/child_process": () =>
     core.loadExtScript("ext:deno_node/internal/child_process.ts").default,
+  // Inactive AsyncContextFrame shim. The fork propagates async context through
+  // AsyncVariable (V8 ContinuationPreservedEmbedderData), not Node's
+  // AsyncContextFrame, and that model never retains a frame->AsyncLocalStorage
+  // strong reference. Reporting `enabled: false` lets fixtures skip the extra
+  // disable() whose sole purpose is breaking that Node-specific reference
+  // (test/async-hooks/test-async-local-storage-gcable.js).
+  "internal/async_context_frame": () => ({
+    enabled: false,
+    current() {
+      return undefined;
+    },
+    set() {},
+    exchange() {
+      return undefined;
+    },
+  }),
   "stream/web": () => core.loadExtScript("ext:deno_node/stream/web.js"),
   "inspector": () => core.loadExtScript("ext:deno_node/inspector.js"),
   "inspector/promises": () =>

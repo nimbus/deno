@@ -1798,42 +1798,45 @@ impl LibUvStreamWrap {
       .bytes_written
       .set(self.bytes_written.get() + total_bytes as u64);
 
-    // For small strings, try synchronous write first
-    // (mirrors Node's WriteString stack_storage[16384] optimization)
-    if total_bytes <= 16384 {
-      // SAFETY: stream is a valid non-null uv_stream_t (checked at call site).
-      let try_result = unsafe { uv_compat::uv_try_write(stream, &data) };
+    // Mirror Node's StreamBase::Write: always attempt a synchronous
+    // try_write first, regardless of payload size. When the write drains
+    // fully in one shot, no WriteWrap async resource is created, so
+    // async-hooks observes no init/destroy for a write that never went
+    // async (kLastWriteWasAsync=0). Node's stack_storage[16384] is only a
+    // copy-avoidance optimization, not a gate on the try_write attempt.
+    //
+    // SAFETY: stream is a valid non-null uv_stream_t (checked at call site).
+    let try_result = unsafe { uv_compat::uv_try_write(stream, &data) };
 
-      if try_result >= 0 && try_result as usize == total_bytes {
-        // Fully written synchronously
-        state_array.set_index(
-          scope,
-          StreamBaseStateFields::BytesWritten as u32,
-          v8::Number::new(scope, total_bytes as f64).into(),
-        );
-        state_array.set_index(
-          scope,
-          StreamBaseStateFields::LastWriteWasAsync as u32,
-          v8::Integer::new(scope, 0).into(),
-        );
-        return 0;
-      }
+    if try_result >= 0 && try_result as usize == total_bytes {
+      // Fully written synchronously
+      state_array.set_index(
+        scope,
+        StreamBaseStateFields::BytesWritten as u32,
+        v8::Number::new(scope, total_bytes as f64).into(),
+      );
+      state_array.set_index(
+        scope,
+        StreamBaseStateFields::LastWriteWasAsync as u32,
+        v8::Integer::new(scope, 0).into(),
+      );
+      return 0;
+    }
 
-      // Partial try_write — async write only the remaining bytes.
-      // split_off gives us an owned Vec of the tail without extra
-      // allocation beyond the single tail-copy.
-      if try_result > 0 {
-        let written = try_result as usize;
-        let tail = data.split_off(written);
-        return self.do_write(
-          scope,
-          stream,
-          tail,
-          total_bytes,
-          req_wrap_obj,
-          state_array,
-        );
-      }
+    // Partial try_write — async write only the remaining bytes.
+    // split_off gives us an owned Vec of the tail without extra
+    // allocation beyond the single tail-copy.
+    if try_result > 0 {
+      let written = try_result as usize;
+      let tail = data.split_off(written);
+      return self.do_write(
+        scope,
+        stream,
+        tail,
+        total_bytes,
+        req_wrap_obj,
+        state_array,
+      );
     }
 
     // Full async write (no try_write or try_write returned error/0)

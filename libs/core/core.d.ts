@@ -178,6 +178,7 @@ export namespace core {
     ) => void,
     emitAfter: (asyncId: number) => void,
     emitDestroy: (asyncId: number) => void,
+    drainDestroyAsyncIds?: () => void,
   ): void;
 
   /** Check if there's a scheduled "next tick". */

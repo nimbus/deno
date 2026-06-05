@@ -98,6 +98,14 @@ const lazyInternalTty = core.createLazyLoader(
   "ext:deno_node/internal/tty.js",
 );
 const { enableNextTick } = core.loadExtScript("ext:deno_node/_next_tick.ts");
+// Runs the 'unhandledRejection' emit inside the rejected promise's async scope
+// so executionAsyncId()/triggerAsyncId() in the handler resolve to the promise
+// (test-async-hooks/test-unhandled-rejection-context). Shares async_hooks.ts'
+// promiseInfo map (loadExtScript is a singleton). No load cycle: async_hooks.ts
+// pulls only async_wrap/errors/symbols, never process.ts.
+const { runInPromiseRejectionScope } = core.loadExtScript(
+  "ext:deno_node/internal/async_hooks.ts",
+);
 const { isAndroid, isWindows } = core.loadExtScript(
   "ext:deno_node/_util/os.ts",
 );
@@ -1612,7 +1620,12 @@ function synchronizeListeners() {
       }
 
       event.preventDefault();
-      process.emit("unhandledRejection", event.reason, event.promise);
+      // Emit inside the rejected promise's async scope so an async_hooks
+      // unhandledRejection handler observes the promise's executionAsyncId
+      // rather than the empty top-level scope (test-unhandled-rejection-context).
+      runInPromiseRejectionScope(event.promise, () => {
+        process.emit("unhandledRejection", event.reason, event.promise);
+      });
     };
   } else {
     internals.nodeProcessUnhandledRejectionCallback = undefined;

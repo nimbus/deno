@@ -27,7 +27,7 @@ const _: () = assert!(
     == std::mem::size_of::<usize>()
 );
 
-pub(crate) fn isolate_ptr_to_key(ptr: v8::UnsafeRawIsolatePtr) -> usize {
+pub fn isolate_ptr_to_key(ptr: v8::UnsafeRawIsolatePtr) -> usize {
   // SAFETY: UnsafeRawIsolatePtr is #[repr(transparent)] over *mut RealIsolate,
   // which is pointer-sized. The compile-time assert above guarantees this.
   unsafe { std::mem::transmute::<v8::UnsafeRawIsolatePtr, usize>(ptr) }
@@ -74,6 +74,34 @@ pub fn register_isolate(
 pub fn unregister_isolate(isolate_ptr: usize) {
   let mut map = ISOLATE_ENTRIES.lock().unwrap();
   map.remove(&isolate_ptr);
+}
+
+/// Drain and run every foreground task currently queued for `isolate_ptr`,
+/// returning `true` if at least one task ran. Does NOT perform a microtask
+/// checkpoint -- the caller holds the HandleScope and is responsible for that.
+///
+/// V8's microtask policy here is Explicit, so FinalizationRegistry cleanup is
+/// posted as a foreground task rather than run inline. The event loop drains
+/// these in its pre-phase, but a synchronous embedder op (the test-only
+/// force-GC op) has no event-loop turn between the `low_memory_notification`
+/// that schedules cleanup and the point it needs the resulting destroy
+/// callbacks to have fired. This lets such a caller pump the queue itself.
+///
+/// The isolate-registry lock is released before any task runs, so a task that
+/// re-posts foreground work (via `queue_task`) cannot deadlock.
+pub fn run_foreground_tasks(isolate_ptr: usize) -> bool {
+  let tasks = {
+    let map = ISOLATE_ENTRIES.lock().unwrap();
+    match map.get(&isolate_ptr) {
+      Some(entry) => std::mem::take(&mut *entry.tasks.lock().unwrap()),
+      None => return false,
+    }
+  };
+  let had_tasks = !tasks.is_empty();
+  for task in tasks {
+    task.run();
+  }
+  had_tasks
 }
 
 /// Queue an immediate foreground task and wake the event loop.

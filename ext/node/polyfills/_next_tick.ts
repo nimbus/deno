@@ -14,7 +14,9 @@ const {
   emitAfter,
   emitBefore,
   emitDestroy,
+  drainDestroyAsyncIds,
   emitInit,
+  enabledHooksExist,
   executionAsyncId,
   newAsyncId: nextAsyncId,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
@@ -31,7 +33,48 @@ function enableNextTick() {
   // and async hook implementation would live in core
   // Register the async hook emit functions directly with core.
   // The core drain loop calls these inline per-tick -- no indirection.
-  core.setAsyncHooksEmit(emitBefore, emitAfter, emitDestroy);
+  // drainDestroyAsyncIds is called at the top of each runImmediates() pass so
+  // deferred destroys flush BETWEEN immediate snapshots (Node's native
+  // DestroyAsyncIdsCallback timing); see async_hooks.ts scheduleDestroyDrain.
+  core.setAsyncHooksEmit(
+    emitBefore,
+    emitAfter,
+    emitDestroy,
+    drainDestroyAsyncIds,
+  );
+
+  // Override the deno_core global queueMicrotask (libs/core/01_core.js) with a
+  // Node-faithful version. The core implementation enqueues the callback raw
+  // and never creates an AsyncResource, so a microtask scheduled while
+  // async_hooks tracking is on reads the stack-bottom triggerAsyncId (0)
+  // instead of the enclosing async id. Mirrors lib/internal/process/task_queues.js
+  // queueMicrotask: wrap in AsyncResource('Microtask') + runInAsyncScope when
+  // hooks (or an async context) are active, otherwise keep the core fast path.
+  // Loaded lazily here (at bootstrap, after all modules register) to avoid an
+  // eager load-graph cycle through async_hooks.ts.
+  const { AsyncResource } = core.loadExtScript(
+    "ext:deno_node/async_hooks.ts",
+  );
+  const coreQueueMicrotask = globalThis.queueMicrotask;
+  function queueMicrotask(callback: () => void) {
+    validateFunction(callback, "callback");
+    if (getAsyncContext() || enabledHooksExist()) {
+      const asyncResource = new AsyncResource("Microtask", {
+        requireManualDestroy: true,
+      });
+      coreQueueMicrotask(() => {
+        try {
+          asyncResource.runInAsyncScope(callback);
+        } finally {
+          asyncResource.emitDestroy();
+        }
+      });
+    } else {
+      // Fast path: no async hooks and no async context in use.
+      coreQueueMicrotask(callback);
+    }
+  }
+  globalThis.queueMicrotask = queueMicrotask;
 }
 
 // Re-export from core for consumers (e.g. timers.mjs)

@@ -234,6 +234,90 @@ pub unsafe fn uv_stream_set_blocking(
   0
 }
 
+/// Issue a real non-blocking vectored write syscall directly on the socket
+/// fd, bypassing tokio's cached-readiness gate.
+///
+/// tokio's `try_write`/`try_write_vectored` route through
+/// `Registration::try_io`, which short-circuits to `WouldBlock` whenever its
+/// internal write-readiness cache is empty -- *without* issuing the syscall.
+/// A socket fresh from `accept()`/`connect()` has an empty write-readiness
+/// cache, so the very first write spuriously reports `WouldBlock` and gets
+/// pushed onto the async `do_write` path, manufacturing a WRITEWRAP async
+/// resource that real libuv never creates (libuv issues `write(2)`/`writev(2)`
+/// on the fd directly in `uv__try_write`). That spurious WRITEWRAP is what
+/// `test/async-hooks/test-writewrap.js` observes as "2 out of 1 WRITEWRAPs".
+///
+/// Mirror libuv: issue the syscall ourselves so a writable socket drains
+/// synchronously on the first attempt. The async fallback in
+/// `tcp.rs`'s write pump re-arms tokio's write interest via
+/// `poll_write_ready`, so a genuinely-full socket still parks correctly.
+///
+/// Returns the byte count on success (possibly a short write, which the
+/// caller queues just like libuv), `UV_EAGAIN` when the kernel itself
+/// reports the socket would block, or a negative uv error code otherwise.
+#[cfg(unix)]
+fn raw_try_write_vectored(
+  stream: &tokio::net::TcpStream,
+  bufs: &[std::io::IoSlice<'_>],
+) -> i32 {
+  use std::os::unix::io::AsRawFd;
+
+  if bufs.is_empty() {
+    return 0;
+  }
+
+  // `MSG_DONTWAIT` keeps the call non-blocking even though tokio already sets
+  // `O_NONBLOCK`. `MSG_NOSIGNAL` (Linux only) suppresses SIGPIPE on a broken
+  // pipe; macOS/BSD lack the flag, but Rust's std runtime sets SIGPIPE to
+  // SIG_IGN process-wide, so a broken write returns EPIPE there instead of
+  // killing the process.
+  #[cfg(target_os = "linux")]
+  const SEND_FLAGS: c_int = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+  #[cfg(not(target_os = "linux"))]
+  const SEND_FLAGS: c_int = libc::MSG_DONTWAIT;
+
+  let fd = stream.as_raw_fd();
+  // `std::io::IoSlice` is documented as ABI-compatible with `struct iovec`
+  // on Unix, so the slice is handed straight to `sendmsg`.
+  let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+  msg.msg_iov = bufs.as_ptr() as *mut libc::iovec;
+  msg.msg_iovlen = bufs.len() as _;
+  // SAFETY: `bufs` outlives the call; `sendmsg` does not retain `msg_iov`
+  // past the call, and `fd` is a valid connected socket per caller contract.
+  let n = unsafe { libc::sendmsg(fd, &msg, SEND_FLAGS) };
+  if n >= 0 {
+    return n as i32;
+  }
+  let err = std::io::Error::last_os_error();
+  match err.raw_os_error() {
+    Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => UV_EAGAIN,
+    _ => super::io_error_to_uv(&err),
+  }
+}
+
+/// Windows keeps tokio's `try_write_vectored`: the readiness-cache divergence
+/// is an epoll/kqueue reactor artifact, and the IOCP-backed Windows reactor
+/// does not exhibit it. Rewriting this as raw `WSASend` is untested on the
+/// macOS/Linux dev+CI surface, so the lower-risk path is to leave it.
+#[cfg(not(unix))]
+fn raw_try_write_vectored(
+  stream: &tokio::net::TcpStream,
+  bufs: &[std::io::IoSlice<'_>],
+) -> i32 {
+  match stream.try_write_vectored(bufs) {
+    Ok(n) => n as i32,
+    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => UV_EAGAIN,
+    Err(ref e) => super::io_error_to_uv(e),
+  }
+}
+
+/// Single-buffer raw non-blocking write. Delegates to the vectored helper so
+/// both `uv_try_write` and `uv_try_writev` share one syscall path and the
+/// same readiness-cache bypass. See [`raw_try_write_vectored`].
+fn raw_try_write(stream: &tokio::net::TcpStream, data: &[u8]) -> i32 {
+  raw_try_write_vectored(stream, &[std::io::IoSlice::new(data)])
+}
+
 /// ### Safety
 /// `handle` must be a valid pointer to an initialized stream handle
 /// (`uv_tcp_t`, `uv_tty_t`, or `uv_pipe_t`, cast as `uv_stream_t`).
@@ -314,11 +398,7 @@ pub unsafe fn uv_try_writev(
     None => return UV_EBADF,
   };
 
-  match stream.try_write_vectored(bufs) {
-    Ok(n) => n as i32,
-    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => UV_EAGAIN,
-    Err(ref e) => super::io_error_to_uv(e),
-  }
+  raw_try_write_vectored(stream, bufs)
 }
 
 /// ### Safety
@@ -357,11 +437,7 @@ pub unsafe fn uv_try_write(handle: *mut uv_stream_t, data: &[u8]) -> i32 {
     None => return UV_EBADF,
   };
 
-  match stream.try_write(data) {
-    Ok(n) => n as i32,
-    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => UV_EAGAIN,
-    Err(ref e) => super::io_error_to_uv(e),
-  }
+  raw_try_write(stream, data)
 }
 
 /// ### Safety

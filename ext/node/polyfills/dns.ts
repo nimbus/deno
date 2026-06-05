@@ -76,8 +76,47 @@ const {
   QueryReqWrap,
 } = core.loadExtScript("ext:deno_node/internal_binding/cares_wrap.ts");
 const { domainToASCII } = core.loadExtScript("ext:deno_node/internal/idna.ts");
+const {
+  emitAfter,
+  emitBefore,
+  emitDestroy,
+  emitInit,
+  enabledHooksExist,
+  getDefaultTriggerAsyncId,
+  newAsyncId,
+} = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 
 const { ObjectDefineProperty } = primordials;
+
+// Mirror Node's async_hooks resource tracking for DNS request wraps so that
+// AsyncHook consumers observe init/before/after/destroy around the underlying
+// libuv request. When no AsyncHook is active this is a single branch with no
+// allocation and the original `oncomplete` is left untouched.
+function trackDnsReq(
+  // deno-lint-ignore no-explicit-any
+  req: any,
+  type: "GETADDRINFOREQWRAP" | "GETNAMEINFOREQWRAP" | "QUERYWRAP",
+) {
+  if (!enabledHooksExist()) {
+    return;
+  }
+
+  const asyncId = newAsyncId();
+  req._asyncId = asyncId;
+  emitInit(asyncId, type, getDefaultTriggerAsyncId(), req);
+
+  const oncomplete = req.oncomplete;
+  // deno-lint-ignore no-explicit-any
+  req.oncomplete = function (this: unknown, ...args: any[]) {
+    emitBefore(asyncId, getDefaultTriggerAsyncId());
+    try {
+      return oncomplete.apply(this, args);
+    } finally {
+      emitAfter(asyncId);
+      emitDestroy(asyncId);
+    }
+  };
+}
 
 function onlookup(
   this: GetAddrInfoReqWrap,
@@ -280,6 +319,7 @@ function lookup(
   req.family = family;
   req.hostname = hostname;
   req.oncomplete = all ? onlookupall : onlookup;
+  trackDnsReq(req, "GETADDRINFOREQWRAP");
   req.port = port;
 
   const err = cares.getaddrinfo(
@@ -346,6 +386,7 @@ function lookupService(
   req.address = address;
   req.port = port;
   req.oncomplete = onlookupservice;
+  trackDnsReq(req, "GETNAMEINFOREQWRAP");
 
   const errCode = cares.getnameinfo(req, address, port);
   if (errCode) {
@@ -403,6 +444,7 @@ function resolver(bindingName: string) {
     req.callback = callback as ResolveCallback;
     req.hostname = name;
     req.oncomplete = onresolve;
+    trackDnsReq(req, "QUERYWRAP");
     req.ttl = !!(options && (options as ResolveOptions).ttl);
 
     const err = this._handle[bindingName](req, domainToASCII(name));

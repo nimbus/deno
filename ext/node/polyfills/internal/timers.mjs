@@ -196,36 +196,61 @@ Timeout.prototype[createTimer] = function () {
     }
     return ret;
   }
-  if (enabledHooksExist()) {
-    cb = function () {
-      const oldContext = getAsyncContext();
-      try {
-        setAsyncContext(asyncContext);
-        emitBefore(asyncId, triggerAsyncId, self);
-        const ret = invokeCallback();
-        // Only emit after/destroy on success. On error, the domain's
-        // uncaught exception handler manages the stack cleanup.
-        emitAfter(asyncId);
-        if (!self._repeat && !self._asyncDestroyed) {
-          self._asyncDestroyed = true;
-          emitDestroy(asyncId);
-        }
-        return ret;
-      } finally {
-        setAsyncContext(oldContext);
+  // Run the async_hooks lifecycle UNCONDITIONALLY, mirroring Node's
+  // listOnTimeout (lib/internal/timers.js): emitBefore/emitAfter/emitDestroy are
+  // always called and self-gate internally on the live hook set. The earlier
+  // enabledHooksExist() fast-path captured the hook state at fire-ENTRY, which
+  // broke timers that enable a hook from inside their own callback: the timer's
+  // asyncId was assigned in the ctor and stays valid, so when the callback calls
+  // hook.enable() the paired emitAfter/emitDestroy MUST fan out to the
+  // now-enabled hook (test-async-hooks-late-hook-enable). emitBefore still
+  // pushes the execution-async-id stack even with no live before() hooks, so
+  // `before: mustNotCall()` stays satisfied while after()/destroy() fire. When
+  // no hook is ever enabled the emit* calls iterate an empty array and only
+  // push/pop the id stack, matching Node's always-on push/pop in
+  // pushAsyncContext/popAsyncContext.
+  cb = function () {
+    const oldContext = getAsyncContext();
+    let caught;
+    let didThrow = false;
+    try {
+      setAsyncContext(asyncContext);
+      emitBefore(asyncId, triggerAsyncId, self);
+      const ret = invokeCallback();
+      // emitAfter/emitDestroy run in the finally block below so the
+      // async_hooks lifecycle stays balanced even when the callback throws.
+      return ret;
+    } catch (e) {
+      // Capture the uncaught exception but do not dispatch it yet: Node's
+      // InternalCallbackScope::Close emits the 'after' hook FIRST, then
+      // triggers the uncaught exception, all while the timer's async context
+      // frame is still active. We mirror that ordering by emitting after/
+      // destroy in the finally and reporting the captured error there, before
+      // `oldContext` is restored, so AsyncLocalStorage.getStore() and
+      // async_hooks observe the timer's store/frame inside the handlers.
+      didThrow = true;
+      caught = e;
+    } finally {
+      // Always close the async_hooks lifecycle. emitBefore pushed asyncId
+      // onto executionAsyncIdStack; emitAfter must run on BOTH the success and
+      // throw paths or the stack leaks and 'after' is never delivered to user
+      // hooks (the setInterval-throws case). This matches Node: 'after' fires
+      // whether or not the timer callback threw.
+      emitAfter(asyncId);
+      if (!self._repeat && !self._asyncDestroyed) {
+        self._asyncDestroyed = true;
+        emitDestroy(asyncId);
       }
-    };
-  } else {
-    cb = function () {
-      const oldContext = getAsyncContext();
-      try {
-        setAsyncContext(asyncContext);
-        return invokeCallback();
-      } finally {
-        setAsyncContext(oldContext);
+      // Dispatch the uncaught exception while the timer's context frame is
+      // still active (after 'after', before restoring oldContext), then
+      // swallow it so the 02_timers.js drain loop does not re-dispatch with
+      // the (already restored) outer context.
+      if (didThrow) {
+        core.__reportException(caught);
       }
-    };
-  }
+      setAsyncContext(oldContext);
+    }
+  };
   const timer = createTimer_(
     cb,
     this._idleTimeout,
@@ -386,6 +411,14 @@ class Immediate {
       try {
         setAsyncContext(asyncContext);
         return ReflectApply(unboundCallback, self, argv);
+      } catch (e) {
+        // Dispatch the uncaught exception while the immediate's async context
+        // is still active so 'uncaughtException' / 'uncaughtExceptionMonitor'
+        // handlers observe the correct AsyncLocalStorage store, matching Node's
+        // InternalCallbackScope::Close ordering. Swallow afterwards so the
+        // runImmediateCallbacks drain loop does not re-dispatch with the
+        // (already restored) outer context.
+        core.__reportException(e);
       } finally {
         setAsyncContext(oldContext);
       }

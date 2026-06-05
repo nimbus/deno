@@ -23,7 +23,16 @@
 (function () {
 const { core, primordials } = __bootstrap;
 
-const { ownerSymbol } = core.loadExtScript(
+const {
+  ownerSymbol,
+  newAsyncId,
+  emitInit,
+  emitBefore,
+  emitAfter,
+  emitDestroy,
+  getDefaultTriggerAsyncId,
+  enabledHooksExist,
+} = core.loadExtScript(
   "ext:deno_node/internal/async_hooks.ts",
 );
 // deno-lint-ignore no-unused-vars
@@ -115,37 +124,55 @@ function handleWriteReq(req: any, data: any, encoding: string) {
 
 // deno-lint-ignore no-explicit-any
 function onWriteComplete(this: any, status: number) {
-  let stream = this.handle[ownerSymbol];
+  // An async write tracked an async_hooks resource in afterWriteDispatched.
+  // Bracket the completion in before/after and destroy the resource exactly
+  // once. Sync writes never reach here, so req._asyncId stays undefined and
+  // nothing is emitted. The try/finally keeps before/after balanced and the
+  // destroy single even if the user callback throws.
+  const asyncId = this._asyncId;
 
-  if (stream.constructor.name === "ReusedHandle") {
-    stream = stream.handle;
+  if (asyncId !== undefined) {
+    emitBefore(asyncId, this._triggerAsyncId);
   }
 
-  if (status < 0) {
-    const ex = errnoException(status, "write", this.error);
+  try {
+    let stream = this.handle[ownerSymbol];
 
-    if (typeof this.callback === "function") {
-      this.callback(ex);
-    } else {
-      stream.destroy(ex);
+    if (stream.constructor.name === "ReusedHandle") {
+      stream = stream.handle;
     }
 
-    return;
-  }
+    if (status < 0) {
+      const ex = errnoException(status, "write", this.error);
 
-  if (stream.destroyed) {
+      if (typeof this.callback === "function") {
+        this.callback(ex);
+      } else {
+        stream.destroy(ex);
+      }
+
+      return;
+    }
+
+    if (stream.destroyed) {
+      if (typeof this.callback === "function") {
+        this.callback(null);
+      }
+
+      return;
+    }
+
+    stream[kUpdateTimer]();
+    stream[kAfterAsyncWrite](this);
+
     if (typeof this.callback === "function") {
       this.callback(null);
     }
-
-    return;
-  }
-
-  stream[kUpdateTimer]();
-  stream[kAfterAsyncWrite](this);
-
-  if (typeof this.callback === "function") {
-    this.callback(null);
+  } finally {
+    if (asyncId !== undefined) {
+      emitAfter(asyncId);
+      emitDestroy(asyncId);
+    }
   }
 }
 
@@ -242,6 +269,18 @@ function afterWriteDispatched(
 ) {
   req.bytes = streamBaseState[kBytesWritten];
   req.async = !!streamBaseState[kLastWriteWasAsync];
+
+  // Track the WriteWrap request as an async resource so async_hooks can
+  // observe init/before/after/destroy, matching Node's native AsyncWrap.
+  // Only asynchronous writes complete via onWriteComplete, so a synchronous
+  // write must NOT emit init (otherwise the init count is 2 instead of 1).
+  // Guard on enabledHooksExist() so there is zero overhead when no AsyncHook
+  // is active.
+  if (req.async && enabledHooksExist()) {
+    req._asyncId = newAsyncId();
+    req._triggerAsyncId = getDefaultTriggerAsyncId();
+    emitInit(req._asyncId, "WRITEWRAP", req._triggerAsyncId, req);
+  }
 
   if (err !== 0) {
     return cb(errnoException(err, "write", req.error));

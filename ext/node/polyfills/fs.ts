@@ -228,12 +228,14 @@ const {
   unregisterActiveRequest,
 } = core.loadExtScript("ext:deno_node/internal/process/active_resources.ts");
 const {
+  drainDestroyAsyncIds,
   emitAfter,
   emitBefore,
   emitDestroy,
   emitInit,
   enabledHooksExist,
   executionAsyncId,
+  getDefaultTriggerAsyncId,
   newAsyncId,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 
@@ -262,7 +264,6 @@ const {
   RegExpPrototype,
   RegExpPrototypeTest,
   SafeMap,
-  SafeWeakSet,
   String,
   StringPrototypeIncludes,
   StringPrototypeToString,
@@ -276,13 +277,6 @@ const {
   Uint8Array,
   queueMicrotask,
 } = primordials;
-
-const nimbusAsyncHooksSuppressionDepth = SymbolFor(
-  "nimbus.asyncHooksSuppressionDepth",
-);
-const nimbusAsyncHooksSuppressedPromises = SymbolFor(
-  "nimbus.asyncHooksSuppressedPromises",
-);
 
 const { TextEncoder } = core.loadExtScript(
   "ext:deno_web/08_text_encoding.js",
@@ -332,25 +326,37 @@ function stat(
   callback = makeCallback(callback);
   path = getValidatedPathToString(path);
 
-  PromisePrototypeThen(
-    Deno.stat(path),
-    (stat) => callback(null, CFISBIS(stat, options.bigint)),
-    (err) => {
-      // Match Node: `{ throwIfNoEntry: false }` suppresses ENOENT and yields
-      // undefined stats, matching the behavior of binding.stat(..., false)
-      // in lib/fs.js stat().
-      if (
-        (options as statOptions)?.throwIfNoEntry === false &&
-        ObjectPrototypeIsPrototypeOf(Deno.errors.NotFound.prototype, err)
-      ) {
-        callback(null, undefined);
-        return;
-      }
-      callback(
-        denoErrorToNodeError(err, { syscall: "stat", path }),
-      );
-    },
-  );
+  // Suppress async_hooks tracking for the internal Deno.stat promise and its
+  // continuation: these are runtime-internal (not user-observable Node
+  // resources), so the fork's promiseInitHook records them in suppressedPromises
+  // and hides their whole lifecycle from fixture hooks -- the same discipline as
+  // access()/open() above. Without this, the StatWatcher poll loop (statAsync ->
+  // statPromisified -> stat) leaks internal promises whose GC-driven destroy
+  // surfaces with no paired init. See test/async-hooks/test-statwatcher.js.
+  core.incPromiseHooksSuppressed();
+  try {
+    PromisePrototypeThen(
+      Deno.stat(path),
+      (stat) => callback(null, CFISBIS(stat, options.bigint)),
+      (err) => {
+        // Match Node: `{ throwIfNoEntry: false }` suppresses ENOENT and yields
+        // undefined stats, matching the behavior of binding.stat(..., false)
+        // in lib/fs.js stat().
+        if (
+          (options as statOptions)?.throwIfNoEntry === false &&
+          ObjectPrototypeIsPrototypeOf(Deno.errors.NotFound.prototype, err)
+        ) {
+          callback(null, undefined);
+          return;
+        }
+        callback(
+          denoErrorToNodeError(err, { syscall: "stat", path }),
+        );
+      },
+    );
+  } finally {
+    core.decPromiseHooksSuppressed();
+  }
 }
 
 function statSync(path: string | Buffer | URL): Stats;
@@ -784,6 +790,89 @@ async function readFileFromFd(fd: number, options?: FileOptions) {
   return readFileConcatBuffers(buffers);
 }
 
+// Node's fs.readFile issues a chain of libuv FS requests -- open, fstat, read,
+// close -- and each one is an FSReqCallback async resource that fires
+// init/before/after/destroy (see ReadFileContext in
+// lib/internal/fs/read/context.js). Nimbus collapses the whole read into a
+// single op, so when async_hooks are active we replay that four-step
+// FSREQCALLBACK chain around the completion callback to keep fixtures such as
+// test/async-hooks/test-fsreqcallback-readFile.js valid. The first req's
+// trigger is the caller's execution context (captured synchronously at call
+// time, since this replay runs inside a promise continuation); each later req
+// is init'd while the previous req's before scope is still active, so its
+// triggerAsyncId is the previous req's uid (a linear chain rooted at the
+// caller); the first three reqs are then fully closed (after + destroy) before
+// the next step runs, while the final "close" req's before scope is where the
+// user callback runs -- matching Node, where onread fires from inside the last
+// in-flight request. Mirrors the single FSREQCALLBACK emitted by access() below
+// (createFSReqCallback + emitInit/emitBefore/emitAfter/emitDestroy). The data
+// and error are already resolved by the caller, so I/O behavior is unchanged;
+// no resource is allocated when no AsyncHook is active.
+function runReadFileReqChain(
+  cb: ReadFileCallback,
+  triggerAsyncId: number,
+  err: Error | null,
+  data?: string | Buffer,
+): void {
+  if (!enabledHooksExist()) {
+    (cb as ReadFileGenericCallback)(err, data);
+    return;
+  }
+
+  const stageCount = 4;
+  let prevId = 0;
+  // deno-lint-ignore no-explicit-any
+  let prevReq: any;
+  for (let i = 0; i < stageCount; i++) {
+    const request = createFSReqCallback();
+    const asyncId = newAsyncId();
+    // The first req's trigger is the caller's execution context, captured
+    // synchronously at readFile() call time (this runs inside a promise
+    // continuation, where executionAsyncId() would otherwise be the internal
+    // read promise rather than the caller). Each later req is init'd while the
+    // previous req's before scope is still open, so executionAsyncId() is the
+    // previous req's uid -- the linear chain the fixture asserts.
+    const trigger = i === 0 ? triggerAsyncId : executionAsyncId();
+    emitInit(asyncId, "FSREQCALLBACK", trigger, request);
+    if (i > 0) {
+      // The current req has been init'd with the previous req as its parent, so
+      // the previous req can now complete -- matching Node, where each
+      // oncomplete creates the next req before its own after/destroy fire.
+      emitAfter(prevId);
+      emitDestroy(prevId);
+      // Node issues these FS reqs on separate event-loop turns, so the unref'd
+      // DestroyAsyncIdsCallback drains each completed req's destroy BETWEEN
+      // turns -- by the time the final (close) req runs the user callback the
+      // earlier reqs are already fully destroyed. Nimbus replays the whole
+      // open/read/close chain in a single continuation, so emitDestroy above
+      // only enqueues; without an explicit drain here a completed req would
+      // still show destroy:0 when the user callback inspects it inside onread.
+      // Drain now to reproduce Node's cross-turn destroy visibility. Only reqs
+      // 0..n-2 drain here; the final req's destroy (enqueued in the finally
+      // below, AFTER the user callback) correctly stays pending during onread.
+      // See test/async-hooks/test-fsreqcallback-readFile.js (reqwrap[3] shows
+      // only init+before while in the callback).
+      drainDestroyAsyncIds();
+      unregisterActiveRequest(prevReq);
+    }
+    // Open this req's before scope so the next init chains to it (and so the
+    // final req's scope is active while the user callback runs).
+    emitBefore(asyncId, undefined, request);
+    prevId = asyncId;
+    prevReq = request;
+  }
+
+  // First three reqs are closed; run the user callback inside the final ("close")
+  // req's before scope, then close it once the callback returns.
+  try {
+    (cb as ReadFileGenericCallback)(err, data);
+  } finally {
+    emitAfter(prevId);
+    emitDestroy(prevId);
+    unregisterActiveRequest(prevReq);
+  }
+}
+
 function readFile(
   path: ReadFilePath,
   options: TextOptionsArgument,
@@ -848,15 +937,22 @@ function readFile(
   }
 
   if (cb) {
+    const callback = cb;
+    // Capture the caller's execution context synchronously: the synthesized
+    // FSREQCALLBACK chain runs inside the promise continuation below, where
+    // executionAsyncId() would be the internal read promise rather than the
+    // caller, so the first req's triggerAsyncId must be snapshotted here.
+    const triggerAsyncId = enabledHooksExist() ? executionAsyncId() : 0;
     PromisePrototypeThen(
       p,
       (data: Uint8Array) => {
         const textOrBuffer = readFileMaybeDecode(data, options?.encoding);
-        (cb as ReadFileBinaryCallback)(null, textOrBuffer);
+        runReadFileReqChain(callback, triggerAsyncId, null, textOrBuffer);
       },
       (err) =>
-        cb &&
-        cb(
+        runReadFileReqChain(
+          callback,
+          triggerAsyncId,
           denoErrorToNodeError(err, {
             path: typeof pathOrRid === "string" ? pathOrRid : undefined,
             syscall: "open",
@@ -1200,7 +1296,10 @@ function access(
       cb(err);
       return;
     }
-    emitBefore(asyncId);
+    // Pass the FSREQCALLBACK request as the resource so executionAsyncResource()
+    // returns it inside this callback's before/after hooks (Node establishes the
+    // req as the active resource via pushAsyncContext for the oncomplete scope).
+    emitBefore(asyncId, undefined, request);
     try {
       cb(err);
     } finally {
@@ -1213,28 +1312,20 @@ function access(
     queueMicrotask(() => finish(err));
   }
 
-  function suppressInternalPromise(promise: Promise<unknown>) {
-    let suppressedPromises = globalThis[nimbusAsyncHooksSuppressedPromises];
-    if (suppressedPromises === undefined) {
-      suppressedPromises = new SafeWeakSet();
-      ObjectDefineProperty(globalThis, nimbusAsyncHooksSuppressedPromises, {
-        __proto__: null,
-        value: suppressedPromises,
-        configurable: true,
-        enumerable: false,
-        writable: false,
-      });
-    }
-    suppressedPromises.add(promise);
-    return promise;
-  }
-
-  const previousSuppressionDepth =
-    globalThis[nimbusAsyncHooksSuppressionDepth] || 0;
-  globalThis[nimbusAsyncHooksSuppressionDepth] = previousSuppressionDepth + 1;
+  // Suppress async_hooks tracking for the internal lstat plumbing this Node
+  // polyfill uses to emulate access(): the Deno.lstat promise and its
+  // continuation are runtime-internal (not user-observable Node resources), so
+  // the fork's promiseInitHook records them in suppressedPromises and hides
+  // their whole lifecycle from fixture hooks. core.incPromiseHooksSuppressed()
+  // raises the window the fork checks at promise-init time; the paired dec in
+  // the finally closes it. (The legacy globalThis-symbol suppression this
+  // replaced was dead once the embedder promise bridge was removed -- nothing
+  // read those symbols anymore, so fs.access promises leaked into fixture
+  // hooks; see test/async-hooks/test-disable-in-init.js.)
+  core.incPromiseHooksSuppressed();
   try {
-    const accessPromise = suppressInternalPromise(Deno.lstat(path));
-    suppressInternalPromise(PromisePrototypeThen(
+    const accessPromise = Deno.lstat(path);
+    PromisePrototypeThen(
       accessPromise,
       (info) => {
         if (info.mode === null) {
@@ -1278,7 +1369,7 @@ function access(
           queueFinish(err);
         }
       },
-    ));
+    );
   } catch (err) {
     unregisterActiveRequest(request);
     if (asyncHooksEnabled) {
@@ -1286,11 +1377,7 @@ function access(
     }
     throw err;
   } finally {
-    if (previousSuppressionDepth === 0) {
-      delete globalThis[nimbusAsyncHooksSuppressionDepth];
-    } else {
-      globalThis[nimbusAsyncHooksSuppressionDepth] = previousSuppressionDepth;
-    }
+    core.decPromiseHooksSuppressed();
   }
 }
 
@@ -2475,23 +2562,31 @@ function open(
 
   const request = createFSReqCallback();
   let openPromise: Promise<number>;
+  // Suppress async_hooks tracking for op_node_open's internal promise and its
+  // continuation (runtime-internal, not user-observable Node resources) -- the
+  // same discipline as access() above. See test/async-hooks/test-disable-in-init.js.
+  core.incPromiseHooksSuppressed();
   try {
-    openPromise = op_node_open(path, flags, mode);
-  } catch (err) {
-    unregisterActiveRequest(request);
-    throw err;
+    try {
+      openPromise = op_node_open(path, flags, mode);
+    } catch (err) {
+      unregisterActiveRequest(request);
+      throw err;
+    }
+    PromisePrototypeThen(
+      openPromise,
+      (rid: number) => {
+        unregisterActiveRequest(request);
+        callback(null, rid);
+      },
+      (err: Error) => {
+        unregisterActiveRequest(request);
+        callback(normalizeOpenError(err, path, flags));
+      },
+    );
+  } finally {
+    core.decPromiseHooksSuppressed();
   }
-  PromisePrototypeThen(
-    openPromise,
-    (rid: number) => {
-      unregisterActiveRequest(request);
-      callback(null, rid);
-    },
-    (err: Error) => {
-      unregisterActiveRequest(request);
-      callback(normalizeOpenError(err, path, flags));
-    },
-  );
 }
 
 function openSync(path: string | Buffer | URL): number;
@@ -4043,6 +4138,12 @@ class StatWatcher extends EventEmitter {
   // The current in-flight interval timer, ref'd / unref'd when ref()/unref()
   // is called between polls so the process can exit while nothing is changing.
   #timer: Timeout | null = null;
+  // async_hooks resource id for the STATWATCHER handle. -1 means no async
+  // hook was active when the watcher started, so no init/before/after/destroy
+  // events are emitted (zero overhead in the common case). Mirrors the
+  // _StatWatcher C++ handle's async resource in
+  // lib/internal/fs/watchers.js.
+  #asyncId = -1;
 
   constructor(bigint: boolean) {
     super();
@@ -4057,13 +4158,27 @@ class StatWatcher extends EventEmitter {
       this.#refCount++;
     }
 
+    // Register the STATWATCHER async resource before any "change" event can
+    // fire so async_hooks observes init prior to the first before/after.
+    // Matches the _StatWatcher handle created in
+    // lib/internal/fs/watchers.js [kFSStatWatcherStart].
+    if (enabledHooksExist()) {
+      this.#asyncId = newAsyncId();
+      emitInit(
+        this.#asyncId,
+        "STATWATCHER",
+        getDefaultTriggerAsyncId(),
+        this,
+      );
+    }
+
     const bigint = this.#bigint;
     (async () => {
       let prev = await statAsync(filename, bigint);
 
       // libuv emits an initial "change" only when the first stat fails.
       if (prev === emptyStats || prev === emptyBigIntStats) {
-        this.emit("change", prev, prev);
+        this.#emitChange(prev, prev);
       }
 
       try {
@@ -4071,7 +4186,7 @@ class StatWatcher extends EventEmitter {
           await this.#sleep(interval);
           const curr = await statAsync(filename, bigint);
           if (statsChanged(prev, curr)) {
-            this.emit("change", curr, prev);
+            this.#emitChange(curr, prev);
             prev = curr;
           }
         }
@@ -4085,6 +4200,22 @@ class StatWatcher extends EventEmitter {
         this.emit("error", e);
       }
     })();
+  }
+  // Bracket each "change" emission with async_hooks before/after so the
+  // STATWATCHER resource is on the async stack while listeners run, mirroring
+  // the onchange callback dispatched from the C++ handle in
+  // lib/internal/fs/watchers.js. No-op when no AsyncHook was active at start.
+  #emitChange(curr: unknown, prev: unknown) {
+    if (this.#asyncId !== -1) {
+      emitBefore(this.#asyncId, getDefaultTriggerAsyncId());
+      try {
+        this.emit("change", curr, prev);
+      } finally {
+        emitAfter(this.#asyncId);
+      }
+    } else {
+      this.emit("change", curr, prev);
+    }
   }
   #sleep(ms: number): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -4125,6 +4256,13 @@ class StatWatcher extends EventEmitter {
       return;
     }
     this.#abortController.abort();
+    // Tear down the STATWATCHER async resource. Mirrors closing the
+    // _StatWatcher handle in StatWatcher.prototype.stop
+    // (lib/internal/fs/watchers.js), which triggers the destroy hook.
+    if (this.#asyncId !== -1) {
+      emitDestroy(this.#asyncId);
+      this.#asyncId = -1;
+    }
     // Match Node: stop fires asynchronously so listeners removed
     // synchronously after stop() are not called (see
     // StatWatcher.prototype.stop in lib/internal/fs/watchers.js).

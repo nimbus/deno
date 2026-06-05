@@ -40,6 +40,8 @@ pub(crate) use jsruntime::NO_OF_BUILTIN_MODULES;
 pub use jsruntime::PollEventLoopOptions;
 pub use jsruntime::RuntimeOptions;
 pub use jsruntime::SharedArrayBufferStore;
+pub use setup::isolate_ptr_to_key;
+pub use setup::run_foreground_tasks;
 pub use snapshot::CreateSnapshotOptions;
 pub use snapshot::CreateSnapshotOutput;
 pub(crate) use snapshot::SnapshotDataId;
