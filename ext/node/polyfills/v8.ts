@@ -53,9 +53,11 @@ const lazyFs = core.createLazyLoader("node:fs");
 const lazyStream = core.createLazyLoader("node:stream");
 
 const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
-const { isArrayBufferView } = core.loadExtScript(
-  "ext:deno_node/internal/util/types.ts",
-);
+const { isArrayBufferView, isAsyncFunction, isGeneratorFunction } = core
+  .loadExtScript(
+    "ext:deno_node/internal/util/types.ts",
+  );
+const { codes } = core.loadExtScript("ext:deno_node/internal/error_codes.ts");
 const lazyFsUtils = core.createLazyLoader(
   "ext:deno_node/internal/fs/utils.mjs",
 );
@@ -641,12 +643,139 @@ class DefaultDeserializer extends Deserializer {
     );
   }
 }
+// node:v8 `promiseHooks`, mirroring upstream lib/internal/promise_hooks.js. The
+// engine machinery (core.setPromiseHooks -> op_set_promise_hooks) is append-only
+// with no unregister and is also consumed by ext/node async_hooks.ts, so this
+// registry installs ONE fixed set of trampolines exactly once (lazily) and keeps
+// its own mutable per-type lists. stop() splices the list, and the installed
+// trampoline naturally stops calling the removed hook. deno_core's 4th "resolve"
+// callback is Node's "settled".
+const promiseHookLists = { init: [], before: [], after: [], settled: [] };
+let promiseHookTrampolinesInstalled = false;
+
+function reportPromiseHookExceptions(exceptions) {
+  // Deferred so a throw in one hook does not stop the others from running,
+  // mirroring upstream's triggerUncaughtException(err, false).
+  for (let i = 0; i < exceptions.length; i++) {
+    core.__reportException(exceptions[i]);
+  }
+}
+
+function runPromiseInitTrampoline(promise, parent) {
+  const snapshot = promiseHookLists.init.slice();
+  const exceptions = [];
+  for (let i = 0; i < snapshot.length; i++) {
+    try {
+      snapshot[i](promise, parent);
+    } catch (err) {
+      exceptions.push(err);
+    }
+  }
+  reportPromiseHookExceptions(exceptions);
+}
+
+function makePromiseHookTrampoline(name) {
+  return (promise) => {
+    const snapshot = promiseHookLists[name].slice();
+    const exceptions = [];
+    for (let i = 0; i < snapshot.length; i++) {
+      try {
+        snapshot[i](promise);
+      } catch (err) {
+        exceptions.push(err);
+      }
+    }
+    reportPromiseHookExceptions(exceptions);
+  };
+}
+
+const runPromiseBeforeTrampoline = makePromiseHookTrampoline("before");
+const runPromiseAfterTrampoline = makePromiseHookTrampoline("after");
+const runPromiseSettledTrampoline = makePromiseHookTrampoline("settled");
+
+function ensurePromiseHookTrampolines() {
+  if (promiseHookTrampolinesInstalled) return;
+  promiseHookTrampolinesInstalled = true;
+  core.setPromiseHooks(
+    runPromiseInitTrampoline,
+    runPromiseBeforeTrampoline,
+    runPromiseAfterTrampoline,
+    runPromiseSettledTrampoline,
+  );
+}
+
+function validatePromiseHookFn(fn, name) {
+  if (
+    typeof fn !== "function" ||
+    isAsyncFunction(fn) ||
+    isGeneratorFunction(fn)
+  ) {
+    throw new codes.ERR_INVALID_ARG_TYPE(`${name}Hook`, "Function", fn);
+  }
+}
+
+function makeUsePromiseHook(name) {
+  const list = promiseHookLists[name];
+  return (hook) => {
+    validatePromiseHookFn(hook, name);
+    ensurePromiseHookTrampolines();
+    list.push(hook);
+    let stopped = false;
+    return function stop() {
+      if (stopped) {
+        return;
+      }
+      const index = list.indexOf(hook);
+      if (index >= 0) {
+        list.splice(index, 1);
+      }
+      stopped = true;
+    };
+  };
+}
+
+const onInit = makeUsePromiseHook("init");
+const onBefore = makeUsePromiseHook("before");
+const onAfter = makeUsePromiseHook("after");
+const onSettled = makeUsePromiseHook("settled");
+
+function createPromiseHook(callbacks) {
+  const { init, before, after, settled } = callbacks ?? {};
+  const stops = [];
+  if (init) {
+    stops.push(onInit(init));
+  }
+  if (before) {
+    stops.push(onBefore(before));
+  }
+  if (after) {
+    stops.push(onAfter(after));
+  }
+  if (settled) {
+    stops.push(onSettled(settled));
+  }
+  return function stop() {
+    for (let i = 0; i < stops.length; i++) {
+      stops[i]();
+    }
+  };
+}
+
+const promiseHooks = ObjectFreeze({
+  createHook: createPromiseHook,
+  onInit,
+  onBefore,
+  onAfter,
+  onSettled,
+});
+
 return {
   cachedDataVersionTag,
   getHeapCodeStatistics,
   getHeapSnapshot,
   getHeapSpaceStatistics,
   getHeapStatistics,
+  promiseHooks,
   queryObjects,
   setFlagsFromString,
   startupSnapshot,

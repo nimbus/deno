@@ -77,6 +77,7 @@ const { encodeStr, hexTable } = core.loadExtScript(
 );
 const querystring = core.loadExtScript("ext:deno_node/querystring.js").default;
 const { URL, URLSearchParams } = core.loadExtScript("ext:deno_web/00_url.js");
+const { URLPattern } = core.loadExtScript("ext:deno_web/01_urlpattern.js");
 const { urlToHttpOptions } = core.loadExtScript(
   "ext:deno_node/internal/url.ts",
 );
@@ -1497,6 +1498,7 @@ const URLSearchParams_ = URLSearchParams;
 
 return {
   URL: _url,
+  URLPattern,
   URLSearchParams: URLSearchParams_,
   urlToHttpOptions,
   Url,
