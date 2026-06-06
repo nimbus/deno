@@ -354,6 +354,22 @@ function getCallSites(
   return capturedTraces;
 }
 
+// Deprecated experimental alias for `getCallSites`. `util.getCallSite` was the
+// original (Node 22) name; it now emits a one-time ExperimentalWarning pointing
+// at `util.getCallSites()` and forwards through. Matches the rename warning the
+// Node test corpus asserts via `expectWarning('ExperimentalWarning', ...)`.
+function getCallSite(frameCount, options) {
+  // `process` is loaded lazily (see `deprecate` above): this module sits in
+  // `process.ts`'s transitive load chain, so the binding is undefined until the
+  // first call resolves it through the lazy loader.
+  process ??= lazyLoadProcess();
+  process.emitWarning(
+    "The `util.getCallSite` API has been renamed to `util.getCallSites()`.",
+    "ExperimentalWarning",
+  );
+  return getCallSites(frameCount, options);
+}
+
 function parseEnv(input) {
   validateString(input, "content");
   const parsed = binding.parseEnv(input);
@@ -426,6 +442,7 @@ return {
   log,
   deprecate,
   aborted,
+  getCallSite,
   getCallSites,
   parseEnv,
   queryObjects,

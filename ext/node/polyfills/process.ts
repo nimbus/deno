@@ -53,6 +53,7 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const {
   denoErrorToNodeError,
+  ERR_ASSERTION,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE_RANGE,
   ERR_OUT_OF_RANGE,
@@ -1288,6 +1289,47 @@ process.versions = versions;
 
 /** https://nodejs.org/api/process.html#process_process_emitwarning_warning_options */
 process.emitWarning = emitWarning;
+
+// `process.assert(value[, message])` is the deprecated DEP0100 alias for the
+// `assert` module. Match lib/internal/process/per_thread.js: throw an
+// `ERR_ASSERTION` Error (name "Error", code "ERR_ASSERTION") with the supplied
+// message, defaulting to "assertion error", and emit the deprecation warning
+// once. `deprecate` is loaded lazily on first call so the wrapper is never
+// constructed during snapshot module evaluation.
+let assertDeprecated: ((value: unknown, message?: string) => void) | undefined;
+process.assert = function assert(value: unknown, message?: string) {
+  if (assertDeprecated === undefined) {
+    const { deprecate } = lazyLoadUtil();
+    assertDeprecated = deprecate(
+      (value: unknown, message?: string) => {
+        if (!value) throw new ERR_ASSERTION(message || "assertion error");
+      },
+      "process.assert() is deprecated. Please use the `assert` module instead.",
+      "DEP0100",
+    );
+  }
+  return assertDeprecated(value, message);
+};
+
+// `process.ref(maybeRefable)` / `process.unref(maybeRefable)` dispatch to the
+// `Symbol.for("nodejs.ref")` / `Symbol.for("nodejs.unref")` method when present,
+// otherwise to a `.ref()` / `.unref()` method, matching
+// lib/internal/process/per_thread.js. No-op for nullish input or objects that
+// expose neither hook.
+const kRefSymbol = Symbol.for("nodejs.ref");
+const kUnrefSymbol = Symbol.for("nodejs.unref");
+process.ref = function ref(maybeRefable: unknown) {
+  if (maybeRefable == null) return;
+  const fn = (maybeRefable as Record<PropertyKey, unknown>)[kRefSymbol] ||
+    (maybeRefable as { ref?: unknown }).ref;
+  if (typeof fn === "function") fn.call(maybeRefable);
+};
+process.unref = function unref(maybeRefable: unknown) {
+  if (maybeRefable == null) return;
+  const fn = (maybeRefable as Record<PropertyKey, unknown>)[kUnrefSymbol] ||
+    (maybeRefable as { unref?: unknown }).unref;
+  if (typeof fn === "function") fn.call(maybeRefable);
+};
 
 process.binding = (name: BindingName) => {
   return getBinding(name);
