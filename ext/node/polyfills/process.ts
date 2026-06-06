@@ -138,6 +138,7 @@ const { buildAllowedFlags } = core.loadExtScript(
 const {
   getActiveHandles,
   getActiveRequests,
+  resourceInfoName,
 } = core.loadExtScript("ext:deno_node/internal/process/active_resources.ts");
 const {
   getActiveResourcesInfo: getTimerActiveResourcesInfo,
@@ -158,16 +159,20 @@ const lazyLoadUtil = core.createLazyLoader<typeof utilModule>(
 
 const {
   ArrayIsArray,
+  ArrayPrototypePush,
+  ArrayPrototypeUnshift,
   FunctionPrototypeBind,
   NumberMAX_SAFE_INTEGER,
   ObjectCreate,
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
+  ReflectApply,
   ReflectGet,
   ReflectGetOwnPropertyDescriptor,
   ReflectGetPrototypeOf,
   ReflectHas,
   ReflectOwnKeys,
+  SafeSet,
 } = primordials;
 
 export const argv: string[] = ["", ""];
@@ -473,7 +478,24 @@ memoryUsage.rss = function (): number {
 };
 
 export function getActiveResourcesInfo(): string[] {
-  return getTimerActiveResourcesInfo();
+  // Mirror Node's internalGetActiveResourcesInfo(): libuv requests first, then
+  // handles, then the timer/immediate provider names. Requests and handles are
+  // mapped to their libuv provider name (e.g. "FSReqCallback", "TCPSocketWrap",
+  // "TCPServerWrap"); timers contribute "Timeout"/"Immediate".
+  const info: string[] = [];
+  const requests = getActiveRequests();
+  for (let i = 0; i < requests.length; i++) {
+    ArrayPrototypePush(info, resourceInfoName(requests[i]));
+  }
+  const handles = getActiveHandles();
+  for (let i = 0; i < handles.length; i++) {
+    ArrayPrototypePush(info, resourceInfoName(handles[i]));
+  }
+  const timerInfo = getTimerActiveResourcesInfo();
+  for (let i = 0; i < timerInfo.length; i++) {
+    ArrayPrototypePush(info, timerInfo[i]);
+  }
+  return info;
 }
 
 export function availableMemory(): number {
@@ -638,6 +660,16 @@ const _signalListenerWrappers = new WeakMap<
   Map<string, SignalListener>
 >();
 
+// Real OS signal delivery is a host-owned capability that a sandboxed isolate
+// may not expose (Deno.addSignalListener / Deno.removeSignalListener are
+// absent there). When unavailable, signal-named events still register as plain
+// EventEmitter listeners -- so `process.emit('SIGPIPE', ...)` and friends work
+// for application code -- but no OS-level handler is installed. This keeps the
+// isolate from gaining host signal handlers while preserving Node's
+// EventEmitter semantics for signal names.
+const _signalsSupported = typeof Deno.addSignalListener === "function" &&
+  typeof Deno.removeSignalListener === "function";
+
 function _wrapSignalListener(
   event: string,
   listener: SignalListener,
@@ -713,10 +745,12 @@ Process.prototype.on = function (
       // TODO(#26331): Ignores all signals except SIGBREAK, SIGINT, and SIGWINCH on windows.
     } else {
       EventEmitter.prototype.on.call(this, event, listener);
-      Deno.addSignalListener(
-        event as Deno.Signal,
-        _wrapSignalListener(event, listener),
-      );
+      if (_signalsSupported) {
+        Deno.addSignalListener(
+          event as Deno.Signal,
+          _wrapSignalListener(event, listener),
+        );
+      }
     }
   } else {
     EventEmitter.prototype.on.call(this, event, listener);
@@ -747,11 +781,13 @@ Process.prototype.off = function (
       // to pass the wrapper (not the original) to Deno.removeSignalListener.
       const registered = _findSignalListener(this, event, listener);
       EventEmitter.prototype.off.call(this, event, listener);
-      const unwrapped = _unwrapSignalListener(event, registered ?? listener);
-      Deno.removeSignalListener(
-        event as Deno.Signal,
-        unwrapped,
-      );
+      if (_signalsSupported) {
+        const unwrapped = _unwrapSignalListener(event, registered ?? listener);
+        Deno.removeSignalListener(
+          event as Deno.Signal,
+          unwrapped,
+        );
+      }
     }
   } else {
     EventEmitter.prototype.off.call(this, event, listener);
@@ -767,7 +803,15 @@ Process.prototype.emit = function (
   // deno-lint-ignore no-explicit-any
   ...args: any[]
 ): boolean {
-  return EventEmitter.prototype.emit.call(this, event, ...args);
+  // Dispatch without re-spreading `args`. The userland test corpus patches
+  // %ArrayIteratorPrototype%.next as a tripwire (assert.CallTracker /
+  // common.mustNotCall), and `EventEmitter.prototype.emit.call(this, event,
+  // ...args)` would read that patched iterator whenever a process warning
+  // (e.g. DEP0173) is emitted. Build the argument list primordially so the
+  // warning path never touches the patchable Array iterator, mirroring Node's
+  // internal emit hardening (test-assert-calltracker-calls).
+  ArrayPrototypeUnshift(args, event);
+  return ReflectApply(EventEmitter.prototype.emit, this, args);
 };
 
 Process.prototype.prependListener = function (
@@ -782,10 +826,12 @@ Process.prototype.prependListener = function (
       // Ignores SIGBREAK if the platform is not windows.
     } else {
       EventEmitter.prototype.prependListener.call(this, event, listener);
-      Deno.addSignalListener(
-        event as Deno.Signal,
-        _wrapSignalListener(event, listener),
-      );
+      if (_signalsSupported) {
+        Deno.addSignalListener(
+          event as Deno.Signal,
+          _wrapSignalListener(event, listener),
+        );
+      }
     }
   } else {
     EventEmitter.prototype.prependListener.call(this, event, listener);
@@ -841,6 +887,7 @@ function _removeAllSignalListeners(
   target: any,
   event: string,
 ) {
+  if (!_signalsSupported) return;
   const events = target._events;
   if (events === undefined) return;
   const list = events[event];
@@ -1331,7 +1378,87 @@ process.unref = function unref(maybeRefable: unknown) {
   if (typeof fn === "function") fn.call(maybeRefable);
 };
 
+// Node's legacy `process.binding()` exposes only a curated allowlist of
+// internal bindings and throws "No such module" for anything else (see
+// `internalBindingAllowlist` in lib/internal/bootstrap/realm.js). Internal
+// callers use getBinding()/internalBinding() directly, so restricting the
+// public legacy surface here does not affect them. `module_wrap`, for
+// instance, is intentionally absent and therefore throws.
+const _legacyBindingAllowlist = new SafeSet([
+  "async_wrap",
+  "buffer",
+  "cares_wrap",
+  "config",
+  "constants",
+  "contextify",
+  "crypto",
+  "fs",
+  "fs_event_wrap",
+  "http_parser",
+  "icu",
+  "inspector",
+  "js_stream",
+  "natives",
+  "os",
+  "pipe_wrap",
+  "process_methods",
+  "signal_wrap",
+  "spawn_sync",
+  "stream_wrap",
+  "tcp_wrap",
+  "tls_wrap",
+  "tty_wrap",
+  "udp_wrap",
+  "url",
+  "util",
+  "uv",
+  "v8",
+  "zlib",
+]);
+
+// Node's legacy `process.binding('util')` is the type-predicate wrapper: the
+// same predicate functions exposed on `util.types`, and nothing else.
+const _legacyUtilTypeKeys = [
+  "isAnyArrayBuffer",
+  "isArrayBuffer",
+  "isArrayBufferView",
+  "isAsyncFunction",
+  "isDataView",
+  "isDate",
+  "isExternal",
+  "isMap",
+  "isMapIterator",
+  "isNativeError",
+  "isPromise",
+  "isRegExp",
+  "isSet",
+  "isSetIterator",
+  "isTypedArray",
+  "isUint8Array",
+];
+let _legacyUtilBinding: Record<string, unknown> | undefined;
+function _getLegacyUtilBinding(): Record<string, unknown> {
+  if (_legacyUtilBinding === undefined) {
+    // deno-lint-ignore no-explicit-any
+    const types = (lazyLoadUtil() as any).types as Record<string, unknown>;
+    const binding: Record<string, unknown> = {};
+    for (let i = 0; i < _legacyUtilTypeKeys.length; i++) {
+      const key = _legacyUtilTypeKeys[i];
+      binding[key] = types[key];
+    }
+    _legacyUtilBinding = binding;
+  }
+  return _legacyUtilBinding;
+}
+
 process.binding = (name: BindingName) => {
+  const moduleName = String(name);
+  if (moduleName === "util") {
+    return _getLegacyUtilBinding();
+  }
+  if (!_legacyBindingAllowlist.has(moduleName)) {
+    throw new Error(`No such module: ${moduleName}`);
+  }
   return getBinding(name);
 };
 

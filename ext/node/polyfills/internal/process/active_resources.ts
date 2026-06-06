@@ -4,10 +4,27 @@
 
 (function () {
 const { primordials } = globalThis.__bootstrap;
-const { ArrayPrototypePush, SafeSet, SafeSetIterator } = primordials;
+const { ArrayPrototypePush, SafeSet, SafeSetIterator, Symbol } = primordials;
 
 const activeRequests = new SafeSet();
 const activeHandles = new SafeSet();
+
+// Stream/handle owners (net.Socket, net.Server, ...) tag themselves with this
+// symbol so process.getActiveResourcesInfo() can report Node's libuv provider
+// name (e.g. "TCPSocketWrap", "TCPServerWrap") instead of the JS constructor
+// name. Resources without a tag fall back to their constructor name.
+const kResourceInfoName = Symbol("nimbus.node.resourceInfoName");
+
+function resourceInfoName(resource: any): string {
+  const tag = resource?.[kResourceInfoName];
+  if (typeof tag === "string") {
+    return tag;
+  }
+  const ctorName = resource?.constructor?.name;
+  return typeof ctorName === "string" && ctorName.length > 0
+    ? ctorName
+    : "Unknown";
+}
 
 class FSReqCallback {}
 
@@ -53,8 +70,10 @@ return {
   createFSReqCallback,
   getActiveHandles,
   getActiveRequests,
+  kResourceInfoName,
   registerActiveHandle,
   registerActiveRequest,
+  resourceInfoName,
   unregisterActiveHandle,
   unregisterActiveRequest,
 };

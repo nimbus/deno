@@ -135,6 +135,7 @@ const { channel, tracingChannel } = core.loadExtScript(
   "ext:deno_node/diagnostics_channel.js",
 );
 const {
+  kResourceInfoName,
   registerActiveHandle,
   unregisterActiveHandle,
 } = core.loadExtScript("ext:deno_node/internal/process/active_resources.ts");
@@ -2148,6 +2149,11 @@ Object.defineProperty(Socket.prototype, "_handle", {
     if (this[kHandle] && !v) {
       unregisterActiveHandle(this);
     } else if (!this[kHandle] && v) {
+      // Report the libuv provider name Node's getActiveResourcesInfo() uses
+      // for connected stream sockets (both client and accepted server-side).
+      this[kResourceInfoName] = v instanceof Pipe
+        ? "PipeSocketWrap"
+        : "TCPSocketWrap";
       registerActiveHandle(this);
     }
     this[kHandle] = v;
@@ -2581,6 +2587,9 @@ function _setupListenHandle(
   // In the case of a server sent via IPC, we don't need to do this.
   if (this._handle) {
     debug("setupListenHandle: have a handle already");
+    this[kResourceInfoName] = this._handle instanceof Pipe
+      ? "PipeServerWrap"
+      : "TCPServerWrap";
     registerActiveHandle(this);
   } else {
     debug("setupListenHandle: create a handle");
@@ -2632,6 +2641,9 @@ function _setupListenHandle(
     }
 
     this._handle = rval;
+    this[kResourceInfoName] = this._handle instanceof Pipe
+      ? "PipeServerWrap"
+      : "TCPServerWrap";
     registerActiveHandle(this);
   }
 

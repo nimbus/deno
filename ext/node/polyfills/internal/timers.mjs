@@ -85,6 +85,22 @@ function getActiveResourcesInfo() {
       ArrayPrototypePush(resources, "Timeout");
     }
   }
+  // Walk the core immediate queue (an ImmediateList linked list keyed on
+  // `_idleNext`) and count each refed, not-yet-run immediate as Node's libuv
+  // 'Immediate' provider. runImmediates() detaches the queue and marks each
+  // immediate `_destroyed` before invoking its callback, so an immediate is
+  // counted only while it is still pending -- matching Node, where the
+  // currently-running immediate is already destroyed/unrefed (see the
+  // getactiveresources track-timer-lifetime fixture).
+  for (
+    let immediate = core.immediateQueue.head;
+    immediate !== null;
+    immediate = immediate._idleNext
+  ) {
+    if (immediate[kRefed] && !immediate._destroyed) {
+      ArrayPrototypePush(resources, "Immediate");
+    }
+  }
   return resources;
 }
 
@@ -166,10 +182,16 @@ Timeout.prototype[createTimer] = function () {
   // hook machinery.
   let cb;
   function invokeCallback() {
+    // Capture the id BEFORE the user callback runs: Node keeps a firing
+    // one-shot Timeout counted as an active resource for the duration of its
+    // own callback and only drops it once the callback returns. Deferring the
+    // activeTimers removal until after the callback (instead of before it)
+    // makes process.getActiveResourcesInfo() report the in-flight Timeout as 1
+    // inside the callback, matching
+    // test-process-getactiveresources-track-timer-lifetime.
+    const timerId = self[kTimerId];
     const wasRepeat = self._repeat;
-    if (!wasRepeat) {
-      MapPrototypeDelete(activeTimers, self[kTimerId]);
-    } else {
+    if (wasRepeat) {
       const currentCb = self._onTimeout;
       if (currentCb === null) {
         self[kDestroy]();
@@ -189,9 +211,12 @@ Timeout.prototype[createTimer] = function () {
         self[kDestroy]();
       }
     } else if (self._repeat) {
-      // timeout was converted to interval inside callback
+      // timeout was converted to interval inside callback: drop the original
+      // one-shot id before createTimer registers the replacement id.
+      MapPrototypeDelete(activeTimers, timerId);
       self[kTimerId] = self[createTimer]();
     } else {
+      MapPrototypeDelete(activeTimers, timerId);
       self._destroyed = true;
     }
     return ret;

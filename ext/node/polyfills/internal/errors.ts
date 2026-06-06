@@ -3091,6 +3091,19 @@ function denoErrorToNodeError(e: Error, ctx: UvExceptionContext) {
     });
   }
 
+  // A Deno permission denial (`NotCapable`) has no embedded OS errno, so it
+  // would otherwise fall through unmapped and surface to Node consumers as a
+  // raw permission error rather than a libuv-style filesystem error. Node
+  // reports an inaccessible path as `EACCES`; map it so `fs`/stream consumers
+  // (e.g. Utf8Stream opening an unreachable path) observe the expected
+  // `EACCES` code instead of a Deno-internal error type.
+  if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotCapable.prototype, e)) {
+    return uvException({
+      errno: codeMap.get("EACCES")!,
+      ...ctx,
+    });
+  }
+
   const errno = extractOsErrorNumberFromErrorMessage(e);
   if (typeof errno === "undefined") {
     return e;

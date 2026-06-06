@@ -529,6 +529,15 @@ function formatValue(
   // Always check for proxies to prevent side effects and to prevent triggering
   // any proxy handlers.
   let proxyDetails = core.getProxyDetails(value);
+  // Match Node.js: a revoked Proxy reports a 2-tuple whose target (and handler)
+  // are null (V8's GetTarget/GetHandler return null once revoked). Detect that
+  // here and render `<Revoked Proxy>` instead of falling through to the unwrap
+  // below, which would set `value = null` and then drive object-formatting on a
+  // non-object (`Reflect.has called on non-object`). Mirrors Node's
+  // lib/internal/util/inspect.js handling of revoked proxies.
+  if (proxyDetails !== null && proxyDetails[0] === null) {
+    return ctx.stylize("<Revoked Proxy>", "special");
+  }
   // Match Node.js: when not in `showProxy` mode, inspect the proxy target
   // directly. This avoids invoking any proxy traps (which may have side
   // effects or throw -- e.g. an `ownKeys` trap that violates the invariant

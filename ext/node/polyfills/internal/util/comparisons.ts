@@ -632,6 +632,13 @@ function handleCycles(
         iterationType,
       );
       memos.deep = false;
+      // Remove the temporary nested-cycle memo entries (c/d) so a later sibling
+      // comparison that reuses those objects no longer hits stale set
+      // membership (upstream nodejs/node lib/internal/util/comparisons.js).
+      if (memos.set !== undefined) {
+        memos.set.delete(memos.c);
+        memos.set.delete(memos.d);
+      }
       return result;
     }
     memos.set = new SafeSet();

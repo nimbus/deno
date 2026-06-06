@@ -434,6 +434,19 @@ function defineLazyNativeModule(name, loader) {
   });
 }
 
+// Match Node's schemelessBlockList: these modules can only be imported
+// via the `node:` scheme (see lib/internal/bootstrap/realm.js), so they
+// appear in `builtinModules` as `node:<name>` rather than `<name>`, and
+// `isBuiltin(<name>)` (without scheme) must report false. Module-scoped so
+// both `setupBuiltinModules()` (builtinModules listing) and `isBuiltin()`
+// share one authoritative list.
+const schemelessBlockList = new SafeSet([
+  "sea",
+  "sqlite",
+  "test",
+  "test/reporters",
+]);
+
 // NOTE(bartlomieju): keep this list in sync with `ext/node/lib.rs`
 function setupBuiltinModules() {
   const nodeModules = {
@@ -495,15 +508,6 @@ function setupBuiltinModules() {
     util,
     worker_threads: workerThreads,
   };
-  // Match Node's schemelessBlockList: these modules can only be imported
-  // via the `node:` scheme (see lib/internal/bootstrap/realm.js), so they
-  // appear in `builtinModules` as `node:<name>` rather than `<name>`.
-  const schemelessBlockList = new SafeSet([
-    "sea",
-    "sqlite",
-    "test",
-    "test/reporters",
-  ]);
   function registerName(name) {
     // `internal/*` modules are only exposed under --expose-internals, so
     // they aren't part of the public builtinModules list.
@@ -2532,8 +2536,10 @@ function isBuiltin(moduleName) {
 
   if (StringPrototypeStartsWith(moduleName, "node:")) {
     moduleName = StringPrototypeSlice(moduleName, 5);
-  } else if (moduleName === "test" || moduleName === "test/reporters") {
-    // test and test/reporters are only builtins if they have the "node:" scheme
+  } else if (SetPrototypeHas(schemelessBlockList, moduleName)) {
+    // sea, sqlite, test and test/reporters are only builtins when imported with
+    // the "node:" scheme; without it `isBuiltin`/`getBuiltinModule` must report
+    // that they are not builtins.
     // see https://github.com/nodejs/node/blob/73025c4dec042e344eeea7912ed39f7b7c4a3991/test/parallel/test-module-isBuiltin.js#L14
     return false;
   }
