@@ -254,7 +254,10 @@ class Domain extends EventEmitter {
     if (index !== -1) {
       ArrayPrototypeSplice(stack, index);
     }
-    active = stack.length === 0 ? null : stack[stack.length - 1];
+    // Match Node lib/domain.js exit(): an empty stack yields `undefined`
+    // (stack[-1]), not `null`. Node only uses `null` for the active domain in
+    // the synchronous emit-error routing and the top-level uncaught handler.
+    active = stack.length === 0 ? undefined : stack[stack.length - 1];
     process.domain = active;
     updateExceptionCapture();
     return this;
@@ -506,8 +509,14 @@ function patchEventEmitter() {
       domain.emit("error", er);
 
       // Now that the domain's error handler has completed, restore the domains
-      // stack and the active domain to their original values.
-      _stack = stack = origDomainsStack;
+      // stack and the active domain to their original values. Restore the stack
+      // in place: the exported `_stack` is a fixed array reference, so swapping
+      // in a fresh array (as Node can via its live `exports._stack` binding)
+      // would leave `domain._stack` pointing at the emptied original array.
+      stack.length = 0;
+      for (let i = 0; i < origDomainsStack.length; i++) {
+        ArrayPrototypePush(stack, origDomainsStack[i]);
+      }
       active = process.domain = origActiveDomain;
       updateExceptionCapture();
 
