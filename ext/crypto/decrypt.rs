@@ -294,56 +294,104 @@ where
   Ok(plaintext)
 }
 
+/// Authenticate and decrypt an AES-GCM ciphertext in place, supporting the
+/// truncated authentication tags that Web Crypto permits (32/64/96/104/112/120
+/// bits in addition to the full 128). The `aes-gcm` crate only verifies a full
+/// 16-byte tag, so for a truncated tag we reconstruct the real full tag and let
+/// the crate authenticate the spliced candidate in constant time.
+fn aes_gcm_open_in_place<A>(
+  cipher: &A,
+  nonce: &aes_gcm::aead::Nonce<A>,
+  additional_data: &[u8],
+  buffer: &mut [u8],
+  provided_tag: &[u8],
+) -> Result<(), DecryptError>
+where
+  A: AeadInPlace
+    + aes_gcm::aead::AeadCore<
+      TagSize = aes_gcm::aead::generic_array::typenum::U16,
+    >,
+{
+  let tag_len = provided_tag.len();
+
+  // Full 16-byte tag: the crate's native constant-time verification path.
+  if tag_len == 16 {
+    let tag = aes_gcm::aead::Tag::<A>::from_slice(provided_tag);
+    return cipher
+      .decrypt_in_place_detached(nonce, additional_data, buffer, tag)
+      .map_err(|_| DecryptError::Failed);
+  }
+
+  // Truncated tag. GCM's CTR keystream depends only on key+nonce, so it is
+  // symmetric: encrypting the ciphertext recovers the plaintext, and
+  // re-encrypting that plaintext both restores the ciphertext and produces the
+  // real 16-byte tag (GHASH is computed over the ciphertext). We never expose
+  // the recovered plaintext: the buffer is only written below, gated on the
+  // crate's constant-time authentication of the real ciphertext.
+  let mut scratch = buffer.to_vec();
+  cipher
+    .encrypt_in_place_detached(nonce, additional_data, &mut scratch)
+    .map_err(|_| DecryptError::Failed)?; // scratch == plaintext (tag discarded)
+  let full_tag = cipher
+    .encrypt_in_place_detached(nonce, additional_data, &mut scratch)
+    .map_err(|_| DecryptError::Failed)?; // scratch == ciphertext again
+
+  // Splice the caller's truncated prefix over the real tag. The suffix matches
+  // by construction, so the crate's constant-time comparison reduces to checking
+  // the truncated prefix - exactly GCM truncated-tag semantics.
+  let mut candidate = full_tag;
+  candidate[..tag_len].copy_from_slice(provided_tag);
+
+  cipher
+    .decrypt_in_place_detached(nonce, additional_data, buffer, &candidate)
+    .map_err(|_| DecryptError::Failed)
+}
+
 fn decrypt_aes_gcm_gen<N: ArrayLength<u8>>(
   key: &[u8],
-  tag: &aes_gcm::Tag,
+  provided_tag: &[u8],
   nonce: &[u8],
   length: usize,
   additional_data: Vec<u8>,
-  plaintext: &mut [u8],
+  buffer: &mut [u8],
 ) -> Result<(), DecryptError> {
-  let nonce = Nonce::from_slice(nonce);
+  let nonce = Nonce::<N>::from_slice(nonce);
   match length {
     128 => {
       let cipher = aes_gcm::AesGcm::<Aes128, N>::new_from_slice(key)
         .map_err(|_| DecryptError::Failed)?;
-      cipher
-        .decrypt_in_place_detached(
-          nonce,
-          additional_data.as_slice(),
-          plaintext,
-          tag,
-        )
-        .map_err(|_| DecryptError::Failed)?
+      aes_gcm_open_in_place(
+        &cipher,
+        nonce,
+        additional_data.as_slice(),
+        buffer,
+        provided_tag,
+      )
     }
     192 => {
       let cipher = aes_gcm::AesGcm::<Aes192, N>::new_from_slice(key)
         .map_err(|_| DecryptError::Failed)?;
-      cipher
-        .decrypt_in_place_detached(
-          nonce,
-          additional_data.as_slice(),
-          plaintext,
-          tag,
-        )
-        .map_err(|_| DecryptError::Failed)?
+      aes_gcm_open_in_place(
+        &cipher,
+        nonce,
+        additional_data.as_slice(),
+        buffer,
+        provided_tag,
+      )
     }
     256 => {
       let cipher = aes_gcm::AesGcm::<Aes256, N>::new_from_slice(key)
         .map_err(|_| DecryptError::Failed)?;
-      cipher
-        .decrypt_in_place_detached(
-          nonce,
-          additional_data.as_slice(),
-          plaintext,
-          tag,
-        )
-        .map_err(|_| DecryptError::Failed)?
+      aes_gcm_open_in_place(
+        &cipher,
+        nonce,
+        additional_data.as_slice(),
+        buffer,
+        provided_tag,
+      )
     }
-    _ => return Err(DecryptError::InvalidLength),
-  };
-
-  Ok(())
+    _ => Err(DecryptError::InvalidLength),
+  }
 }
 
 fn decrypt_aes_ctr(
@@ -389,16 +437,23 @@ fn decrypt_aes_gcm(
   let key = key.as_secret_key()?;
   let additional_data = additional_data.unwrap_or_default();
 
-  // The `aes_gcm` crate only supports 128 bits tag length.
-  //
-  // Note that encryption won't fail, it instead truncates the tag
-  // to the specified tag length as specified in the spec.
-  if tag_length != 128 {
+  // Web Crypto permits these AES-GCM tag lengths (bits). The JS layer already
+  // validates `tagLength` before reaching this op, so this guard is defensive.
+  // Unlike the previous 128-only restriction, the decrypt path now mirrors the
+  // encrypt path, which already truncates the 16-byte tag to any of these
+  // lengths (`aes_gcm_open_in_place` reconstructs the full tag to verify a
+  // truncated one in constant time).
+  if !matches!(tag_length, 32 | 64 | 96 | 104 | 112 | 120 | 128) {
     return Err(DecryptError::InvalidTagLength);
   }
 
-  let sep = data.len() - (tag_length / 8);
-  let tag = &data[sep..];
+  let tag_byte_len = tag_length / 8;
+  if data.len() < tag_byte_len {
+    return Err(DecryptError::InvalidLength);
+  }
+
+  let sep = data.len() - tag_byte_len;
+  let provided_tag = &data[sep..];
 
   // The actual ciphertext, called plaintext because it is reused in place.
   let mut plaintext = data[..sep].to_vec();
@@ -408,7 +463,14 @@ fn decrypt_aes_gcm(
   aes_gcm_nonce_dispatch!(
     iv.len(),
     return Err(DecryptError::InvalidIvLength),
-    decrypt_aes_gcm_gen(key, tag.into(), &iv, length, additional_data, &mut plaintext)
+    decrypt_aes_gcm_gen(
+      key,
+      provided_tag,
+      &iv,
+      length,
+      additional_data,
+      &mut plaintext
+    )
   )?;
 
   Ok(plaintext)
