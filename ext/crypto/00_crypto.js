@@ -922,7 +922,7 @@ class SubtleCrypto {
         // 1.
         if (TypedArrayPrototypeGetByteLength(normalizedAlgorithm.iv) !== 16) {
           throw new DOMException(
-            "Counter must be 16 bytes",
+            "algorithm.iv must contain exactly 16 bytes",
             "OperationError",
           );
         }
@@ -986,7 +986,7 @@ class SubtleCrypto {
           )
         ) {
           throw new DOMException(
-            `Invalid tag length: ${normalizedAlgorithm.tagLength}`,
+            `${normalizedAlgorithm.tagLength} is not a valid ${normalizedAlgorithm.name} tag length`,
             "OperationError",
           );
         }
@@ -6474,7 +6474,7 @@ async function encrypt(normalizedAlgorithm, key, data) {
       // 1.
       if (TypedArrayPrototypeGetByteLength(normalizedAlgorithm.iv) !== 16) {
         throw new DOMException(
-          "Initialization vector must be 16 bytes",
+          "algorithm.iv must contain exactly 16 bytes",
           "OperationError",
         );
       }
@@ -6571,7 +6571,7 @@ async function encrypt(normalizedAlgorithm, key, data) {
         )
       ) {
         throw new DOMException(
-          `Invalid tag length: ${normalizedAlgorithm.tagLength}`,
+          `${normalizedAlgorithm.tagLength} is not a valid ${normalizedAlgorithm.name} tag length`,
           "OperationError",
         );
       }
@@ -6625,7 +6625,7 @@ async function encrypt(normalizedAlgorithm, key, data) {
         )
       ) {
         throw new DOMException(
-          `Invalid tag length: ${normalizedAlgorithm.tagLength}`,
+          `${normalizedAlgorithm.tagLength} is not a valid ${normalizedAlgorithm.name} tag length`,
           "OperationError",
         );
       }
