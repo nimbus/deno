@@ -8,8 +8,6 @@ use aes_gcm::AeadInPlace;
 use aes_gcm::KeyInit;
 use aes_gcm::Nonce;
 use aes_gcm::aead::generic_array::ArrayLength;
-use aes_gcm::aead::generic_array::typenum::U12;
-use aes_gcm::aead::generic_array::typenum::U16;
 use aes_gcm::aes::Aes128;
 use aes_gcm::aes::Aes192;
 use aes_gcm::aes::Aes256;
@@ -309,24 +307,13 @@ fn encrypt_aes_gcm(
   let additional_data = additional_data.unwrap_or_default();
 
   let mut ciphertext = data.to_vec();
-  // Fixed 96-bit OR 128-bit nonce
-  let tag = match iv.len() {
-    12 => encrypt_aes_gcm_general::<U12>(
-      key,
-      iv,
-      length,
-      &mut ciphertext,
-      additional_data,
-    )?,
-    16 => encrypt_aes_gcm_general::<U16>(
-      key,
-      iv,
-      length,
-      &mut ciphertext,
-      additional_data,
-    )?,
-    _ => return Err(EncryptError::InvalidIvLength),
-  };
+  // AES-GCM accepts any IV length; map the runtime length to the compile-time
+  // nonce size the `aes-gcm` API requires (see `aes_gcm_nonce_dispatch!`).
+  let tag = aes_gcm_nonce_dispatch!(
+    iv.len(),
+    return Err(EncryptError::InvalidIvLength),
+    encrypt_aes_gcm_general(key, iv, length, &mut ciphertext, additional_data)
+  )?;
 
   // Truncated tag to the specified tag length.
   // `tag` is fixed to be 16 bytes long and (tag_length / 8) is always <= 16

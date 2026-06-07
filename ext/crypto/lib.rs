@@ -56,6 +56,59 @@ use sha3::Sha3_512;
 use signature::hazmat::PrehashSigner;
 use signature::hazmat::PrehashVerifier; // Re-export rand
 
+/// Dispatch an AES-GCM operation over the runtime IV (nonce) length to the
+/// compile-time `typenum` nonce size that the RustCrypto `aes-gcm` high-level
+/// API requires.
+///
+/// AES-GCM is defined for any IV length: for non-96-bit nonces `aes-gcm`
+/// derives the initial counter block J0 via GHASH per NIST SP 800-38D and
+/// produces byte-identical output to OpenSSL/Node (the 16-byte path is already
+/// exercised by Nimbus). Because the crate's nonce size is a *type* parameter,
+/// a runtime length must be mapped to a concrete type here. Every practical IV
+/// length (1..=32 bytes) is covered; lengths outside the range evaluate
+/// `$invalid` (Web Crypto and Node never restrict GCM to 12/16 bytes, so the
+/// previous 12-or-16-only restriction was a Deno-specific gap).
+macro_rules! aes_gcm_nonce_dispatch {
+  ($iv_len:expr, $invalid:expr, $call:ident($($arg:expr),* $(,)?)) => {{
+    use aes_gcm::aead::generic_array::typenum;
+    match $iv_len {
+      1 => $call::<typenum::U1>($($arg),*),
+      2 => $call::<typenum::U2>($($arg),*),
+      3 => $call::<typenum::U3>($($arg),*),
+      4 => $call::<typenum::U4>($($arg),*),
+      5 => $call::<typenum::U5>($($arg),*),
+      6 => $call::<typenum::U6>($($arg),*),
+      7 => $call::<typenum::U7>($($arg),*),
+      8 => $call::<typenum::U8>($($arg),*),
+      9 => $call::<typenum::U9>($($arg),*),
+      10 => $call::<typenum::U10>($($arg),*),
+      11 => $call::<typenum::U11>($($arg),*),
+      12 => $call::<typenum::U12>($($arg),*),
+      13 => $call::<typenum::U13>($($arg),*),
+      14 => $call::<typenum::U14>($($arg),*),
+      15 => $call::<typenum::U15>($($arg),*),
+      16 => $call::<typenum::U16>($($arg),*),
+      17 => $call::<typenum::U17>($($arg),*),
+      18 => $call::<typenum::U18>($($arg),*),
+      19 => $call::<typenum::U19>($($arg),*),
+      20 => $call::<typenum::U20>($($arg),*),
+      21 => $call::<typenum::U21>($($arg),*),
+      22 => $call::<typenum::U22>($($arg),*),
+      23 => $call::<typenum::U23>($($arg),*),
+      24 => $call::<typenum::U24>($($arg),*),
+      25 => $call::<typenum::U25>($($arg),*),
+      26 => $call::<typenum::U26>($($arg),*),
+      27 => $call::<typenum::U27>($($arg),*),
+      28 => $call::<typenum::U28>($($arg),*),
+      29 => $call::<typenum::U29>($($arg),*),
+      30 => $call::<typenum::U30>($($arg),*),
+      31 => $call::<typenum::U31>($($arg),*),
+      32 => $call::<typenum::U32>($($arg),*),
+      _ => $invalid,
+    }
+  }};
+}
+
 mod decrypt;
 mod ed25519;
 mod encrypt;

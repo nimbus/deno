@@ -7,8 +7,6 @@ use aes_gcm::AeadInPlace;
 use aes_gcm::KeyInit;
 use aes_gcm::Nonce;
 use aes_gcm::aead::generic_array::ArrayLength;
-use aes_gcm::aead::generic_array::typenum::U12;
-use aes_gcm::aead::generic_array::typenum::U16;
 use aes_gcm::aes::Aes128;
 use aes_gcm::aes::Aes192;
 use aes_gcm::aes::Aes256;
@@ -405,26 +403,13 @@ fn decrypt_aes_gcm(
   // The actual ciphertext, called plaintext because it is reused in place.
   let mut plaintext = data[..sep].to_vec();
 
-  // Fixed 96-bit or 128-bit nonce
-  match iv.len() {
-    12 => decrypt_aes_gcm_gen::<U12>(
-      key,
-      tag.into(),
-      &iv,
-      length,
-      additional_data,
-      &mut plaintext,
-    )?,
-    16 => decrypt_aes_gcm_gen::<U16>(
-      key,
-      tag.into(),
-      &iv,
-      length,
-      additional_data,
-      &mut plaintext,
-    )?,
-    _ => return Err(DecryptError::InvalidIvLength),
-  }
+  // AES-GCM accepts any IV length; map the runtime length to the compile-time
+  // nonce size the `aes-gcm` API requires (see `aes_gcm_nonce_dispatch!`).
+  aes_gcm_nonce_dispatch!(
+    iv.len(),
+    return Err(DecryptError::InvalidIvLength),
+    decrypt_aes_gcm_gen(key, tag.into(), &iv, length, additional_data, &mut plaintext)
+  )?;
 
   Ok(plaintext)
 }

@@ -1002,10 +1002,11 @@ class SubtleCrypto {
           );
         }
 
-        // 3. We only support 96-bit and 128-bit nonce for GCM, 1-15 bytes for OCB
+        // 3. AES-GCM accepts any IV length; Nimbus supports 1..=32 bytes (J0 is
+        //    derived via GHASH for non-96-bit nonces). OCB allows 1-15 bytes.
         const ivLen = TypedArrayPrototypeGetByteLength(normalizedAlgorithm.iv);
         if (algorithm.name === "AES-GCM") {
-          if (!ArrayPrototypeIncludes([12, 16], ivLen)) {
+          if (ivLen < 1 || ivLen > 32) {
             throw new DOMException(
               "Initialization vector length not supported",
               "NotSupportedError",
@@ -6537,13 +6538,11 @@ async function encrypt(normalizedAlgorithm, key, data) {
       }
 
       // 2.
-      // We only support 96-bit and 128-bit nonce.
-      if (
-        ArrayPrototypeIncludes(
-          [12, 16],
-          TypedArrayPrototypeGetByteLength(normalizedAlgorithm.iv),
-        ) === undefined
-      ) {
+      // AES-GCM accepts any IV length; Nimbus supports 1..=32 bytes (the op
+      // derives the J0 counter block via GHASH for non-96-bit nonces, matching
+      // Node/OpenSSL). 96 bits (12 bytes) remains the recommended length.
+      const ivLength = TypedArrayPrototypeGetByteLength(normalizedAlgorithm.iv);
+      if (ivLength < 1 || ivLength > 32) {
         throw new DOMException(
           "Initialization vector length not supported",
           "NotSupportedError",
