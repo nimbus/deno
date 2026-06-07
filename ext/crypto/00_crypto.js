@@ -828,7 +828,7 @@ class SubtleCrypto {
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
       throw new DOMException(
-        `Encryption algorithm '${normalizedAlgorithm.name}' does not match key algorithm`,
+        "The requested operation is not valid for the provided key",
         "InvalidAccessError",
       );
     }
@@ -871,8 +871,8 @@ class SubtleCrypto {
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
       throw new DOMException(
-        `Decryption algorithm "${normalizedAlgorithm.name}" does not match key algorithm`,
-        "OperationError",
+        "The requested operation is not valid for the provided key",
+        "InvalidAccessError",
       );
     }
 
