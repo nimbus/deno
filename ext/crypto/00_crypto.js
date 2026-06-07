@@ -6698,6 +6698,12 @@ class Crypto {
     // Fast path for Uint8Array
     const tag = TypedArrayPrototypeGetSymbolToStringTag(typedArray);
     if (tag === "Uint8Array") {
+      if (TypedArrayPrototypeGetByteLength(typedArray) > 65536) {
+        throw new DOMException(
+          "The ArrayBufferView's byte length exceeds the number of bytes of entropy available via this API (65536)",
+          "QuotaExceededError",
+        );
+      }
       op_crypto_get_random_values(typedArray);
       return typedArray;
     }
@@ -6716,6 +6722,12 @@ class Crypto {
           "The provided value is not an integer-type TypedArray",
           "TypeMismatchError",
         );
+    }
+    if (TypedArrayPrototypeGetByteLength(typedArray) > 65536) {
+      throw new DOMException(
+        "The ArrayBufferView's byte length exceeds the number of bytes of entropy available via this API (65536)",
+        "QuotaExceededError",
+      );
     }
     const ui8 = new Uint8Array(
       TypedArrayPrototypeGetBuffer(typedArray),
