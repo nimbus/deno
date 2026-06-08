@@ -678,7 +678,7 @@ class URL {
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     if (
-      typeof inspectOptions?.depth === "number" && inspectOptions.depth < 0
+      typeof inspectOptions?.depth === "number" && inspectOptions.depth <= 0
     ) {
       return "URL {}";
     }

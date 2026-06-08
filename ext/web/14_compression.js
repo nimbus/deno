@@ -13,10 +13,21 @@ const {
   op_compression_write,
 } = core.ops;
 const {
-  SymbolFor,
+  isArrayBuffer,
+  isTypedArray,
+} = core;
+const {
+  ArrayBufferIsView,
+  DataViewPrototypeGetBuffer,
+  DataViewPrototypeGetByteLength,
+  DataViewPrototypeGetByteOffset,
   ObjectPrototypeIsPrototypeOf,
+  SymbolFor,
+  TypedArrayPrototypeGetBuffer,
   TypedArrayPrototypeGetByteLength,
+  TypedArrayPrototypeGetByteOffset,
   TypeError,
+  Uint8Array,
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
@@ -43,10 +54,26 @@ function convertCompressionChunk(chunk, prefix) {
     );
   }
   try {
-    return webidl.converters.BufferSource(chunk, prefix, "chunk");
+    chunk = webidl.converters.BufferSource(chunk, prefix, "chunk");
   } catch (error) {
     throw withCode(error, "ERR_INVALID_ARG_TYPE");
   }
+  if (isArrayBuffer(chunk)) {
+    return new Uint8Array(chunk);
+  }
+  if (ArrayBufferIsView(chunk)) {
+    const buffer = isTypedArray(chunk)
+      ? TypedArrayPrototypeGetBuffer(chunk)
+      : DataViewPrototypeGetBuffer(chunk);
+    const byteOffset = isTypedArray(chunk)
+      ? TypedArrayPrototypeGetByteOffset(chunk)
+      : DataViewPrototypeGetByteOffset(chunk);
+    const byteLength = isTypedArray(chunk)
+      ? TypedArrayPrototypeGetByteLength(chunk)
+      : DataViewPrototypeGetByteLength(chunk);
+    return new Uint8Array(buffer, byteOffset, byteLength);
+  }
+  return chunk;
 }
 
 webidl.converters.CompressionFormat = webidl.createEnumConverter(
