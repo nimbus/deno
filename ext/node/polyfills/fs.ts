@@ -326,6 +326,16 @@ function stat(
   callback = makeCallback(callback);
   path = getValidatedPathToString(path);
 
+  // Node's lib/fs.js stat() runs checkAborted(options.signal, callback) after
+  // path validation and before the binding call: an already-aborted signal
+  // settles the callback with an AbortError instead of issuing the stat. See
+  // test/parallel/test-fs-stat-abort-test.js.
+  const statSignal = (options as statOptions)?.signal;
+  if (statSignal?.aborted) {
+    callback(new AbortError(undefined, { cause: statSignal.reason }));
+    return;
+  }
+
   // Suppress async_hooks tracking for the internal Deno.stat promise and its
   // continuation: these are runtime-internal (not user-observable Node
   // resources), so the fork's promiseInitHook records them in suppressedPromises
