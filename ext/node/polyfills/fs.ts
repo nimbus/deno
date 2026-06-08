@@ -2326,9 +2326,23 @@ function mkdtemp(
 
   warnOnNonPortableTemplate(prefix);
 
+  // Resolve a relative prefix against the per-isolate process.cwd() so the temp
+  // dir lands in the current working directory. Embedders may keep a virtual
+  // cwd (a multi-tenant isolate must not mutate the shared host cwd), so the op
+  // cannot rely on the host process cwd for relative resolution. Node returns
+  // the prefix-form name (relative in -> relative out), so relativize the
+  // absolute op result back. cwd is captured once to stay stable across the op.
+  const cwd = process.cwd();
+  const prefixIsRelative = !isAbsolute(prefix);
+  const opPrefix = prefixIsRelative ? resolve(cwd, prefix) : prefix;
+
   PromisePrototypeThen(
-    op_node_mkdtemp(prefix),
-    (path: string) => callback(null, decodeMkdtemp(path, encoding)),
+    op_node_mkdtemp(opPrefix),
+    (path: string) =>
+      callback(
+        null,
+        decodeMkdtemp(prefixIsRelative ? relative(cwd, path) : path, encoding),
+      ),
     (err: Error) =>
       callback(denoErrorToNodeError(err, {
         syscall: "mkdtemp",
@@ -2354,9 +2368,19 @@ function mkdtempSync(
 
   warnOnNonPortableTemplate(prefix);
 
+  // Resolve a relative prefix against the per-isolate process.cwd() so the temp
+  // dir lands in the current working directory. Embedders may keep a virtual
+  // cwd (a multi-tenant isolate must not mutate the shared host cwd), so the op
+  // cannot rely on the host process cwd for relative resolution. Node returns
+  // the prefix-form name (relative in -> relative out), so relativize the
+  // absolute op result back.
+  const cwd = process.cwd();
+  const prefixIsRelative = !isAbsolute(prefix);
+  const opPrefix = prefixIsRelative ? resolve(cwd, prefix) : prefix;
+
   try {
-    const path = op_node_mkdtemp_sync(prefix) as string;
-    return decodeMkdtemp(path, encoding);
+    const path = op_node_mkdtemp_sync(opPrefix) as string;
+    return decodeMkdtemp(prefixIsRelative ? relative(cwd, path) : path, encoding);
   } catch (err) {
     throw denoErrorToNodeError(err as Error, {
       syscall: "mkdtemp",
