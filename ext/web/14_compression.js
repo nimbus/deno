@@ -36,6 +36,9 @@ const { createFilteredInspectProxy } = core.loadExtScript(
 );
 const { TransformStream } = core.loadExtScript("ext:deno_web/06_streams.js");
 
+const compressionWritableStrategy = { __proto__: null, highWaterMark: 1 };
+const compressionReadableStrategy = { __proto__: null, highWaterMark: 16 };
+
 function withCode(error, code) {
   if (error && error.code === undefined) {
     error.code = code;
@@ -104,23 +107,27 @@ class CompressionStream {
 
     const rid = op_compression_new(format, false);
 
-    this.#transform = new TransformStream({
-      transform(chunk, controller) {
-        chunk = convertCompressionChunk(chunk, prefix);
-        const output = op_compression_write(
-          rid,
-          chunk,
-        );
-        maybeEnqueue(controller, output);
+    this.#transform = new TransformStream(
+      {
+        transform(chunk, controller) {
+          chunk = convertCompressionChunk(chunk, prefix);
+          const output = op_compression_write(
+            rid,
+            chunk,
+          );
+          maybeEnqueue(controller, output);
+        },
+        flush(controller) {
+          const output = op_compression_finish(rid, true);
+          maybeEnqueue(controller, output);
+        },
+        cancel: (_reason) => {
+          op_compression_finish(rid, false);
+        },
       },
-      flush(controller) {
-        const output = op_compression_finish(rid, true);
-        maybeEnqueue(controller, output);
-      },
-      cancel: (_reason) => {
-        op_compression_finish(rid, false);
-      },
-    });
+      compressionWritableStrategy,
+      compressionReadableStrategy,
+    );
 
     this[webidl.brand] = webidl.brand;
   }
@@ -176,23 +183,27 @@ class DecompressionStream {
 
     const rid = op_compression_new(format, true);
 
-    this.#transform = new TransformStream({
-      transform(chunk, controller) {
-        chunk = convertCompressionChunk(chunk, prefix);
-        const output = op_compression_write(
-          rid,
-          chunk,
-        );
-        maybeEnqueue(controller, output);
+    this.#transform = new TransformStream(
+      {
+        transform(chunk, controller) {
+          chunk = convertCompressionChunk(chunk, prefix);
+          const output = op_compression_write(
+            rid,
+            chunk,
+          );
+          maybeEnqueue(controller, output);
+        },
+        flush(controller) {
+          const output = op_compression_finish(rid, true);
+          maybeEnqueue(controller, output);
+        },
+        cancel: (_reason) => {
+          op_compression_finish(rid, false);
+        },
       },
-      flush(controller) {
-        const output = op_compression_finish(rid, true);
-        maybeEnqueue(controller, output);
-      },
-      cancel: (_reason) => {
-        op_compression_finish(rid, false);
-      },
-    });
+      compressionWritableStrategy,
+      compressionReadableStrategy,
+    );
 
     this[webidl.brand] = webidl.brand;
   }
