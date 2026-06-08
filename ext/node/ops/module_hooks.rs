@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -10,7 +11,10 @@ use std::task::Waker;
 use deno_core::OpState;
 use deno_core::op2;
 use deno_core::v8;
+use deno_error::AdditionalProperties;
 use deno_error::JsErrorBox;
+use deno_error::JsErrorClass;
+use deno_error::PropertyValue;
 
 /// A pending load request from the Rust module loader to JS hooks.
 struct PendingLoad {
@@ -22,6 +26,44 @@ struct PendingLoad {
 type LoadResult = (Option<String>, Option<String>);
 type LoadSender =
   deno_core::futures::channel::oneshot::Sender<Result<LoadResult, String>>;
+
+#[derive(Debug)]
+struct ModuleHookError {
+  message: String,
+  code: Option<String>,
+}
+
+impl std::fmt::Display for ModuleHookError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&self.message)
+  }
+}
+
+impl std::error::Error for ModuleHookError {}
+
+impl JsErrorClass for ModuleHookError {
+  fn get_class(&self) -> Cow<'static, str> {
+    Cow::Borrowed("Error")
+  }
+
+  fn get_message(&self) -> Cow<'static, str> {
+    Cow::Owned(self.message.clone())
+  }
+
+  fn get_additional_properties(&self) -> AdditionalProperties {
+    match &self.code {
+      Some(code) => Box::new(std::iter::once((
+        Cow::Borrowed("code"),
+        PropertyValue::String(Cow::Owned(code.clone())),
+      ))),
+      None => Box::new(std::iter::empty()),
+    }
+  }
+
+  fn get_ref(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+    self
+  }
+}
 
 /// Callback used to perform the default ESM resolution from JS hooks.
 /// Installed by the embedder so that the JS terminal `nextResolve` fallback
@@ -123,7 +165,17 @@ impl LoaderHookRegistry {
         let error = error
           .to_string(scope)
           .ok_or_else(|| JsErrorBox::generic("module resolve hook failed"))?;
-        return Err(JsErrorBox::generic(error.to_rust_string_lossy(scope)));
+        let code_key = v8::String::new(scope, "code")
+          .ok_or_else(|| JsErrorBox::generic("failed to allocate code key"))?;
+        let code = result
+          .get(scope, code_key.into())
+          .filter(|code| !code.is_null_or_undefined())
+          .and_then(|code| code.to_string(scope))
+          .map(|code| code.to_rust_string_lossy(scope));
+        return Err(JsErrorBox::from_err(ModuleHookError {
+          message: error.to_rust_string_lossy(scope),
+          code,
+        }));
       }
     }
     Err(JsErrorBox::generic(

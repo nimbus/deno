@@ -1273,6 +1273,10 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
     if !has_call_site(scope, arg) {
       let msg = v8::Exception::create_message(scope, arg);
       let arg: v8::Local<v8::Object> = arg.try_into().unwrap();
+      let code_key = CODE.v8_string(scope).unwrap();
+      let code_value = arg
+        .get(scope, code_key.into())
+        .and_then(|code| code.try_into().ok());
       let message_key = MESSAGE.v8_string(scope).unwrap();
       let message = arg.get(scope, message_key.into()).unwrap();
       let mut message: v8::Local<v8::String> = message.try_into().unwrap();
@@ -1298,8 +1302,8 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
         }
         _ => v8::Exception::error(scope, message),
       };
-      let code_key = CODE.v8_string(scope).unwrap();
-      let code_value = ERR_MODULE_NOT_FOUND.v8_string(scope).unwrap();
+      let code_value = code_value
+        .unwrap_or_else(|| ERR_MODULE_NOT_FOUND.v8_string(scope).unwrap());
       let exception_obj = exception.to_object(scope).unwrap();
       exception_obj.set(scope, code_key.into(), code_value.into());
       scope.throw_exception(exception);

@@ -215,6 +215,11 @@ impl CoreError {
 
 impl CoreErrorKind {
   pub fn to_v8_error(&self, scope: &mut v8::PinScope) -> v8::Global<v8::Value> {
+    if let Self::JsBox(error) | Self::ExtensionTranspiler(error) = self {
+      let exception = crate::error::to_v8_error(scope, error);
+      return v8::Global::new(scope, exception);
+    }
+
     let err_string = self.get_message().to_string();
     let mut error_chain = vec![];
     let mut intermediary_error: Option<&dyn Error> = Some(&self);

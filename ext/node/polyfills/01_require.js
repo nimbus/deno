@@ -559,6 +559,8 @@ let patched = false;
 // module.registerHooks() infrastructure
 const hookEntries = [];
 const cjsHookResolvedFilenames = new SafeSet();
+const cjsHookResolvedFormats = new SafeMap();
+const esmHookResolvedFormats = new SafeMap();
 let insideResolveHook = false;
 let insideLoadHook = false;
 let utf8Decoder;
@@ -754,6 +756,23 @@ function loadHookSourceToString(source) {
   );
 }
 
+function nodeErrorCodeFromError(error) {
+  if (typeof error?.code === "string") {
+    return error.code;
+  }
+  const match = RegExpPrototypeExec(/\bERR_[A-Z0-9_]+\b/, String(error));
+  return match?.[0] ?? null;
+}
+
+function isBarePackageLikeSpecifier(specifier) {
+  return !StringPrototypeStartsWith(specifier, "./") &&
+    !StringPrototypeStartsWith(specifier, "../") &&
+    !StringPrototypeStartsWith(specifier, ".\\") &&
+    !StringPrototypeStartsWith(specifier, "..\\") &&
+    !StringPrototypeStartsWith(specifier, "/") &&
+    RegExpPrototypeExec(/^[A-Za-z][A-Za-z0-9+.-]*:/, specifier) === null;
+}
+
 // ESM resolve hook chain: runs hooks in LIFO order.
 // Returns { url } if hooks resolved, or null for fallthrough to default.
 function executeEsmResolveHookChain(specifier, context) {
@@ -784,7 +803,14 @@ function executeEsmResolveHookChain(specifier, context) {
           conditionsFromResolveOptions(currentContext),
         );
         return { url: resolved, shortCircuit: true };
-      } catch {
+      } catch (e) {
+        const code = nodeErrorCodeFromError(e);
+        if (
+          isBarePackageLikeSpecifier(spec) ||
+          (code !== null && code !== "ERR_MODULE_NOT_FOUND")
+        ) {
+          throw e;
+        }
         // Last-ditch fallback so hooks can still observe purely synthetic
         // specifiers that Deno's resolver rejects (e.g. ad-hoc URLs invented
         // by user code).
@@ -817,6 +843,12 @@ function executeEsmResolveHookChain(specifier, context) {
 }
 
 function esmResolveHookCallback(specifier, referrer) {
+  if (
+    StringPrototypeStartsWith(specifier, "ext:") ||
+    StringPrototypeStartsWith(referrer ?? "", "ext:")
+  ) {
+    return null;
+  }
   const context = {
     parentURL: referrer || undefined,
     conditions: ["node", "import"],
@@ -824,9 +856,15 @@ function esmResolveHookCallback(specifier, referrer) {
   };
   try {
     const result = executeEsmResolveHookChain(specifier, context);
-    return result?.url ?? null;
+    const resolvedUrl = result?.url ?? null;
+    if (typeof resolvedUrl === "string" && typeof result?.format === "string") {
+      esmHookResolvedFormats.set(resolvedUrl, result.format);
+    } else if (typeof resolvedUrl === "string") {
+      esmHookResolvedFormats.delete(resolvedUrl);
+    }
+    return resolvedUrl;
   } catch (e) {
-    return { error: String(e) };
+    return { error: String(e), code: nodeErrorCodeFromError(e) };
   }
 }
 
@@ -902,8 +940,14 @@ function _startEsmLoadLoop() {
       const req = await pollPromise;
       if (req === null) break;
       const [id, fileUrl] = req;
+      if (StringPrototypeStartsWith(fileUrl, "ext:")) {
+        op_module_hooks_respond_load(id, null, null, null);
+        continue;
+      }
+      const resolvedFormat = esmHookResolvedFormats.get(fileUrl);
+      esmHookResolvedFormats.delete(fileUrl);
       const context = {
-        format: undefined,
+        format: resolvedFormat,
         conditions: ["node", "import"],
         importAttributes: { __proto__: null },
       };
@@ -1673,6 +1717,7 @@ Module._load = function (request, parent, isMain) {
       if (threw) {
         delete Module._cache[filename];
         SetPrototypeDelete(cjsHookResolvedFilenames, filename);
+        cjsHookResolvedFormats.delete(filename);
         if (parent !== undefined) {
           delete relativeResolveCache[relResolveCacheIdentifier];
           const children = parent?.children;
@@ -1775,17 +1820,32 @@ Module._resolveFilename = function (
         try {
           const filename = url.fileURLToPath(result.url);
           SetPrototypeAdd(cjsHookResolvedFilenames, filename);
+          if (typeof result.format === "string") {
+            cjsHookResolvedFormats.set(filename, result.format);
+          } else {
+            cjsHookResolvedFormats.delete(filename);
+          }
           return filename;
         } catch {
           // Virtual file:// URLs may not have valid OS paths (e.g.
           // file:///virtual.js on Windows). Return the URL as-is and
           // let the load hook handle it.
           SetPrototypeAdd(cjsHookResolvedFilenames, result.url);
+          if (typeof result.format === "string") {
+            cjsHookResolvedFormats.set(result.url, result.format);
+          } else {
+            cjsHookResolvedFormats.delete(result.url);
+          }
           return result.url;
         }
       }
       // node: and other schemes returned as-is
       SetPrototypeAdd(cjsHookResolvedFilenames, result.url);
+      if (typeof result.format === "string") {
+        cjsHookResolvedFormats.set(result.url, result.format);
+      } else {
+        cjsHookResolvedFormats.delete(result.url);
+      }
       return result.url;
     }
   }
@@ -2013,7 +2073,7 @@ Module.prototype.load = function (filename) {
         fileUrl = url.pathToFileURL(this.filename).href;
       }
       const context = {
-        format: undefined,
+        format: cjsHookResolvedFormats.get(this.filename),
         conditions: ["node", "require"],
         importAttributes: { __proto__: null },
       };
@@ -2247,6 +2307,11 @@ Module.prototype._compile = function (
 ) {
   const useSourceImport = sourceFromHook ||
     SetPrototypeDelete(cjsHookResolvedFilenames, filename);
+  const resolvedFormat = cjsHookResolvedFormats.get(filename);
+  cjsHookResolvedFormats.delete(filename);
+  if (format === undefined && resolvedFormat !== undefined) {
+    format = resolvedFormat;
+  }
   if (format === "module") {
     return loadESMFromCJS(this, filename, content, useSourceImport);
   }
