@@ -7323,6 +7323,9 @@ internals.writableStreamForRid = writableStreamForRid;
 const kNodeWebStreamsState = SymbolFor("nodejs.webstreams.kState");
 const kNodeWebStreamsType = SymbolFor("nodejs.webstreams.kType");
 const kNodeMessagingTransfer = SymbolFor("nodejs.messaging.kTransfer");
+const kNodeControllerErrorFunction = SymbolFor(
+  "nodejs.webstream.controllerErrorFunction",
+);
 
 function createReadableStreamStateView(stream) {
   return {
@@ -7504,6 +7507,19 @@ ObjectDefineProperty(ReadableStreamPrototype, kNodeWebStreamsType, {
   configurable: true,
   value: "ReadableStream",
 });
+ObjectDefineProperty(ReadableStreamPrototype, kNodeControllerErrorFunction, {
+  __proto__: null,
+  configurable: true,
+  value(error) {
+    webidl.assertBranded(this, ReadableStreamPrototype, "ReadableStream");
+    const controller = this[_controller];
+    if (isReadableByteStreamController(controller)) {
+      readableByteStreamControllerError(controller, error);
+    } else {
+      readableStreamDefaultControllerError(controller, error);
+    }
+  },
+});
 ObjectDefineProperty(ReadableStreamPrototype, kNodeMessagingTransfer, {
   __proto__: null,
   configurable: true,
@@ -7589,6 +7605,22 @@ ObjectDefineProperty(
     value: "ReadableByteStreamController",
   },
 );
+ObjectDefineProperty(WritableStreamPrototype, kNodeControllerErrorFunction, {
+  __proto__: null,
+  configurable: true,
+  value(error) {
+    webidl.assertBranded(this, WritableStreamPrototype, "WritableStream");
+    writableStreamDefaultControllerErrorIfNeeded(this[_controller], error);
+  },
+});
+ObjectDefineProperty(TransformStreamPrototype, kNodeControllerErrorFunction, {
+  __proto__: null,
+  configurable: true,
+  value(error) {
+    webidl.assertBranded(this, TransformStreamPrototype, "TransformStream");
+    transformStreamError(this, error);
+  },
+});
 ObjectDefineProperty(ReadableStreamBYOBRequestPrototype, kNodeWebStreamsType, {
   __proto__: null,
   configurable: true,

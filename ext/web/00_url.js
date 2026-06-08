@@ -677,6 +677,11 @@ class URL {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    if (
+      typeof inspectOptions?.depth === "number" && inspectOptions.depth < 0
+    ) {
+      return "URL {}";
+    }
     const proxy = createFilteredInspectProxy({
       object: this,
       evaluate: ObjectPrototypeIsPrototypeOf(URLPrototype, this),
@@ -720,7 +725,7 @@ class URL {
   // Deno.privateCustomInspect, so this is effectively the same code path.
   [SymbolFor("nodejs.util.inspect.custom")](depth, inspectOptions, inspect) {
     if (typeof depth === "number" && depth < 0) {
-      return this;
+      return "URL {}";
     }
     return this[SymbolFor("Deno.privateCustomInspect")](
       inspect,
