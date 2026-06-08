@@ -23,6 +23,7 @@ const {
   ArrayPrototypeSome,
   ArrayPrototypeSort,
   ArrayPrototypeSplice,
+  ObjectDefineProperty,
   ObjectGetOwnPropertyDescriptor,
   ObjectKeys,
   ObjectPrototypeIsPrototypeOf,
@@ -113,6 +114,21 @@ function getSerialization(status, href, maybeBase) {
       error.base = maybeBase;
     }
     throw error;
+  }
+}
+
+function missingArgs(prefix) {
+  const error = new TypeError(`${prefix}: 1 argument required`);
+  error.code = "ERR_MISSING_ARGS";
+  return error;
+}
+
+function assertURLReceiver(value) {
+  if (
+    !ObjectPrototypeIsPrototypeOf(URLPrototype, value) ||
+    value[webidl.brand] !== webidl.brand
+  ) {
+    throw new TypeError("Receiver must be an instance of class URL");
   }
 }
 
@@ -516,7 +532,9 @@ class URL {
       return;
     }
     const prefix = "Failed to construct 'URL'";
-    webidl.requiredArguments(arguments.length, 1, prefix);
+    if (arguments.length < 1) {
+      throw missingArgs(prefix);
+    }
     url = webidl.converters.DOMString(url, prefix, "Argument 1");
     if (base !== undefined) {
       base = webidl.converters.DOMString(base, prefix, "Argument 2");
@@ -594,8 +612,9 @@ class URL {
           "hostname",
           "port",
           "pathname",
-          "hash",
           "search",
+          "searchParams",
+          "hash",
         ],
       }),
       inspectOptions,
@@ -637,7 +656,6 @@ class URL {
 
   /** @return {string} */
   get hash() {
-    webidl.assertBranded(this, URLPrototype);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/quirks.rs#L263
     return this.#fragmentStart
       ? trim(StringPrototypeSlice(this.#serialization, this.#fragmentStart))
@@ -646,7 +664,6 @@ class URL {
 
   /** @param {string} value */
   set hash(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'hash' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -664,7 +681,6 @@ class URL {
 
   /** @return {string} */
   get host() {
-    webidl.assertBranded(this, URLPrototype);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/quirks.rs#L101
     return StringPrototypeSlice(
       this.#serialization,
@@ -675,7 +691,6 @@ class URL {
 
   /** @param {string} value */
   set host(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'host' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -693,7 +708,6 @@ class URL {
 
   /** @return {string} */
   get hostname() {
-    webidl.assertBranded(this, URLPrototype);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/lib.rs#L988
     return StringPrototypeSlice(
       this.#serialization,
@@ -704,7 +718,6 @@ class URL {
 
   /** @param {string} value */
   set hostname(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'hostname' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -722,13 +735,12 @@ class URL {
 
   /** @return {string} */
   get href() {
-    webidl.assertBranded(this, URLPrototype);
+    assertURLReceiver(this);
     return this.#serialization;
   }
 
   /** @param {string} value */
   set href(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'href' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -740,7 +752,6 @@ class URL {
 
   /** @return {string} */
   get origin() {
-    webidl.assertBranded(this, URLPrototype);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/origin.rs#L14
     const scheme = StringPrototypeSlice(
       this.#serialization,
@@ -768,7 +779,6 @@ class URL {
 
   /** @return {string} */
   get password() {
-    webidl.assertBranded(this, URLPrototype);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/lib.rs#L914
     if (
       this.#hasAuthority() &&
@@ -786,7 +796,6 @@ class URL {
 
   /** @param {string} value */
   set password(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'password' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -804,7 +813,6 @@ class URL {
 
   /** @return {string} */
   get pathname() {
-    webidl.assertBranded(this, URLPrototype);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/lib.rs#L1203
     if (!this.#queryStart && !this.#fragmentStart) {
       return StringPrototypeSlice(this.#serialization, this.#pathStart);
@@ -820,7 +828,6 @@ class URL {
 
   /** @param {string} value */
   set pathname(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'pathname' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -838,7 +845,6 @@ class URL {
 
   /** @return {string} */
   get port() {
-    webidl.assertBranded(this, URLPrototype);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/quirks.rs#L196
     if (this.#port === NO_PORT) {
       return StringPrototypeSlice(
@@ -857,7 +863,6 @@ class URL {
 
   /** @param {string} value */
   set port(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'port' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -875,7 +880,6 @@ class URL {
 
   /** @return {string} */
   get protocol() {
-    webidl.assertBranded(this, URLPrototype);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/quirks.rs#L56
     return StringPrototypeSlice(
       this.#serialization,
@@ -886,7 +890,6 @@ class URL {
 
   /** @param {string} value */
   set protocol(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'protocol' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -904,7 +907,7 @@ class URL {
 
   /** @return {string} */
   get search() {
-    webidl.assertBranded(this, URLPrototype);
+    assertURLReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/quirks.rs#L249
     const afterPath = this.#queryStart || this.#fragmentStart ||
       this.#serialization.length;
@@ -916,7 +919,6 @@ class URL {
 
   /** @param {string} value */
   set search(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'search' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -935,7 +937,6 @@ class URL {
 
   /** @return {string} */
   get username() {
-    webidl.assertBranded(this, URLPrototype);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/lib.rs#L881
     const schemeSeparatorLen = 3; /* :// */
     if (
@@ -954,7 +955,6 @@ class URL {
 
   /** @param {string} value */
   set username(value) {
-    webidl.assertBranded(this, URLPrototype);
     const prefix = "Failed to set 'username' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -981,19 +981,45 @@ class URL {
 
   /** @return {string} */
   toString() {
-    webidl.assertBranded(this, URLPrototype);
+    assertURLReceiver(this);
     return this.#serialization;
   }
 
   /** @return {string} */
   toJSON() {
-    webidl.assertBranded(this, URLPrototype);
+    assertURLReceiver(this);
     return this.#serialization;
   }
 }
 
 webidl.configureInterface(URL);
 const URLPrototype = URL.prototype;
+
+const URL_PROTOTYPE_PROPERTY_ORDER = [
+  "toString",
+  "href",
+  "origin",
+  "protocol",
+  "username",
+  "password",
+  "host",
+  "hostname",
+  "port",
+  "pathname",
+  "search",
+  "searchParams",
+  "hash",
+  "toJSON",
+];
+
+for (let i = 0; i < URL_PROTOTYPE_PROPERTY_ORDER.length; ++i) {
+  const key = URL_PROTOTYPE_PROPERTY_ORDER[i];
+  const descriptor = ObjectGetOwnPropertyDescriptor(URLPrototype, key);
+  if (descriptor !== undefined) {
+    delete URLPrototype[key];
+    ObjectDefineProperty(URLPrototype, key, descriptor);
+  }
+}
 
 /**
  * This function implements application/x-www-form-urlencoded parsing.
