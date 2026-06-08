@@ -135,9 +135,15 @@ fn op_node_load_env_file(
 ) -> Result<(), DotEnvLoadErr> {
   let fs = state.borrow::<deno_fs::FileSystemRc>().clone();
   let permissions = state.borrow::<PermissionsContainer>().clone();
-  permissions
-    .check_env_all()
-    .map_err(DotEnvLoadErr::Permission)?;
+  // NIMBUS: gate `process.loadEnvFile` solely on read access to the target
+  // file, matching upstream Deno v2.8.0 and Node itself. Upstream v2.8.2 added
+  // a `check_env_all()` gate, but that breaks Node parity for sandboxed Node
+  // presets that intentionally withhold ambient env access (env_read empty):
+  // a missing in-root `.env` then surfaces as a permission error (EACCES)
+  // instead of the Node-expected ENOENT. The operation discloses no host
+  // environment — it only materializes entries the caller already supplied in
+  // its own (read-gated, in-root) file — so the file read-permission check
+  // below is the correct and sufficient capability boundary.
   let path = permissions
     .check_open(
       Cow::Borrowed(Path::new(path)),
