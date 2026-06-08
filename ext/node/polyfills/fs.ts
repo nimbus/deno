@@ -1520,6 +1520,16 @@ function chown(
   validateInteger(uid, "uid", -1, kMaxUserId);
   validateInteger(gid, "gid", -1, kMaxUserId);
 
+  if (uid === -1 && gid === -1) {
+    PromisePrototypeThen(
+      Deno.stat(path),
+      () => callback(null),
+      (err: Error) =>
+        callback(denoErrorToNodeError(err, { syscall: "chown", path })),
+    );
+    return;
+  }
+
   // deno-lint-ignore prefer-primordials
   Deno.chown(path, uid, gid).then(
     () => callback(null),
@@ -1536,6 +1546,15 @@ function chownSync(
   path = getValidatedPath(path).toString();
   validateInteger(uid, "uid", -1, kMaxUserId);
   validateInteger(gid, "gid", -1, kMaxUserId);
+
+  if (uid === -1 && gid === -1) {
+    try {
+      Deno.statSync(path);
+      return;
+    } catch (error) {
+      throw denoErrorToNodeError(error as Error, { syscall: "chown", path });
+    }
+  }
 
   Deno.chownSync(path, uid, gid);
 }
