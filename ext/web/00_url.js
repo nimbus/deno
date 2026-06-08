@@ -30,6 +30,7 @@ const {
   ReflectOwnKeys,
   SafeArrayIterator,
   StringPrototypeSlice,
+  StringPrototypeReplace,
   StringPrototypeStartsWith,
   Symbol,
   SymbolFor,
@@ -489,6 +490,8 @@ function trim(s) {
 const NO_PORT = 65536;
 const URL_CONTEXT_OMITTED = 4294967295;
 const contextForInspect = Symbol("context");
+const NODE22_URL_CONTEXT_LABEL = "  [Symbol(context)]: URLContext {";
+const NODE24_URL_CONTEXT_LABEL = "  Symbol(context): URLContext {";
 
 class URLContext {
   href = "";
@@ -695,16 +698,30 @@ class URL {
     if (inspectOptions?.showHidden) {
       proxy[contextForInspect] = this.#contextForInspect();
     }
-    return inspect(
+    let output = inspect(
       proxy,
       inspectOptions,
     );
+    if (
+      inspectOptions?.showHidden &&
+      globalThis.process?.release?.lts === "Jod"
+    ) {
+      output = StringPrototypeReplace(
+        output,
+        NODE24_URL_CONTEXT_LABEL,
+        NODE22_URL_CONTEXT_LABEL,
+      );
+    }
+    return output;
   }
 
   // See URLSearchParams: Node exposes this as a method so that the descriptor
   // lookup is not undefined. Deno's own inspector still prefers
   // Deno.privateCustomInspect, so this is effectively the same code path.
-  [SymbolFor("nodejs.util.inspect.custom")](_depth, inspectOptions, inspect) {
+  [SymbolFor("nodejs.util.inspect.custom")](depth, inspectOptions, inspect) {
+    if (typeof depth === "number" && depth < 0) {
+      return this;
+    }
     return this[SymbolFor("Deno.privateCustomInspect")](
       inspect,
       inspectOptions,
