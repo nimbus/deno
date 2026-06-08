@@ -5518,21 +5518,9 @@ class ReadableStream {
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     webidl.assertBranded(this, ReadableStreamPrototype, "ReadableStream");
-    const streamView = {
-      __proto__: null,
-      constructor: { __proto__: null, name: "ReadableStream" },
-      locked: isReadableStreamLocked(this),
-      state: this[_state],
-      supportsBYOB: isReadableByteStreamController(this[_controller]),
-    };
-    return inspect(
-      createFilteredInspectProxy({
-        object: streamView,
-        evaluate: true,
-        keys: ["locked", "state", "supportsBYOB"],
-      }),
-      inspectOptions,
-    );
+    return `ReadableStream { locked: ${isReadableStreamLocked(this)}, state: '${this[_state]}', supportsBYOB: ${
+      isReadableByteStreamController(this[_controller])
+    } }`;
   }
 }
 
@@ -6618,20 +6606,7 @@ class WritableStream {
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     webidl.assertBranded(this, WritableStreamPrototype, "WritableStream");
-    const streamView = {
-      __proto__: null,
-      constructor: { __proto__: null, name: "WritableStream" },
-      locked: isWritableStreamLocked(this),
-      state: this[_state],
-    };
-    return inspect(
-      createFilteredInspectProxy({
-        object: streamView,
-        evaluate: true,
-        keys: ["locked", "state"],
-      }),
-      inspectOptions,
-    );
+    return `WritableStream { locked: ${isWritableStreamLocked(this)}, state: '${this[_state]}' }`;
   }
 }
 

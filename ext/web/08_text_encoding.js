@@ -452,32 +452,37 @@ class TextDecoderStream {
 
   /** @returns {string} */
   get encoding() {
+    const decoder = this.#decoder;
     webidl.assertBranded(this, TextDecoderStreamPrototype);
-    return this.#decoder.encoding;
+    return decoder.encoding;
   }
 
   /** @returns {boolean} */
   get fatal() {
+    const decoder = this.#decoder;
     webidl.assertBranded(this, TextDecoderStreamPrototype);
-    return this.#decoder.fatal;
+    return decoder.fatal;
   }
 
   /** @returns {boolean} */
   get ignoreBOM() {
+    const decoder = this.#decoder;
     webidl.assertBranded(this, TextDecoderStreamPrototype);
-    return this.#decoder.ignoreBOM;
+    return decoder.ignoreBOM;
   }
 
   /** @returns {ReadableStream<string>} */
   get readable() {
+    const transform = this.#transform;
     webidl.assertBranded(this, TextDecoderStreamPrototype);
-    return this.#transform.readable;
+    return transform.readable;
   }
 
   /** @returns {WritableStream<BufferSource>} */
   get writable() {
+    const transform = this.#transform;
     webidl.assertBranded(this, TextDecoderStreamPrototype);
-    return this.#transform.writable;
+    return transform.writable;
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
@@ -559,20 +564,23 @@ class TextEncoderStream {
 
   /** @returns {string} */
   get encoding() {
+    this.#transform;
     webidl.assertBranded(this, TextEncoderStreamPrototype);
     return "utf-8";
   }
 
   /** @returns {ReadableStream<Uint8Array>} */
   get readable() {
+    const transform = this.#transform;
     webidl.assertBranded(this, TextEncoderStreamPrototype);
-    return this.#transform.readable;
+    return transform.readable;
   }
 
   /** @returns {WritableStream<string>} */
   get writable() {
+    const transform = this.#transform;
     webidl.assertBranded(this, TextEncoderStreamPrototype);
-    return this.#transform.writable;
+    return transform.writable;
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {

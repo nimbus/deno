@@ -23,6 +23,7 @@ const {
   RangeError,
   Symbol,
   SymbolFor,
+  SymbolHasInstance,
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
@@ -208,6 +209,19 @@ ObjectSetPrototypeOf(DOMException.prototype, ErrorPrototype);
 
 webidl.configureInterface(DOMException);
 const DOMExceptionPrototype = DOMException.prototype;
+
+ObjectDefineProperty(DOMException, SymbolHasInstance, {
+  __proto__: null,
+  value(value) {
+    return value !== null &&
+      (typeof value === "object" || typeof value === "function") &&
+      ObjectHasOwn(value, _message) &&
+      ObjectHasOwn(value, _name) &&
+      ObjectHasOwn(value, _code);
+  },
+  enumerable: false,
+  configurable: true,
+});
 
 const entries = ObjectEntries({
   INDEX_SIZE_ERR,

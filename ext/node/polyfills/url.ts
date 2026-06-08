@@ -91,6 +91,12 @@ function isObjectLike(value) {
     (typeof value === "object" || typeof value === "function");
 }
 
+function codedTypeError(code, message) {
+  const error = new TypeError(message);
+  error.code = code;
+  return error;
+}
+
 function validateURLPatternInput(value, name) {
   if (
     value !== undefined && value !== null &&
@@ -107,7 +113,7 @@ function validateURLPatternOptions(value, name) {
 }
 
 function validateURLPatternBaseURL(value, name) {
-  if (value !== undefined && typeof value !== "string") {
+  if (value !== undefined && value !== null && typeof value !== "string") {
     throw new ERR_INVALID_ARG_TYPE(name, "string", value);
   }
 }
@@ -117,7 +123,12 @@ function URLPattern(input, baseURLOrOptions, maybeOptions) {
     throw new ERR_CONSTRUCT_CALL_REQUIRED("URLPattern");
   }
   validateURLPatternInput(input, "input");
-  if (typeof baseURLOrOptions === "string") {
+  if (arguments.length >= 3) {
+    validateURLPatternOptions(maybeOptions, "options");
+    if (typeof baseURLOrOptions !== "string") {
+      throw codedTypeError("ERR_INVALID_URL_PATTERN", "Invalid URLPattern");
+    }
+  } else if (typeof baseURLOrOptions === "string") {
     validateURLPatternOptions(maybeOptions, "options");
   } else {
     validateURLPatternOptions(baseURLOrOptions, "options");
@@ -139,6 +150,12 @@ const webURLPatternExec = WebURLPattern.prototype.exec;
 URLPattern.prototype.exec = function (input, baseURL = undefined) {
   validateURLPatternInput(input, "input");
   validateURLPatternBaseURL(baseURL, "baseURL");
+  if (
+    arguments.length >= 2 && input !== undefined &&
+    typeof input !== "string" && baseURL !== undefined
+  ) {
+    throw codedTypeError("ERR_OPERATION_FAILED", "Operation failed");
+  }
   return webURLPatternExec.call(this, input, baseURL);
 };
 
@@ -146,6 +163,12 @@ const webURLPatternTest = WebURLPattern.prototype.test;
 URLPattern.prototype.test = function (input, baseURL = undefined) {
   validateURLPatternInput(input, "input");
   validateURLPatternBaseURL(baseURL, "baseURL");
+  if (
+    arguments.length >= 2 && input !== undefined &&
+    typeof input !== "string" && baseURL !== undefined
+  ) {
+    throw codedTypeError("ERR_OPERATION_FAILED", "Operation failed");
+  }
   return webURLPatternTest.call(this, input, baseURL);
 };
 

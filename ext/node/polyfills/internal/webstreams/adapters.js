@@ -200,7 +200,7 @@ function newStreamWritableFromWritableStream(
         try {
           callback(error);
         } catch (error) {
-          destroy(this, duplex, error);
+          destroy.call(writable, error);
         }
       }
 

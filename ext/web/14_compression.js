@@ -99,13 +99,15 @@ class CompressionStream {
   }
 
   get readable() {
+    const transform = this.#transform;
     webidl.assertBranded(this, CompressionStreamPrototype);
-    return this.#transform.readable;
+    return transform.readable;
   }
 
   get writable() {
+    const transform = this.#transform;
     webidl.assertBranded(this, CompressionStreamPrototype);
-    return this.#transform.writable;
+    return transform.writable;
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
@@ -169,13 +171,15 @@ class DecompressionStream {
   }
 
   get readable() {
+    const transform = this.#transform;
     webidl.assertBranded(this, DecompressionStreamPrototype);
-    return this.#transform.readable;
+    return transform.readable;
   }
 
   get writable() {
+    const transform = this.#transform;
     webidl.assertBranded(this, DecompressionStreamPrototype);
-    return this.#transform.writable;
+    return transform.writable;
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
