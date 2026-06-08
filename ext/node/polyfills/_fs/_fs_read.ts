@@ -123,6 +123,16 @@ export function read(
 
   (length as number) |= 0;
 
+  // Node validates `position` before short-circuiting on a zero-length read,
+  // so an invalid position throws even when the buffer is empty. See
+  // lib/fs.js read(): validatePosition precedes the `length === 0` early
+  // return (test/parallel/test-fs-read-position-validation.mjs).
+  if (position == null) {
+    position = -1;
+  } else {
+    validatePosition(position, "position", length as number);
+  }
+
   if (length === 0) {
     return lazyProcess().default.nextTick(function tick() {
       callback!(null, 0, buffer);
@@ -138,12 +148,6 @@ export function read(
   }
 
   validateOffsetLengthRead(offset, length, buffer.byteLength);
-
-  if (position == null) {
-    position = -1;
-  } else {
-    validatePosition(position, "position", length as number);
-  }
 
   // BigInt avoids precision loss for positions > 2^53. -1n means current pos.
   const readPos = position != null && position >= 0
@@ -216,6 +220,15 @@ export function readSync(
 
   length! |= 0;
 
+  // Match Node's lib/fs.js readSync(): position is validated before the
+  // `length === 0` short-circuit, so an invalid position throws even for a
+  // zero-length read (test/parallel/test-fs-readSync-position-validation.mjs).
+  if (position == null) {
+    position = -1;
+  } else {
+    validatePosition(position, "position", length);
+  }
+
   if (length === 0) {
     return 0;
   }
@@ -229,12 +242,6 @@ export function readSync(
   }
 
   validateOffsetLengthRead(offset, length, buffer.byteLength);
-
-  if (position == null) {
-    position = -1;
-  } else {
-    validatePosition(position, "position", length);
-  }
 
   // BigInt avoids precision loss for positions > 2^53. -1n means current pos.
   const pos = position != null && position >= 0
