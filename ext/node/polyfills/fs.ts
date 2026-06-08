@@ -2761,8 +2761,24 @@ function openAsBlob(
   validateString(type, "options.type");
   path = getValidatedPath(path);
   return PromisePrototypeThen(
-    op_fs_read_file_async(path as string, undefined, 0),
-    (data: Uint8Array) => markFileBackedBlob(new Blob([data], { type })),
+    Deno.stat(path as string),
+    (initialStat) =>
+      PromisePrototypeThen(
+        op_fs_read_file_async(path as string, undefined, 0),
+        (data: Uint8Array) => {
+          const initialSize = initialStat.size;
+          const initialMtime = Number(initialStat.mtime);
+          return markFileBackedBlob(new Blob([data], { type }), async () => {
+            const stat = await Deno.stat(path as string);
+            if (
+              stat.size !== initialSize ||
+              Number(stat.mtime) !== initialMtime
+            ) {
+              throw new Error("file-backed blob source changed");
+            }
+          });
+        },
+      ),
   );
 }
 

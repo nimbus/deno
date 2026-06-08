@@ -487,6 +487,52 @@ function trim(s) {
 
 // Represents a "no port" value. A port in URL cannot be greater than 2^16 - 1
 const NO_PORT = 65536;
+const URL_CONTEXT_OMITTED = 4294967295;
+const contextForInspect = Symbol("context");
+
+class URLContext {
+  href = "";
+  protocol_end = 0;
+  username_end = 0;
+  host_start = 0;
+  host_end = 0;
+  pathname_start = 0;
+  search_start = 0;
+  hash_start = 0;
+  port = 0;
+  scheme_type = 1;
+
+  get hasPort() {
+    return this.port !== URL_CONTEXT_OMITTED;
+  }
+
+  get hasSearch() {
+    return this.search_start !== URL_CONTEXT_OMITTED;
+  }
+
+  get hasHash() {
+    return this.hash_start !== URL_CONTEXT_OMITTED;
+  }
+}
+
+function schemeType(scheme) {
+  switch (scheme) {
+    case "http":
+      return 0;
+    case "https":
+      return 2;
+    case "ws":
+      return 3;
+    case "ftp":
+      return 4;
+    case "wss":
+      return 5;
+    case "file":
+      return 6;
+    default:
+      return 1;
+  }
+}
 
 const skipInit = Symbol();
 const componentsBuf = new Uint32Array(8);
@@ -597,26 +643,60 @@ class URL {
     } = componentsBuf);
   }
 
+  static #assertPrivateReceiver(value) {
+    try {
+      value.#serialization;
+    } catch {
+      throw new TypeError(
+        "Cannot read private member #serialization from an object whose class did not declare it",
+      );
+    }
+  }
+
+  #contextForInspect() {
+    const context = new URLContext();
+    context.href = this.#serialization;
+    context.protocol_end = this.#schemeEnd + 1;
+    context.username_end = this.#usernameEnd;
+    context.host_start =
+      this.#hostStart > 0 && this.#serialization[this.#hostStart - 1] === "@"
+        ? this.#hostStart - 1
+        : this.#hostStart;
+    context.host_end = this.#hostEnd;
+    context.pathname_start = this.#pathStart;
+    context.search_start = this.#queryStart || URL_CONTEXT_OMITTED;
+    context.hash_start = this.#fragmentStart || URL_CONTEXT_OMITTED;
+    context.port = this.#port === NO_PORT ? URL_CONTEXT_OMITTED : this.#port;
+    context.scheme_type = schemeType(
+      StringPrototypeSlice(this.#serialization, 0, this.#schemeEnd),
+    );
+    return context;
+  }
+
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    const proxy = createFilteredInspectProxy({
+      object: this,
+      evaluate: ObjectPrototypeIsPrototypeOf(URLPrototype, this),
+      keys: [
+        "href",
+        "origin",
+        "protocol",
+        "username",
+        "password",
+        "host",
+        "hostname",
+        "port",
+        "pathname",
+        "search",
+        "searchParams",
+        "hash",
+      ],
+    });
+    if (inspectOptions?.showHidden) {
+      proxy[contextForInspect] = this.#contextForInspect();
+    }
     return inspect(
-      createFilteredInspectProxy({
-        object: this,
-        evaluate: ObjectPrototypeIsPrototypeOf(URLPrototype, this),
-        keys: [
-          "href",
-          "origin",
-          "protocol",
-          "username",
-          "password",
-          "host",
-          "hostname",
-          "port",
-          "pathname",
-          "search",
-          "searchParams",
-          "hash",
-        ],
-      }),
+      proxy,
       inspectOptions,
     );
   }
@@ -656,6 +736,7 @@ class URL {
 
   /** @return {string} */
   get hash() {
+    URL.#assertPrivateReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/quirks.rs#L263
     return this.#fragmentStart
       ? trim(StringPrototypeSlice(this.#serialization, this.#fragmentStart))
@@ -664,7 +745,7 @@ class URL {
 
   /** @param {string} value */
   set hash(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'hash' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -682,6 +763,7 @@ class URL {
 
   /** @return {string} */
   get host() {
+    URL.#assertPrivateReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/quirks.rs#L101
     return StringPrototypeSlice(
       this.#serialization,
@@ -692,7 +774,7 @@ class URL {
 
   /** @param {string} value */
   set host(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'host' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -710,6 +792,7 @@ class URL {
 
   /** @return {string} */
   get hostname() {
+    URL.#assertPrivateReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/lib.rs#L988
     return StringPrototypeSlice(
       this.#serialization,
@@ -720,7 +803,7 @@ class URL {
 
   /** @param {string} value */
   set hostname(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'hostname' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -744,7 +827,7 @@ class URL {
 
   /** @param {string} value */
   set href(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'href' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -756,6 +839,7 @@ class URL {
 
   /** @return {string} */
   get origin() {
+    URL.#assertPrivateReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/origin.rs#L14
     const scheme = StringPrototypeSlice(
       this.#serialization,
@@ -783,6 +867,7 @@ class URL {
 
   /** @return {string} */
   get password() {
+    URL.#assertPrivateReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/lib.rs#L914
     if (
       this.#hasAuthority() &&
@@ -800,7 +885,7 @@ class URL {
 
   /** @param {string} value */
   set password(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'password' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -818,6 +903,7 @@ class URL {
 
   /** @return {string} */
   get pathname() {
+    URL.#assertPrivateReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/lib.rs#L1203
     if (!this.#queryStart && !this.#fragmentStart) {
       return StringPrototypeSlice(this.#serialization, this.#pathStart);
@@ -833,7 +919,7 @@ class URL {
 
   /** @param {string} value */
   set pathname(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'pathname' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -851,6 +937,7 @@ class URL {
 
   /** @return {string} */
   get port() {
+    URL.#assertPrivateReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/quirks.rs#L196
     if (this.#port === NO_PORT) {
       return StringPrototypeSlice(
@@ -869,7 +956,7 @@ class URL {
 
   /** @param {string} value */
   set port(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'port' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -887,6 +974,7 @@ class URL {
 
   /** @return {string} */
   get protocol() {
+    URL.#assertPrivateReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/quirks.rs#L56
     return StringPrototypeSlice(
       this.#serialization,
@@ -897,7 +985,7 @@ class URL {
 
   /** @param {string} value */
   set protocol(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'protocol' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -927,7 +1015,7 @@ class URL {
 
   /** @param {string} value */
   set search(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'search' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -946,6 +1034,7 @@ class URL {
 
   /** @return {string} */
   get username() {
+    URL.#assertPrivateReceiver(this);
     // https://github.com/servo/rust-url/blob/1d307ae51a28fecc630ecec03380788bfb03a643/url/src/lib.rs#L881
     const schemeSeparatorLen = 3; /* :// */
     if (
@@ -964,7 +1053,7 @@ class URL {
 
   /** @param {string} value */
   set username(value) {
-    this.#serialization;
+    URL.#assertPrivateReceiver(this);
     const prefix = "Failed to set 'username' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -982,6 +1071,7 @@ class URL {
 
   /** @return {URLSearchParams} */
   get searchParams() {
+    URL.#assertPrivateReceiver(this);
     if (this.#queryObject == null) {
       this.#queryObject = new URLSearchParams(this.search);
       this.#queryObject[_urlObject] = this;

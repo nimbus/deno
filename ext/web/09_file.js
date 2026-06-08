@@ -61,6 +61,7 @@ const {
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
+const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
 // Defer loading the 208 KB `06_streams.js` polyfill: ReadableStream is
 // only constructed inside `Blob.stream()` (see usage below), so we don't
 // need to pay the parse cost at module body time.
@@ -230,6 +231,7 @@ const _type = Symbol("Type");
 const _size = Symbol("Size");
 const _parts = Symbol("Parts");
 const _fileBacked = Symbol("FileBacked");
+const _fileBackedCheck = Symbol("FileBackedCheck");
 
 /** @param {(BlobReference | Blob)[]} parts */
 function hasFileBackedPart(parts) {
@@ -249,6 +251,7 @@ class Blob {
   [_size] = 0;
   [_parts];
   [_fileBacked] = false;
+  [_fileBackedCheck] = undefined;
 
   /**
    * @param {BlobPart[]} blobParts
@@ -396,11 +399,13 @@ class Blob {
    */
   stream() {
     webidl.assertBranded(this, BlobPrototype);
+    const blob = this;
     const partIterator = toIterator(this[_parts]);
     const stream = new ReadableStream({
       type: "bytes",
       /** @param {ReadableByteStreamController} controller */
       async pull(controller) {
+        await checkFileBackedBlob(blob);
         while (true) {
           const { value, done } = await AsyncGeneratorPrototypeNext(
             partIterator,
@@ -428,6 +433,7 @@ class Blob {
     const partIterator = toIterator(this[_parts]);
     let offset = 0;
     while (true) {
+      await checkFileBackedBlob(this);
       const { value, done } = await AsyncGeneratorPrototypeNext(
         partIterator,
       );
@@ -674,16 +680,27 @@ class BlobReference {
    * @returns {AsyncGenerator<Uint8Array>}
    */
   async *stream() {
-    yield op_blob_read_part(this._id);
+    let position = 0;
+    const end = this.size;
+    while (position !== end) {
+      const size = MathMin(end - position, 65536);
+      const chunk = this.slice(position, position + size);
+      position += chunk.size;
+      yield op_blob_read_part(chunk._id);
+    }
+  }
+}
 
-    // let position = 0;
-    // const end = this.size;
-    // while (position !== end) {
-    //   const size = MathMin(end - position, 65536);
-    //   const chunk = this.slice(position, position + size);
-    //   position += chunk.size;
-    //   yield op_blob_read_part( chunk._id);
-    // }
+/** @param {Blob} blob */
+async function checkFileBackedBlob(blob) {
+  const check = blob[_fileBackedCheck];
+  if (check === undefined) {
+    return;
+  }
+  try {
+    await check();
+  } catch {
+    throw new DOMException("The blob could not be read", "NotReadableError");
   }
 }
 
@@ -759,11 +776,13 @@ core.registerCloneableResource("Blob", (data) => {
  * Mark a Blob as backed by file storage. File-backed Blobs are intentionally
  * rejected by the structured clone serializer, matching Node's behavior.
  * @param {Blob} blob
+ * @param {(() => Promise<void>)=} check
  * @returns {Blob}
  */
-function markFileBackedBlob(blob) {
+function markFileBackedBlob(blob, check = undefined) {
   webidl.assertBranded(blob, BlobPrototype);
   blob[_fileBacked] = true;
+  blob[_fileBackedCheck] = check;
   return blob;
 }
 
