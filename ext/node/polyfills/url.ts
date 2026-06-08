@@ -28,6 +28,7 @@ const { core } = __bootstrap;
 const { op_node_call_is_from_dependency } = core.ops;
 const lazyProcess = core.createLazyLoader("node:process");
 const {
+  ERR_CONSTRUCT_CALL_REQUIRED,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
   ERR_INVALID_FILE_URL_HOST,
@@ -78,10 +79,75 @@ const { encodeStr, hexTable } = core.loadExtScript(
 );
 const querystring = core.loadExtScript("ext:deno_node/querystring.js").default;
 const { URL, URLSearchParams } = core.loadExtScript("ext:deno_web/00_url.js");
-const { URLPattern } = core.loadExtScript("ext:deno_web/01_urlpattern.js");
+const { URLPattern: WebURLPattern } = core.loadExtScript(
+  "ext:deno_web/01_urlpattern.js",
+);
 const { urlToHttpOptions } = core.loadExtScript(
   "ext:deno_node/internal/url.ts",
 );
+
+function isObjectLike(value) {
+  return value !== null &&
+    (typeof value === "object" || typeof value === "function");
+}
+
+function validateURLPatternInput(value, name) {
+  if (
+    value !== undefined && value !== null &&
+    typeof value !== "string" && !isObjectLike(value)
+  ) {
+    throw new ERR_INVALID_ARG_TYPE(name, "string or object", value);
+  }
+}
+
+function validateURLPatternOptions(value, name) {
+  if (value !== undefined && value !== null && !isObjectLike(value)) {
+    throw new ERR_INVALID_ARG_TYPE(name, "object", value);
+  }
+}
+
+function validateURLPatternBaseURL(value, name) {
+  if (value !== undefined && typeof value !== "string") {
+    throw new ERR_INVALID_ARG_TYPE(name, "string", value);
+  }
+}
+
+function URLPattern(input, baseURLOrOptions, maybeOptions) {
+  if (new.target === undefined) {
+    throw new ERR_CONSTRUCT_CALL_REQUIRED("URLPattern");
+  }
+  validateURLPatternInput(input, "input");
+  if (typeof baseURLOrOptions === "string") {
+    validateURLPatternOptions(maybeOptions, "options");
+  } else {
+    validateURLPatternOptions(baseURLOrOptions, "options");
+  }
+  return Reflect.construct(WebURLPattern, arguments, new.target);
+}
+
+Object.setPrototypeOf(URLPattern, WebURLPattern);
+URLPattern.prototype = Object.create(WebURLPattern.prototype, {
+  constructor: {
+    __proto__: null,
+    value: URLPattern,
+    writable: true,
+    configurable: true,
+  },
+});
+
+const webURLPatternExec = WebURLPattern.prototype.exec;
+URLPattern.prototype.exec = function (input, baseURL = undefined) {
+  validateURLPatternInput(input, "input");
+  validateURLPatternBaseURL(baseURL, "baseURL");
+  return webURLPatternExec.call(this, input, baseURL);
+};
+
+const webURLPatternTest = WebURLPattern.prototype.test;
+URLPattern.prototype.test = function (input, baseURL = undefined) {
+  validateURLPatternInput(input, "input");
+  validateURLPatternBaseURL(baseURL, "baseURL");
+  return webURLPatternTest.call(this, input, baseURL);
+};
 
 const forwardSlashRegEx = /\//g;
 const percentRegEx = /%/g;

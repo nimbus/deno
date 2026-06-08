@@ -402,11 +402,15 @@ class TextDecoderStream {
   constructor(label = "utf-8", options = { __proto__: null }) {
     const prefix = "Failed to construct 'TextDecoderStream'";
     label = webidl.converters.DOMString(label, prefix, "Argument 1");
-    options = webidl.converters.TextDecoderOptions(
-      options,
-      prefix,
-      "Argument 2",
-    );
+    try {
+      options = webidl.converters.TextDecoderOptions(
+        options,
+        prefix,
+        "Argument 2",
+      );
+    } catch (error) {
+      throw withCode(error, "ERR_INVALID_ARG_TYPE");
+    }
     this.#decoder = new TextDecoder(label, options);
     this.#transform = new TransformStream({
       // The transform and flush functions need access to TextDecoderStream's
@@ -477,13 +481,15 @@ class TextDecoderStream {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    webidl.assertBranded(
+      this,
+      TextDecoderStreamPrototype,
+      "TextDecoderStream",
+    );
     return inspect(
       createFilteredInspectProxy({
         object: this,
-        evaluate: ObjectPrototypeIsPrototypeOf(
-          TextDecoderStreamPrototype,
-          this,
-        ),
+        evaluate: true,
         keys: [
           "encoding",
           "fatal",
@@ -570,13 +576,15 @@ class TextEncoderStream {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    webidl.assertBranded(
+      this,
+      TextEncoderStreamPrototype,
+      "TextEncoderStream",
+    );
     return inspect(
       createFilteredInspectProxy({
         object: this,
-        evaluate: ObjectPrototypeIsPrototypeOf(
-          TextEncoderStreamPrototype,
-          this,
-        ),
+        evaluate: true,
         keys: [
           "encoding",
           "readable",

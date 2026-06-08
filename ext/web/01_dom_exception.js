@@ -150,6 +150,7 @@ class DOMException {
     error[_name] = name;
     error[_code] = code;
     error[webidl.brand] = webidl.brand;
+    ObjectSetPrototypeOf(error, new.target.prototype);
     ObjectDefineProperty(error, core.hostObjectBrand, {
       __proto__: null,
       value: () => ({

@@ -65,7 +65,15 @@ class CompressionStream {
   constructor(format) {
     const prefix = "Failed to construct 'CompressionStream'";
     webidl.requiredArguments(arguments.length, 1, prefix);
-    format = webidl.converters.CompressionFormat(format, prefix, "Argument 1");
+    try {
+      format = webidl.converters.CompressionFormat(
+        format,
+        prefix,
+        "Argument 1",
+      );
+    } catch (error) {
+      throw withCode(error, "ERR_INVALID_ARG_VALUE");
+    }
 
     const rid = op_compression_new(format, false);
 
@@ -127,7 +135,15 @@ class DecompressionStream {
   constructor(format) {
     const prefix = "Failed to construct 'DecompressionStream'";
     webidl.requiredArguments(arguments.length, 1, prefix);
-    format = webidl.converters.CompressionFormat(format, prefix, "Argument 1");
+    try {
+      format = webidl.converters.CompressionFormat(
+        format,
+        prefix,
+        "Argument 1",
+      );
+    } catch (error) {
+      throw withCode(error, "ERR_INVALID_ARG_VALUE");
+    }
 
     const rid = op_compression_new(format, true);
 

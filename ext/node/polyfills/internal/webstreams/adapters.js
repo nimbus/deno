@@ -162,9 +162,11 @@ function newStreamWritableFromWritableStream(
 
     writev(chunks, callback) {
       function done(error) {
-        error = error.filter((e) => e);
+        if (Array.isArray(error)) {
+          error = error.find((e) => e);
+        }
         try {
-          callback(error.length === 0 ? undefined : error);
+          callback(error);
         } catch (error) {
           // In a next tick because this is happening within
           // a promise context, and if there are any errors
@@ -324,9 +326,11 @@ function newStreamDuplexFromReadableWritablePair(
 
     writev(chunks, callback) {
       function done(error) {
-        error = error.filter((e) => e);
+        if (Array.isArray(error)) {
+          error = error.find((e) => e);
+        }
         try {
-          callback(error.length === 0 ? undefined : error);
+          callback(error);
         } catch (error) {
           // In a next tick because this is happening within
           // a promise context, and if there are any errors
@@ -657,6 +661,9 @@ function newWritableStreamFromStreamWritable(streamWritable) {
     },
 
     async write(chunk) {
+      if (!streamWritable.writableObjectMode && core.isAnyArrayBuffer(chunk)) {
+        chunk = new Uint8Array(chunk);
+      }
       if (streamWritable.writableNeedDrain || !streamWritable.write(chunk)) {
         backpressurePromise = Promise.withResolvers();
         return backpressurePromise.promise.finally(() => {
