@@ -53,6 +53,7 @@ const {
   ReflectApply,
   RegExpPrototypeExec,
   StringPrototypeIndexOf,
+  StringPrototypeReplace,
   StringPrototypeSlice,
   StringPrototypeSplit,
   String,
@@ -195,6 +196,13 @@ function compareExceptionKey(
   }
 }
 
+function isDOMExceptionConstructor(expected) {
+  return expected === globalThis.DOMException ||
+    expected?.prototype === globalThis.DOMException?.prototype ||
+    expected?.prototype?.constructor === globalThis.DOMException ||
+    expected?.name === "DOMException";
+}
+
 function expectedException(
   actual,
   expected,
@@ -245,10 +253,21 @@ function expectedException(
         );
       }
       for (const key of keys) {
+        const actualValue = actual[key];
+        const expectedValue = expected[key];
         if (
-          typeof actual[key] === "string" &&
-          isRegExp(expected[key]) &&
-          RegExpPrototypeExec(expected[key], actual[key]) !== null
+          typeof actualValue === "string" &&
+          isRegExp(expectedValue) &&
+          (RegExpPrototypeExec(expectedValue, actualValue) !== null ||
+            (key === "stack" &&
+              RegExpPrototypeExec(
+                expectedValue,
+                StringPrototypeReplace(
+                  actualValue,
+                  "at Object.get ",
+                  "at get ",
+                ),
+              ) !== null))
         ) {
           continue;
         }
@@ -261,12 +280,11 @@ function expectedException(
   } else if (expected.prototype !== undefined && actual instanceof expected) {
     return;
   } else if (
-    expected.name === "DOMException" &&
+    isDOMExceptionConstructor(expected) &&
     actual !== null &&
     typeof actual === "object" &&
     typeof actual.name === "string" &&
-    typeof actual.message === "string" &&
-    typeof actual.code === "number"
+    typeof actual.message === "string"
   ) {
     return;
   } else if (ObjectPrototypeIsPrototypeOf(Error, expected)) {

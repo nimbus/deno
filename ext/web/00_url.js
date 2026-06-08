@@ -664,6 +664,7 @@ class URL {
 
   /** @param {string} value */
   set hash(value) {
+    this.#serialization;
     const prefix = "Failed to set 'hash' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -691,6 +692,7 @@ class URL {
 
   /** @param {string} value */
   set host(value) {
+    this.#serialization;
     const prefix = "Failed to set 'host' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -718,6 +720,7 @@ class URL {
 
   /** @param {string} value */
   set hostname(value) {
+    this.#serialization;
     const prefix = "Failed to set 'hostname' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -797,6 +800,7 @@ class URL {
 
   /** @param {string} value */
   set password(value) {
+    this.#serialization;
     const prefix = "Failed to set 'password' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -829,6 +833,7 @@ class URL {
 
   /** @param {string} value */
   set pathname(value) {
+    this.#serialization;
     const prefix = "Failed to set 'pathname' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -864,6 +869,7 @@ class URL {
 
   /** @param {string} value */
   set port(value) {
+    this.#serialization;
     const prefix = "Failed to set 'port' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -891,6 +897,7 @@ class URL {
 
   /** @param {string} value */
   set protocol(value) {
+    this.#serialization;
     const prefix = "Failed to set 'protocol' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -957,6 +964,7 @@ class URL {
 
   /** @param {string} value */
   set username(value) {
+    this.#serialization;
     const prefix = "Failed to set 'username' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");

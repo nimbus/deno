@@ -903,6 +903,9 @@ function structuredClone(value, options) {
     try {
       return core.structuredClone(value);
     } catch (e) {
+      if (e?.code === "ERR_INVALID_STATE") {
+        throw e;
+      }
       if (ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, e)) {
         throw new DOMException(e.message, "DataCloneError");
       }
