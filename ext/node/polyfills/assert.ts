@@ -260,6 +260,15 @@ function expectedException(
     // Check for matching Error classes.
   } else if (expected.prototype !== undefined && actual instanceof expected) {
     return;
+  } else if (
+    expected.name === "DOMException" &&
+    actual !== null &&
+    typeof actual === "object" &&
+    typeof actual.name === "string" &&
+    typeof actual.message === "string" &&
+    typeof actual.code === "number"
+  ) {
+    return;
   } else if (ObjectPrototypeIsPrototypeOf(Error, expected)) {
     if (!message) {
       generatedMessage = true;

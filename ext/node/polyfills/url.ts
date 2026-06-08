@@ -156,6 +156,9 @@ URLPattern.prototype.exec = function (input, baseURL = undefined) {
   ) {
     throw codedTypeError("ERR_OPERATION_FAILED", "Operation failed");
   }
+  if (input === undefined || input === null) {
+    input = { __proto__: null };
+  }
   return webURLPatternExec.call(this, input, baseURL);
 };
 
@@ -168,6 +171,9 @@ URLPattern.prototype.test = function (input, baseURL = undefined) {
     typeof input !== "string" && baseURL !== undefined
   ) {
     throw codedTypeError("ERR_OPERATION_FAILED", "Operation failed");
+  }
+  if (input === undefined || input === null) {
+    input = { __proto__: null };
   }
   return webURLPatternTest.call(this, input, baseURL);
 };

@@ -337,7 +337,7 @@ function newStreamDuplexFromReadableWritablePair(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() => destroy(duplex, error));
+          lazyProcess().default.nextTick(() => destroy.call(duplex, error));
         }
       }
 
@@ -364,7 +364,7 @@ function newStreamDuplexFromReadableWritablePair(
         try {
           callback(error);
         } catch (error) {
-          destroy(duplex, error);
+          destroy.call(duplex, error);
         }
       }
 
@@ -384,7 +384,7 @@ function newStreamDuplexFromReadableWritablePair(
           // thrown we don't want those to cause an unhandled
           // rejection. Let's just escape the promise and
           // handle it separately.
-          lazyProcess().default.nextTick(() => destroy(duplex, error));
+          lazyProcess().default.nextTick(() => destroy.call(duplex, error));
         }
       }
 
@@ -402,7 +402,7 @@ function newStreamDuplexFromReadableWritablePair(
             duplex.push(chunk.value);
           }
         },
-        (error) => destroy(duplex, error),
+        (error) => destroy.call(duplex, error),
       );
     },
 
@@ -453,7 +453,7 @@ function newStreamDuplexFromReadableWritablePair(
     (error) => {
       writableClosed = true;
       readableClosed = true;
-      destroy(duplex, error);
+      destroy.call(duplex, error);
     },
   );
 
@@ -464,7 +464,7 @@ function newStreamDuplexFromReadableWritablePair(
     (error) => {
       writableClosed = true;
       readableClosed = true;
-      destroy(duplex, error);
+      destroy.call(duplex, error);
     },
   );
 
@@ -673,7 +673,7 @@ function newWritableStreamFromStreamWritable(streamWritable) {
     },
 
     abort(reason) {
-      destroy(streamWritable, reason);
+      destroy.call(streamWritable, reason);
     },
 
     close() {

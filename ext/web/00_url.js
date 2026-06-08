@@ -741,6 +741,7 @@ class URL {
 
   /** @param {string} value */
   set href(value) {
+    this.#serialization;
     const prefix = "Failed to set 'href' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");
@@ -919,6 +920,7 @@ class URL {
 
   /** @param {string} value */
   set search(value) {
+    this.#serialization;
     const prefix = "Failed to set 'search' on 'URL'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     value = webidl.converters.DOMString(value, prefix, "Argument 1");

@@ -506,6 +506,15 @@ class TextDecoderStream {
       inspectOptions,
     );
   }
+
+  [SymbolFor("nodejs.util.inspect.custom")](_depth, inspectOptions, inspect) {
+    webidl.assertBranded(
+      this,
+      TextDecoderStreamPrototype,
+      "TextDecoderStream",
+    );
+    return this[SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions);
+  }
 }
 
 webidl.configureInterface(TextDecoderStream);
@@ -601,6 +610,15 @@ class TextEncoderStream {
       }),
       inspectOptions,
     );
+  }
+
+  [SymbolFor("nodejs.util.inspect.custom")](_depth, inspectOptions, inspect) {
+    webidl.assertBranded(
+      this,
+      TextEncoderStreamPrototype,
+      "TextEncoderStream",
+    );
+    return this[SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions);
   }
 }
 
