@@ -25,6 +25,7 @@
 
 (function () {
 const { core } = __bootstrap;
+const { op_node_call_is_from_dependency } = core.ops;
 const lazyProcess = core.createLazyLoader("node:process");
 const {
   ERR_INVALID_ARG_TYPE,
@@ -125,6 +126,29 @@ const slashedProtocol = new Set([
 ]);
 
 let urlParseInvalidPortWarned = false;
+let urlParseWarned = false;
+
+function currentNodeMajor() {
+  return Number(globalThis.process?.versions?.node?.split(".")?.[0] ?? 0);
+}
+
+function emitUrlParseWarning() {
+  if (
+    currentNodeMajor() < 24 ||
+    urlParseWarned ||
+    op_node_call_is_from_dependency()
+  ) {
+    return;
+  }
+  urlParseWarned = true;
+  lazyProcess().default.emitWarning(
+    "`url.parse()` behavior is not standardized and prone to " +
+      "errors that have security implications. Use the WHATWG URL API " +
+      "instead. CVEs are not issued for `url.parse()` vulnerabilities.",
+    "DeprecationWarning",
+    "DEP0169",
+  );
+}
 
 function emitInvalidPortUrlParseWarning() {
   if (urlParseInvalidPortWarned) {
@@ -1251,6 +1275,7 @@ function parse(
   parseQueryString: boolean,
   slashesDenoteHost: boolean,
 ) {
+  emitUrlParseWarning();
   if (url instanceof Url) return url;
 
   const urlObject = new Url();
