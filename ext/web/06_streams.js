@@ -5310,12 +5310,27 @@ class ReadableStream {
       1,
       prefix,
     );
-    asyncIterable = webidl.converters["async iterable<any>"](
-      asyncIterable,
-      prefix,
-      "Argument 1",
-    );
-    const iter = asyncIterable.open();
+    try {
+      asyncIterable = webidl.converters["async iterable<any>"](
+        asyncIterable,
+        prefix,
+        "Argument 1",
+      );
+    } catch (error) {
+      if (error && error.code === undefined) {
+        error.code = "ERR_ARG_NOT_ITERABLE";
+      }
+      throw error;
+    }
+    let iter;
+    try {
+      iter = asyncIterable.open();
+    } catch (error) {
+      if (error && error.code === undefined) {
+        error.code = "ERR_INVALID_STATE";
+      }
+      throw error;
+    }
 
     const stream = createReadableStream(noop, async () => {
       // deno-lint-ignore prefer-primordials

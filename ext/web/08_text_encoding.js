@@ -33,11 +33,13 @@ const {
   ObjectPrototypeIsPrototypeOf,
   PromiseReject,
   PromiseResolve,
+  RangeError,
   // TODO(lucacasonato): add SharedArrayBuffer to primordials
   // SharedArrayBufferPrototype,
   StringPrototypeCharCodeAt,
   StringPrototypeSlice,
   SymbolFor,
+  TypeError,
   TypedArrayPrototypeGetBuffer,
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
@@ -51,6 +53,44 @@ const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
 const { createFilteredInspectProxy } = core.loadExtScript(
   "ext:deno_web/01_console.js",
 );
+
+function withCode(error, code) {
+  if (error && error.code === undefined) {
+    error.code = code;
+  }
+  return error;
+}
+
+function encodingNotSupported(label) {
+  return withCode(
+    new RangeError(`The "${label}" encoding is not supported`),
+    "ERR_ENCODING_NOT_SUPPORTED",
+  );
+}
+
+function invalidEncodedData(encoding) {
+  return withCode(
+    new TypeError(`The encoded data was not valid for encoding ${encoding}`),
+    "ERR_ENCODING_INVALID_ENCODED_DATA",
+  );
+}
+
+function convertBufferSource(input, prefix, context) {
+  try {
+    return webidl.converters.BufferSource(input, prefix, context, {
+      allowShared: true,
+    });
+  } catch (error) {
+    throw withCode(error, "ERR_INVALID_ARG_TYPE");
+  }
+}
+
+function toNodeDecodeError(encoding, error) {
+  if (error?.name === "TypeError") {
+    return invalidEncodedData(encoding);
+  }
+  return error;
+}
 
 class TextDecoder {
   /** @type {string} */
@@ -84,7 +124,11 @@ class TextDecoder {
     ) {
       encoding = "utf-8";
     } else {
-      encoding = op_encoding_normalize_label(label);
+      try {
+        encoding = op_encoding_normalize_label(label);
+      } catch {
+        throw encodingNotSupported(label);
+      }
     }
     this.#encoding = encoding;
     this.#fatal = options.fatal;
@@ -137,9 +181,7 @@ class TextDecoder {
         isSharedArrayBuffer(TypedArrayPrototypeGetBuffer(input))
       ) {
         const prefix = "Failed to execute 'decode' on 'TextDecoder'";
-        input = webidl.converters.BufferSource(input, prefix, "Argument 1", {
-          allowShared: true,
-        });
+        input = convertBufferSource(input, prefix, "Argument 1");
       }
     }
     let stream = false;
@@ -200,15 +242,23 @@ class TextDecoder {
       if (!stream && this.#handle === null) {
         // Fast path for utf8 single pass encoding.
         if (this.#utf8SinglePass) {
-          return op_encoding_decode_utf8(input, this.#ignoreBOM);
+          try {
+            return op_encoding_decode_utf8(input, this.#ignoreBOM);
+          } catch (error) {
+            throw toNodeDecodeError(this.#encoding, error);
+          }
         }
 
-        return op_encoding_decode_single(
-          input,
-          this.#encoding,
-          this.#fatal,
-          this.#ignoreBOM,
-        );
+        try {
+          return op_encoding_decode_single(
+            input,
+            this.#encoding,
+            this.#fatal,
+            this.#ignoreBOM,
+          );
+        } catch (error) {
+          throw toNodeDecodeError(this.#encoding, error);
+        }
       }
 
       if (this.#handle === null) {
@@ -218,7 +268,11 @@ class TextDecoder {
           this.#ignoreBOM,
         );
       }
-      return op_encoding_decode(input, this.#handle, stream);
+      try {
+        return op_encoding_decode(input, this.#handle, stream);
+      } catch (error) {
+        throw toNodeDecodeError(this.#encoding, error);
+      }
     } finally {
       if (!stream && this.#handle !== null) {
         this.#handle = null;
@@ -359,9 +413,7 @@ class TextDecoderStream {
       // `this`, so they are defined as functions rather than methods.
       transform: (chunk, controller) => {
         try {
-          chunk = webidl.converters.BufferSource(chunk, prefix, "chunk", {
-            allowShared: true,
-          });
+          chunk = convertBufferSource(chunk, prefix, "chunk");
           const decoded = this.#decoder.decode(chunk, { stream: true });
           if (decoded) {
             controller.enqueue(decoded);

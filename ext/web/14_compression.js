@@ -16,6 +16,7 @@ const {
   SymbolFor,
   ObjectPrototypeIsPrototypeOf,
   TypedArrayPrototypeGetByteLength,
+  TypeError,
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
@@ -23,6 +24,30 @@ const { createFilteredInspectProxy } = core.loadExtScript(
   "ext:deno_web/01_console.js",
 );
 const { TransformStream } = core.loadExtScript("ext:deno_web/06_streams.js");
+
+function withCode(error, code) {
+  if (error && error.code === undefined) {
+    error.code = code;
+  }
+  return error;
+}
+
+function convertCompressionChunk(chunk, prefix) {
+  if (typeof chunk === "string") {
+    return core.encode(chunk);
+  }
+  if (chunk === null) {
+    throw withCode(
+      new TypeError("May not write null values to stream"),
+      "ERR_STREAM_NULL_VALUES",
+    );
+  }
+  try {
+    return webidl.converters.BufferSource(chunk, prefix, "chunk");
+  } catch (error) {
+    throw withCode(error, "ERR_INVALID_ARG_TYPE");
+  }
+}
 
 webidl.converters.CompressionFormat = webidl.createEnumConverter(
   "CompressionFormat",
@@ -46,7 +71,7 @@ class CompressionStream {
 
     this.#transform = new TransformStream({
       transform(chunk, controller) {
-        chunk = webidl.converters.BufferSource(chunk, prefix, "chunk");
+        chunk = convertCompressionChunk(chunk, prefix);
         const output = op_compression_write(
           rid,
           chunk,
@@ -108,7 +133,7 @@ class DecompressionStream {
 
     this.#transform = new TransformStream({
       transform(chunk, controller) {
-        chunk = webidl.converters.BufferSource(chunk, prefix, "chunk");
+        chunk = convertCompressionChunk(chunk, prefix);
         const output = op_compression_write(
           rid,
           chunk,

@@ -713,7 +713,11 @@ function getPartRefs(blob, bag = []) {
  */
 function cloneBlobParts(blob) {
   if (blob[_fileBacked]) {
-    throw new TypeError("Invalid state: File-backed Blobs are not cloneable");
+    const error = new TypeError(
+      "Invalid state: File-backed Blobs are not cloneable",
+    );
+    error.code = "ERR_INVALID_STATE";
+    throw error;
   }
   const refs = getPartRefs(blob);
   const cloned = [];
@@ -839,7 +843,14 @@ function blobFromObjectUrl(url) {
 function createObjectURL(blob) {
   const prefix = "Failed to execute 'createObjectURL' on 'URL'";
   webidl.requiredArguments(arguments.length, 1, prefix);
-  blob = webidl.converters["Blob"](blob, prefix, "Argument 1");
+  try {
+    blob = webidl.converters["Blob"](blob, prefix, "Argument 1");
+  } catch (error) {
+    if (error && error.code === undefined) {
+      error.code = "ERR_INVALID_ARG_TYPE";
+    }
+    throw error;
+  }
 
   return op_blob_create_object_url(blob.type, getParts(blob));
 }

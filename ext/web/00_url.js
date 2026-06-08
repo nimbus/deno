@@ -106,10 +106,13 @@ function getSerialization(status, href, maybeBase) {
   } else if (status === 1) {
     return op_url_get_serialization();
   } else {
-    throw new TypeError(
-      `Invalid URL: '${href}'` +
-        (maybeBase ? ` with base '${maybeBase}'` : ""),
-    );
+    const error = new TypeError("Invalid URL");
+    error.code = "ERR_INVALID_URL";
+    error.input = href;
+    if (maybeBase !== undefined) {
+      error.base = maybeBase;
+    }
+    throw error;
   }
 }
 
