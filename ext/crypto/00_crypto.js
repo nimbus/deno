@@ -4280,6 +4280,7 @@ function exportKeyAES(
 ) {
   switch (format) {
     // 2.
+    case "raw-secret":
     case "raw": {
       // 1.
       const data = innerKey.data;
@@ -4334,6 +4335,7 @@ function exportKeyAES(
 
 function exportKeyChaCha20Poly1305(format, _key, innerKey) {
   switch (format) {
+    case "raw-secret":
     case "raw": {
       const data = innerKey.data;
       return TypedArrayPrototypeGetBuffer(data);
@@ -4571,6 +4573,7 @@ function importKeyChaCha20Poly1305(
   }
 
   switch (format) {
+    case "raw-secret":
     case "raw": {
       if (TypedArrayPrototypeGetByteLength(keyData) !== 32) {
         throw new DOMException(
@@ -4626,6 +4629,7 @@ function importKeyAES(
   let data = keyData;
 
   switch (format) {
+    case "raw-secret":
     case "raw": {
       // 2.
       if (
@@ -4804,6 +4808,7 @@ function importKeyHMAC(
 
   // 4. https://w3c.github.io/webcrypto/#hmac-operations
   switch (format) {
+    case "raw-secret":
     case "raw": {
       data = keyData;
       hash = normalizedAlgorithm.hash;
@@ -6224,6 +6229,7 @@ function exportKeyHMAC(format, key, innerKey) {
 
   switch (format) {
     // 3.
+    case "raw-secret":
     case "raw": {
       const bits = innerKey.data;
       // TODO(petamoriken): Uint8Array does not have push method
@@ -7395,6 +7401,10 @@ webidl.converters.KeyFormat = webidl.createEnumConverter("KeyFormat", [
   "raw-public",
   "raw-private",
   "raw-seed",
+  // Explicit raw format for symmetric/secret keys. Node accepts "raw-secret"
+  // as the disambiguated alias of "raw" for secret keys (AES, HMAC,
+  // ChaCha20-Poly1305, KMAC); "raw" stays accepted for back-compat.
+  "raw-secret",
 ]);
 
 webidl.converters.KeyUsage = webidl.createEnumConverter("KeyUsage", [

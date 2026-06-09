@@ -265,8 +265,18 @@ function previousCpuUsageValueIsValid(num) {
   return typeof num === "number" && num >= 0 && num <= NumberMAX_SAFE_INTEGER;
 }
 
+// Whole-process CPU usage. A Nimbus isolate runs user code single-threaded, so
+// the current-thread CPU clock is the process CPU clock. Read the op directly
+// rather than `Deno.cpuUsage`, which is unavailable once the public `Deno`
+// namespace is removed after bootstrap.
+const processCpuValues = new Float64Array(2);
+
 export function cpuUsage(previousValue?: CpuUsage): CpuUsage {
-  const cpuValues = Deno.cpuUsage(previousValue);
+  op_current_thread_cpu_usage(processCpuValues);
+  const cpuValues = {
+    user: processCpuValues[0],
+    system: processCpuValues[1],
+  };
 
   if (previousValue) {
     if (!previousCpuUsageValueIsValid(previousValue.user)) {
