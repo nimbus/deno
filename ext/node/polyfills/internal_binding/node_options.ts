@@ -80,6 +80,7 @@ function createDefaultOptions() {
     ["--preserve-symlinks", { value: false }],
     ["--preserve-symlinks-main", { value: false }],
     ["--title", { value: "" }],
+    ["--unhandled-rejections", { value: "throw" }],
   ]);
 }
 
@@ -91,6 +92,12 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
   if (StringPrototypeStartsWith(arg, "--tls-cipher-list=")) {
     options.set("--tls-cipher-list", {
       value: StringPrototypeSlice(arg, "--tls-cipher-list=".length),
+    });
+    return;
+  }
+  if (StringPrototypeStartsWith(arg, "--unhandled-rejections=")) {
+    options.set("--unhandled-rejections", {
+      value: StringPrototypeSlice(arg, "--unhandled-rejections=".length),
     });
     return;
   }

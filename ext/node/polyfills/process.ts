@@ -1610,9 +1610,83 @@ let unhandledRejectionListenerCount = 0;
 let rejectionHandledListenerCount = 0;
 let uncaughtExceptionListenerCount = 0;
 let uncaughtExceptionMonitorListenerCount = 0;
+let warningListenerCount = 0;
 let beforeExitListenerCount = 0;
 let exitListenerCount = 0;
 let domainUnhandledRejectionTracking = false;
+let unhandledRejectionId = 0;
+const warnedUnhandledRejections = new WeakMap<Promise<unknown>, number>();
+
+function getUnhandledRejectionsMode() {
+  const mode = getOptionValue("--unhandled-rejections");
+  switch (mode) {
+    case "strict":
+    case "throw":
+    case "warn":
+    case "none":
+    case "warn-with-error-code":
+      return mode;
+    default:
+      return "throw";
+  }
+}
+
+function unhandledRejectionWarningMessage(id: number) {
+  return "Unhandled promise rejection. This error originated either by " +
+    "throwing inside of an async function without a catch block, or by " +
+    "rejecting a promise which was not handled with .catch(). To terminate " +
+    "the node process on unhandled promise rejection, use the CLI flag " +
+    "`--unhandled-rejections=strict` (see " +
+    "https://nodejs.org/api/cli.html#cli_unhandled_rejections_mode). " +
+    `(rejection id: ${id})`;
+}
+
+function emitUnhandledRejectionWarnings(
+  promise: Promise<unknown>,
+  reason: unknown,
+) {
+  const id = ++unhandledRejectionId;
+  warnedUnhandledRejections.set(promise, id);
+  process.emitWarning(
+    reason instanceof Error ? reason : String(reason),
+    "UnhandledPromiseRejectionWarning",
+  );
+  process.emitWarning(
+    unhandledRejectionWarningMessage(id),
+    "UnhandledPromiseRejectionWarning",
+  );
+}
+
+function emitPromiseRejectionHandledWarning(promise: Promise<unknown>) {
+  const id = warnedUnhandledRejections.get(promise);
+  if (id === undefined) {
+    return;
+  }
+  warnedUnhandledRejections.delete(promise);
+  process.emitWarning(
+    `Promise rejection was handled asynchronously (rejection id: ${id})`,
+    "PromiseRejectionHandledWarning",
+  );
+}
+
+function getRejectionDomain(event: {
+  promise?: { domain?: unknown };
+  reason?: { domain?: unknown } | unknown;
+}) {
+  try {
+    return event.promise?.domain;
+  } catch {
+    // Rejection reasons/promises may be hostile proxies. Node's rejection
+    // policy must not turn a user proxy trap into a second rejection failure.
+  }
+  try {
+    return event.reason !== null && typeof event.reason === "object"
+      ? (event.reason as { domain?: unknown }).domain
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 internals.__enableDomainUnhandledRejectionTracking = () => {
   if (domainUnhandledRejectionTracking) {
@@ -1635,6 +1709,9 @@ process.on("newListener", (event: string) => {
       break;
     case "uncaughtExceptionMonitor":
       uncaughtExceptionMonitorListenerCount++;
+      break;
+    case "warning":
+      warningListenerCount++;
       break;
     case "beforeExit":
       beforeExitListenerCount++;
@@ -1661,6 +1738,9 @@ process.on("removeListener", (event: string) => {
       break;
     case "uncaughtExceptionMonitor":
       uncaughtExceptionMonitorListenerCount--;
+      break;
+    case "warning":
+      warningListenerCount--;
       break;
     case "beforeExit":
       beforeExitListenerCount--;
@@ -1711,16 +1791,84 @@ function dispatchProcessExitEvent() {
 }
 
 function synchronizeListeners() {
+  const unhandledRejectionsMode = getUnhandledRejectionsMode();
   // Install special "unhandledrejection" handler, that will be called
   // last.
   if (
+    unhandledRejectionsMode !== "throw" ||
     unhandledRejectionListenerCount > 0 ||
+    warningListenerCount > 0 ||
     uncaughtExceptionListenerCount > 0 ||
     uncaughtExceptionMonitorListenerCount > 0 ||
     _uncaughtExceptionCaptureFn !== null ||
     domainUnhandledRejectionTracking
   ) {
     internals.nodeProcessUnhandledRejectionCallback = (event) => {
+      const mode = getUnhandledRejectionsMode();
+      if (mode === "none") {
+        event.preventDefault();
+        if (process.listenerCount("unhandledRejection") > 0) {
+          runInPromiseRejectionScope(event.promise, () => {
+            process.emit("unhandledRejection", event.reason, event.promise);
+          });
+        }
+        return;
+      }
+
+      if (mode === "warn") {
+        event.preventDefault();
+        if (process.listenerCount("unhandledRejection") > 0) {
+          runInPromiseRejectionScope(event.promise, () => {
+            process.emit("unhandledRejection", event.reason, event.promise);
+          });
+        }
+        emitUnhandledRejectionWarnings(event.promise, event.reason);
+        return;
+      }
+
+      if (mode === "warn-with-error-code") {
+        event.preventDefault();
+        if (process.listenerCount("unhandledRejection") > 0) {
+          runInPromiseRejectionScope(event.promise, () => {
+            process.emit("unhandledRejection", event.reason, event.promise);
+          });
+        } else {
+          process.exitCode = 1;
+        }
+        emitUnhandledRejectionWarnings(event.promise, event.reason);
+        return;
+      }
+
+      if (mode === "strict") {
+        let reason = event.reason;
+        if (!(reason instanceof Error)) {
+          const message = "This error originated either by throwing " +
+            "inside of an async function without a catch block, or by rejecting a " +
+            "promise which was not handled with .catch(). The promise rejected with the" +
+            ` reason "${reason}".`;
+          const err = new Error(message);
+          // deno-lint-ignore no-explicit-any
+          (err as any).code = "ERR_UNHANDLED_REJECTION";
+          // deno-lint-ignore no-explicit-any
+          (err as any).reason = event.reason;
+          Object.defineProperty(err, "name", {
+            value: "UnhandledPromiseRejection",
+            writable: true,
+            configurable: true,
+          });
+          reason = err;
+        }
+        if (uncaughtExceptionHandler(reason, "unhandledRejection")) {
+          event.preventDefault();
+          if (process.listenerCount("unhandledRejection") > 0) {
+            runInPromiseRejectionScope(event.promise, () => {
+              process.emit("unhandledRejection", event.reason, event.promise);
+            });
+          }
+        }
+        return;
+      }
+
       if (process.listenerCount("unhandledRejection") === 0) {
         // The Node.js default behavior is to raise an uncaught exception if
         // an unhandled rejection occurs and there are no unhandledRejection
@@ -1760,7 +1908,7 @@ function synchronizeListeners() {
           reason = err;
         }
 
-        const domain = event.promise?.domain ?? event.reason?.domain;
+        const domain = getRejectionDomain(event);
         if (domain && typeof domain.emit === "function") {
           if (reason !== null && typeof reason === "object") {
             Object.defineProperty(reason, "domain", {
@@ -1802,9 +1950,26 @@ function synchronizeListeners() {
 
   // Install special "handledrejection" handler, that will be called
   // last.
-  if (rejectionHandledListenerCount > 0) {
+  if (
+    rejectionHandledListenerCount > 0 ||
+    getUnhandledRejectionsMode() === "warn"
+  ) {
     internals.nodeProcessRejectionHandledCallback = (event) => {
-      process.emit("rejectionHandled", event.reason, event.promise);
+      if (rejectionHandledListenerCount > 0) {
+        try {
+          process.emit("rejectionHandled", event.promise);
+        } catch (err) {
+          if (!uncaughtExceptionHandler(err, "uncaughtException")) {
+            throw err;
+          }
+        }
+      }
+      if (
+        getUnhandledRejectionsMode() === "warn" &&
+        rejectionHandledListenerCount === 0
+      ) {
+        emitPromiseRejectionHandledWarning(event.promise);
+      }
     };
   } else {
     internals.nodeProcessRejectionHandledCallback = undefined;
