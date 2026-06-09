@@ -2219,4 +2219,5 @@ internals.__bootstrapNodeProcess = function (
   }
 };
 
+export { report };
 export default process;
