@@ -1108,9 +1108,21 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
     .get_type_by_module(&module_global)
     .expect("Module not found");
 
-  let url_key = URL.v8_string(scope).unwrap();
   let url_val = v8::String::new(scope, &name).unwrap();
-  meta.create_data_property(scope, url_key.into(), url_val.into());
+
+  if let Some((dirname, filename)) = import_meta_file_path_strings(&name) {
+    let Some(dirname_val) = v8::String::new(scope, &dirname) else {
+      return;
+    };
+    let dirname_key = DIRNAME.v8_string(scope).unwrap();
+    meta.create_data_property(scope, dirname_key.into(), dirname_val.into());
+
+    let Some(filename_val) = v8::String::new(scope, &filename) else {
+      return;
+    };
+    let filename_key = FILENAME.v8_string(scope).unwrap();
+    meta.create_data_property(scope, filename_key.into(), filename_val.into());
+  }
 
   let main_key = MAIN.v8_string(scope).unwrap();
   let main = module_map.is_main_module(&module_global);
@@ -1148,7 +1160,8 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
   let resolve_key = RESOLVE.v8_string(scope).unwrap();
   meta.set(scope, resolve_key.into(), val.into());
 
-  maybe_add_import_meta_filename_dirname(scope, meta, &name);
+  let url_key = URL.v8_string(scope).unwrap();
+  meta.create_data_property(scope, url_key.into(), url_val.into());
 
   if name.starts_with("ext:")
     && let Some(proto) = state.ext_import_meta_proto.borrow().clone()
@@ -1158,45 +1171,32 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
   }
 }
 
-fn maybe_add_import_meta_filename_dirname<'s, 'i>(
-  scope: &mut v8::PinScope<'s, 'i>,
-  meta: v8::Local<'s, v8::Object>,
-  name: &str,
-) {
+fn import_meta_file_path_strings(name: &str) -> Option<(String, String)> {
   // For `file:` URL we provide additional `filename` and `dirname` values
   let Ok(name_url) = Url::parse(name) else {
-    return;
+    return None;
   };
 
   if name_url.scheme() != "file" {
-    return;
+    return None;
   }
 
   // If something goes wrong acquiring a filepath, let skip instead of crashing
   // (mostly concerned about file paths on Windows).
   let Ok(file_path) = deno_path_util::url_to_file_path(&name_url) else {
-    return;
+    return None;
   };
 
   // Use display() here so that Rust takes care of proper forward/backward slash
   // formatting depending on the OS.
-  let escaped_filename = file_path.display().to_string();
-  let Some(filename_val) = v8::String::new(scope, &escaped_filename) else {
-    return;
-  };
-  let filename_key = FILENAME.v8_string(scope).unwrap();
-  meta.create_data_property(scope, filename_key.into(), filename_val.into());
-
   let dir_path = file_path
     .parent()
     .map(|p| p.to_owned())
     .unwrap_or_else(|| PathBuf::from("/"));
-  let escaped_dirname = dir_path.display().to_string();
-  let Some(dirname_val) = v8::String::new(scope, &escaped_dirname) else {
-    return;
-  };
-  let dirname_key = DIRNAME.v8_string(scope).unwrap();
-  meta.create_data_property(scope, dirname_key.into(), dirname_val.into());
+  Some((
+    dir_path.display().to_string(),
+    file_path.display().to_string(),
+  ))
 }
 
 fn import_meta_resolve(

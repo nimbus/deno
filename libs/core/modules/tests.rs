@@ -2172,14 +2172,16 @@ fn import_meta_filename_dirname() {
   #[cfg(not(target_os = "windows"))]
   let main_specifier = resolve_url("file:///main_module.js").unwrap();
   #[cfg(not(target_os = "windows"))]
-  let code = r#"if (import.meta.filename != '/main_module.js') throw Error();
+  let code = r#"if (Reflect.ownKeys(import.meta).join(",") != 'dirname,filename,main,resolve,url') throw Error();
+    if (import.meta.filename != '/main_module.js') throw Error();
     if (import.meta.dirname != '/') throw Error();
   "#;
 
   #[cfg(target_os = "windows")]
   let main_specifier = resolve_url("file:///C:/main_module.js").unwrap();
   #[cfg(target_os = "windows")]
-  let code = r#"if (import.meta.filename != 'C:\\main_module.js') throw Error();
+  let code = r#"if (Reflect.ownKeys(import.meta).join(",") != 'dirname,filename,main,resolve,url') throw Error();
+    if (import.meta.filename != 'C:\\main_module.js') throw Error();
     if (import.meta.dirname != 'C:\\') throw Error();
   "#;
 
