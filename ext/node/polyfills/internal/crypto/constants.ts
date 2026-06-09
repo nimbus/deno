@@ -8,7 +8,7 @@
 const { internals } = __bootstrap;
 
 const kHandle = Symbol("kHandle");
-const kKeyObject = Symbol("kKeyObject");
+const kKeyObject = internals.kKeyObject ?? Symbol("kKeyObject");
 
 internals.kKeyObject = kKeyObject;
 
