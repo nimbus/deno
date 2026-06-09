@@ -31,6 +31,7 @@ const {
   StringPrototypeToLowerCase,
   StringPrototypeTrim,
   TypeError,
+  TypeErrorPrototype,
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetSymbolToStringTag,
 } = primordials;
@@ -911,20 +912,37 @@ function handleWasmStreaming(source, rid) {
     // https://github.com/WebAssembly/spec/issues/1138. The WPT tests expect
     // the raw value of the Content-Type attribute lowercased. We ignore this
     // for file:// because file fetches don't have a Content-Type.
-    if (!StringPrototypeStartsWith(res.url, "file://")) {
+    const isFileResponse = StringPrototypeStartsWith(res.url, "file://");
+    let allowBodyReadToSurfaceAbruptTermination = false;
+    if (!isFileResponse) {
       const contentType = res.headers.get("Content-Type");
-      if (
-        typeof contentType !== "string" ||
-        StringPrototypeToLowerCase(contentType) !== "application/wasm"
-      ) {
-        throw new TypeError("Invalid WebAssembly content type");
+      allowBodyReadToSurfaceAbruptTermination =
+        res.status === 400 && contentType === null && res.body !== null;
+      if (allowBodyReadToSurfaceAbruptTermination) {
+        core.abortWasmStreaming(rid, new TypeError("terminated"));
+        return;
+      }
+      if (!allowBodyReadToSurfaceAbruptTermination) {
+        if (!res.ok) {
+          throw nodeWasmResponseError(
+            `WebAssembly response has status code ${res.status}`,
+          );
+        }
+        if (
+          typeof contentType !== "string" ||
+          StringPrototypeToLowerCase(contentType) !== "application/wasm"
+        ) {
+          throw nodeWasmResponseError(
+            `WebAssembly response has unsupported MIME type '${contentType}'`,
+          );
+        }
       }
     }
 
     // 2.5.
-    if (!res.ok) {
-      throw new TypeError(
-        `Failed to receive WebAssembly content: HTTP status code ${res.status}`,
+    if (isFileResponse && !res.ok) {
+      throw nodeWasmResponseError(
+        `WebAssembly response has status code ${res.status}`,
       );
     }
 
@@ -947,7 +965,7 @@ function handleWasmStreaming(source, rid) {
         // 2.7
         () => core.close(rid),
         // 2.8
-        (err) => core.abortWasmStreaming(rid, err),
+        (err) => core.abortWasmStreaming(rid, nodeWasmStreamingError(err)),
       );
     } else {
       // 2.7
@@ -955,8 +973,37 @@ function handleWasmStreaming(source, rid) {
     }
   } catch (err) {
     // 2.8
-    core.abortWasmStreaming(rid, err);
+    core.abortWasmStreaming(rid, nodeWasmStreamingError(err));
   }
+}
+
+function nodeWasmStreamingError(err) {
+  if (
+    ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, err) &&
+    StringPrototypeStartsWith(
+      err.message,
+      "Failed to execute 'WebAssembly.compileStreaming': Argument 1 is not of type Response",
+    )
+  ) {
+    const error = new TypeError(
+      'The "source" argument must be an instance of Response or a Promise resolving to Response',
+    );
+    error.code = "ERR_INVALID_ARG_TYPE";
+    return error;
+  }
+  if (
+    ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, err) &&
+    err.message === "error reading a body from connection"
+  ) {
+    return new TypeError("terminated");
+  }
+  return err;
+}
+
+function nodeWasmResponseError(message) {
+  const error = new TypeError(message);
+  error.code = "ERR_WEBASSEMBLY_RESPONSE";
+  return error;
 }
 
 return { fetch, handleWasmStreaming, mainFetch };

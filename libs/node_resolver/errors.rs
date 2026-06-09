@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use boxed_error::Boxed;
 use deno_error::JsError;
+use deno_error::JsErrorClass;
+use deno_error::PropertyValue;
 use deno_package_json::MissingPkgJsonNameError;
 use deno_path_util::UrlToFilePathError;
 use thiserror::Error;
@@ -347,6 +349,7 @@ impl PackageSubpathResolveErrorKind {
             }
             PackageTargetResolveErrorKind::NotFound(_)
             | PackageTargetResolveErrorKind::InvalidPackageTarget(_)
+            | PackageTargetResolveErrorKind::InvalidPackageConfig(_)
             | PackageTargetResolveErrorKind::InvalidModuleSpecifier(_)
             | PackageTargetResolveErrorKind::PackageResolve(_)
             | PackageTargetResolveErrorKind::UnknownBuiltInNodeModule(_)
@@ -405,6 +408,7 @@ impl NodeJsErrorCoded for PackageTargetResolveErrorKind {
     match self {
       PackageTargetResolveErrorKind::NotFound(e) => e.code(),
       PackageTargetResolveErrorKind::InvalidPackageTarget(e) => e.code(),
+      PackageTargetResolveErrorKind::InvalidPackageConfig(e) => e.code(),
       PackageTargetResolveErrorKind::InvalidModuleSpecifier(e) => e.code(),
       PackageTargetResolveErrorKind::PackageResolve(e) => e.code(),
       PackageTargetResolveErrorKind::TypesNotFound(e) => e.code(),
@@ -438,6 +442,7 @@ impl PackageTargetResolveError {
         Some(Cow::Owned(UrlOrPath::Url(e.0.clone())))
       }
       PackageTargetResolveErrorKind::InvalidPackageTarget(_)
+      | PackageTargetResolveErrorKind::InvalidPackageConfig(_)
       | PackageTargetResolveErrorKind::InvalidModuleSpecifier(_) => None,
     }
   }
@@ -451,6 +456,9 @@ pub enum PackageTargetResolveErrorKind {
   #[class(inherit)]
   #[error(transparent)]
   InvalidPackageTarget(#[from] InvalidPackageTargetError),
+  #[class(inherit)]
+  #[error(transparent)]
+  InvalidPackageConfig(#[from] InvalidPackageConfigError),
   #[class(inherit)]
   #[error(transparent)]
   InvalidModuleSpecifier(#[from] InvalidModuleSpecifierError),
@@ -488,6 +496,7 @@ impl NodeJsErrorCoded for PackageExportsResolveErrorKind {
 }
 
 #[derive(Debug, Boxed, JsError)]
+#[property("code" = self.as_kind().code())]
 pub struct PackageExportsResolveError(pub Box<PackageExportsResolveErrorKind>);
 
 impl PackageExportsResolveError {
@@ -536,10 +545,48 @@ impl NodeJsErrorCoded for TypesNotFoundError {
 
 #[derive(Debug, Error, JsError)]
 #[class(inherit)]
-#[error("[{}] Invalid package config. {}", self.code(), .0)]
+#[error("{}", package_json_load_error_message(&self.0))]
+#[property("code" = self.code())]
 pub struct PackageJsonLoadError(pub deno_package_json::PackageJsonLoadError);
 
 impl NodeJsErrorCoded for PackageJsonLoadError {
+  fn code(&self) -> NodeJsErrorCode {
+    NodeJsErrorCode::ERR_INVALID_PACKAGE_CONFIG
+  }
+}
+
+fn package_json_load_error_message(
+  error: &deno_package_json::PackageJsonLoadError,
+) -> String {
+  match error {
+    deno_package_json::PackageJsonLoadError::InvalidExports => concat!(
+      "Invalid package config. ",
+      "\"exports\" cannot contain some keys starting with '.' and some not. ",
+      "The exports object must either be an object of package subpath keys ",
+      "or an object of main entry condition name keys only."
+    )
+    .to_string(),
+    _ => format!("Invalid package config. {error}"),
+  }
+}
+
+#[derive(Debug, Error, JsError)]
+#[class(generic)]
+#[error(
+  "[{}] Invalid package config {}{}{}",
+  self.code(),
+  package_json_path.display(),
+  maybe_imported_from_msg(maybe_referrer),
+  message.as_ref().map(|message| format!(". {message}")).unwrap_or_default(),
+)]
+#[property("code" = self.code())]
+pub struct InvalidPackageConfigError {
+  pub package_json_path: PathBuf,
+  pub maybe_referrer: Option<UrlOrPath>,
+  pub message: Option<String>,
+}
+
+impl NodeJsErrorCoded for InvalidPackageConfigError {
   fn code(&self) -> NodeJsErrorCode {
     NodeJsErrorCode::ERR_INVALID_PACKAGE_CONFIG
   }
@@ -567,6 +614,7 @@ impl NodeJsErrorCoded for PackageImportNotDefinedError {
 }
 
 #[derive(Debug, Boxed, JsError)]
+#[property("code" = self.as_kind().code())]
 pub struct PackageImportsResolveError(pub Box<PackageImportsResolveErrorKind>);
 
 impl PackageImportsResolveError {
@@ -632,6 +680,7 @@ impl NodeJsErrorCoded for PackageResolveErrorKind {
 }
 
 #[derive(Debug, Boxed, JsError)]
+#[property("code" = self.as_kind().code())]
 pub struct PackageResolveError(pub Box<PackageResolveErrorKind>);
 
 impl PackageResolveError {
@@ -714,7 +763,7 @@ pub struct BrowserMapDisabledError {
   pub pkg_json_path: PathBuf,
 }
 
-#[derive(Debug, Boxed, JsError)]
+#[derive(Debug, Boxed)]
 pub struct NodeResolveError(pub Box<NodeResolveErrorKind>);
 
 impl NodeResolveError {
@@ -740,6 +789,39 @@ impl NodeResolveError {
       | NodeResolveErrorKind::RelativeJoin(_)
       | NodeResolveErrorKind::BrowserMapDisabled(_) => None,
     }
+  }
+}
+
+impl JsErrorClass for NodeResolveError {
+  fn get_class(&self) -> Cow<'static, str> {
+    self.as_kind().get_class()
+  }
+
+  fn get_message(&self) -> Cow<'static, str> {
+    self.as_kind().get_message()
+  }
+
+  fn get_additional_properties(&self) -> deno_error::AdditionalProperties {
+    let mut properties = self
+      .as_kind()
+      .get_additional_properties()
+      .collect::<Vec<_>>();
+    if !properties.iter().any(|(key, _)| key.as_ref() == "code") {
+      properties.push(("code".into(), self.as_kind().code().into()));
+    }
+    if !properties.iter().any(|(key, _)| key.as_ref() == "url")
+      && let Some(specifier) = self.maybe_specifier()
+    {
+      properties.push((
+        "url".into(),
+        PropertyValue::String(Cow::Owned(specifier.to_string())),
+      ));
+    }
+    Box::new(properties.into_iter())
+  }
+
+  fn get_ref(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+    self
   }
 }
 
@@ -814,6 +896,34 @@ impl NodeResolveErrorKind {
       NodeResolveErrorKind::UnknownBuiltInNodeModule(e) => Some(e.code()),
       NodeResolveErrorKind::FinalizeResolution(e) => Some(e.code()),
       NodeResolveErrorKind::BrowserMapDisabled(_) => None,
+    }
+  }
+}
+
+impl NodeJsErrorCoded for NodeResolveErrorKind {
+  fn code(&self) -> NodeJsErrorCode {
+    match self {
+      NodeResolveErrorKind::RelativeJoin(_) => {
+        NodeJsErrorCode::ERR_INVALID_MODULE_SPECIFIER
+      }
+      NodeResolveErrorKind::PathToUrl(_) => {
+        NodeJsErrorCode::ERR_INVALID_FILE_URL_PATH
+      }
+      NodeResolveErrorKind::UrlToFilePath(_) => {
+        NodeJsErrorCode::ERR_INVALID_FILE_URL_PATH
+      }
+      NodeResolveErrorKind::PackageImportsResolve(e) => e.code(),
+      NodeResolveErrorKind::UnsupportedEsmUrlScheme(e) => e.code(),
+      NodeResolveErrorKind::DataUrlReferrer(_) => {
+        NodeJsErrorCode::ERR_INVALID_MODULE_SPECIFIER
+      }
+      NodeResolveErrorKind::PackageResolve(e) => e.code(),
+      NodeResolveErrorKind::TypesNotFound(e) => e.code(),
+      NodeResolveErrorKind::UnknownBuiltInNodeModule(e) => e.code(),
+      NodeResolveErrorKind::FinalizeResolution(e) => e.code(),
+      NodeResolveErrorKind::BrowserMapDisabled(_) => {
+        NodeJsErrorCode::ERR_MODULE_NOT_FOUND
+      }
     }
   }
 }
@@ -896,17 +1006,23 @@ impl NodeJsErrorCoded for FinalizeResolutionErrorKind {
 #[derive(Debug, Error, JsError)]
 #[class(generic)]
 #[error(
-  "[{}] Cannot find module '{}'{}{}",
-  self.code(),
+  "Cannot find module '{}'{}{}",
   specifier,
   maybe_imported_from_msg(maybe_referrer),
   suggested_ext.as_ref().map(|m| format!("\nDid you mean to import with the \".{}\" extension?", m)).unwrap_or_default()
 )]
 #[property("code" = self.code())]
+#[property("url" = self.url())]
 pub struct ModuleNotFoundError {
   pub specifier: UrlOrPath,
   pub maybe_referrer: Option<UrlOrPath>,
   pub suggested_ext: Option<&'static str>,
+}
+
+impl ModuleNotFoundError {
+  fn url(&self) -> String {
+    self.specifier.to_string()
+  }
 }
 
 impl NodeJsErrorCoded for ModuleNotFoundError {
@@ -918,17 +1034,23 @@ impl NodeJsErrorCoded for ModuleNotFoundError {
 #[derive(Debug, Error, JsError)]
 #[class(generic)]
 #[error(
-  "[{}] Directory import '{}' is not supported resolving ES modules{}{}",
-  self.code(),
+  "Directory import '{}' is not supported resolving ES modules{}{}",
   dir_url,
   maybe_imported_from_msg(maybe_referrer),
   suggestion.as_ref().map(|suggestion| format!("\nDid you mean to import '{suggestion}'?")).unwrap_or_default(),
 )]
 #[property("code" = self.code())]
+#[property("url" = self.url())]
 pub struct UnsupportedDirImportError {
   pub dir_url: UrlOrPath,
   pub maybe_referrer: Option<UrlOrPath>,
   pub suggestion: Option<String>,
+}
+
+impl UnsupportedDirImportError {
+  fn url(&self) -> String {
+    self.dir_url.to_string()
+  }
 }
 
 impl NodeJsErrorCoded for UnsupportedDirImportError {

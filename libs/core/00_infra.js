@@ -14,6 +14,7 @@
     ObjectAssign,
     ObjectDefineProperty,
     ObjectFreeze,
+    ObjectHasOwn,
     Promise,
     PromiseReject,
     PromiseResolve,
@@ -100,10 +101,26 @@
         const keys = [];
         for (const property of new SafeArrayIterator(additionalProperties)) {
           const key = property[0];
-          if (!(key in error)) {
-            keys.push(key);
-            error[key] = property[1];
+          if (key === "message" || key === "stack") {
+            if (!ObjectHasOwn(error, key)) {
+              keys.push(key);
+              ObjectDefineProperty(error, key, {
+                value: property[1],
+                writable: true,
+                enumerable: true,
+                configurable: true,
+              });
+            }
+            continue;
           }
+
+          keys.push(key);
+          ObjectDefineProperty(error, key, {
+            value: property[1],
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
         }
         Object.defineProperty(error, SymbolFor("errorAdditionalPropertyKeys"), {
           value: keys,

@@ -22,6 +22,7 @@ use crate::ModuleSource;
 use crate::ModuleSourceCode;
 use crate::error::CoreError;
 use crate::module_specifier::ModuleSpecifier;
+use crate::modules::IntoModuleCodeString;
 use crate::modules::ModuleError;
 use crate::modules::ModuleId;
 use crate::modules::ModuleImportPhase;
@@ -235,7 +236,7 @@ impl RecursiveModuleLoad {
         LoadInit::Main(_) => (None, None, RequestedModuleType::None, false),
         LoadInit::Side { kind, code, .. } => (
           None,
-          code.take(),
+          code.clone(),
           RequestedModuleType::None,
           match kind {
             SideModuleKind::Async => false,
@@ -615,7 +616,26 @@ impl RecursiveModuleLoad {
       phase,
     };
     inner.root_module_reference = Some(module_request.reference.clone());
-    let load_fut = if phase == ModuleImportPhase::Evaluation
+    let root_source = match &mut inner.init {
+      LoadInit::Side { code, .. } => code.take(),
+      _ => None,
+    };
+    let load_fut = if let Some(code) = root_source {
+      let module_request = module_request.clone();
+      let module_specifier = module_specifier.clone();
+      async move {
+        Ok(Some((
+          module_request,
+          ModuleSource::new(
+            crate::ModuleType::JavaScript,
+            ModuleSourceCode::String(code.into_module_code()),
+            &module_specifier,
+            None,
+          ),
+        )))
+      }
+      .boxed_local()
+    } else if phase == ModuleImportPhase::Evaluation
       && let Some(module_id) = inner.root_module_id
     {
       // If the inner future is already in the map, we might be done (assuming there are no pending

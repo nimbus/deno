@@ -1,6 +1,20 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 import { core } from "ext:core/mod.js";
 const mod = core.loadExtScript("ext:deno_node/fs.ts");
+const syncBuiltinESMExportsCallbacksSymbol = Symbol.for(
+  "deno.node.syncBuiltinESMExports.callbacks",
+);
+type SyncBuiltinESMExportsCallbackGlobal = {
+  [key: symbol]: Set<() => void> | undefined;
+};
+const syncBuiltinESMExportsCallbacks =
+  (globalThis as unknown as SyncBuiltinESMExportsCallbackGlobal)[
+    syncBuiltinESMExportsCallbacksSymbol
+  ] ??= new Set<() => void>();
+
+function currentFsExport(name: string) {
+  return Object.prototype.hasOwnProperty.call(mod, name) ? mod[name] : undefined;
+}
 
 // Export all simple bindings first. `internal/fs/{handle,promises,streams}.ts`
 // access `lazyFs().<method>` at top-level when they're loaded, so every method
@@ -70,9 +84,9 @@ export const openSync = mod.openSync;
 export const read = mod.read;
 export const readdir = mod.readdir;
 export const readdirSync = mod.readdirSync;
-export const readFile = mod.readFile;
+export let readFile = mod.readFile;
 export const readFilePromise = mod.readFilePromise;
-export const readFileSync = mod.readFileSync;
+export let readFileSync = mod.readFileSync;
 export const readlink = mod.readlink;
 export const readlinkPromise = mod.readlinkPromise;
 export const readlinkSync = mod.readlinkSync;
@@ -113,6 +127,13 @@ export const writeFileSync = mod.writeFileSync;
 export const writeSync = mod.writeSync;
 export const writev = mod.writev;
 export const writevSync = mod.writevSync;
+
+function syncFsBuiltinESMExports() {
+  readFile = currentFsExport("readFile");
+  readFileSync = currentFsExport("readFileSync");
+}
+
+syncBuiltinESMExportsCallbacks.add(syncFsBuiltinESMExports);
 
 // These trigger loading of internal/fs/{streams,handle,promises}, which in
 // turn read methods off the `node:fs` namespace via `lazyFs()` at their own

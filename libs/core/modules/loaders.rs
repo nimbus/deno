@@ -24,6 +24,7 @@ use crate::modules::ModuleType;
 use crate::modules::RequestedModuleType;
 use crate::modules::ResolutionKind;
 use crate::resolve_import;
+use crate::v8;
 
 pub type ModuleLoaderError = JsErrorBox;
 
@@ -113,6 +114,19 @@ pub trait ModuleLoader {
     referrer: &str,
   ) -> Result<ModuleSpecifier, ModuleLoaderError> {
     self.resolve(specifier, referrer, ResolutionKind::DynamicImport)
+  }
+
+  /// Override to customize `import.meta.resolve` when access to the current
+  /// V8 scope is required.
+  ///
+  /// The default implementation preserves the legacy scope-free behavior.
+  fn import_meta_resolve_with_scope(
+    &self,
+    _scope: &mut v8::PinScope,
+    specifier: &str,
+    referrer: &str,
+  ) -> Result<ModuleSpecifier, ModuleLoaderError> {
+    self.import_meta_resolve(specifier, referrer)
   }
 
   /// Given ModuleSpecifier, load its source code.

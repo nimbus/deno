@@ -657,7 +657,7 @@ impl ModuleMap {
   /// `BuiltinModule.getESMFacade` so a CJS-style polyfill module can be
   /// imported as ESM without a hand-written wrapper.
   ///
-  /// Property values are read once at creation time — synthetic exports
+  /// Property values are read once at creation time -- synthetic exports
   /// are static snapshots, not live references back to the object.
   pub fn new_synthetic_module_from_exports_object<'s, 'i>(
     &self,
@@ -755,6 +755,54 @@ impl ModuleMap {
     }
 
     id
+  }
+
+  pub fn set_synthetic_module_exports<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    specifier: &str,
+    exports_obj: v8::Local<'s, v8::Object>,
+  ) -> Result<bool, CoreError> {
+    let Some(module_id) = self.get_id(specifier, RequestedModuleType::None)
+    else {
+      return Ok(false);
+    };
+    let Some(module_handle) = self.get_handle(module_id) else {
+      return Ok(false);
+    };
+    let module = v8::Local::new(scope, module_handle);
+    if !module.is_synthetic_module() {
+      return Ok(false);
+    }
+    let property_names = exports_obj
+      .get_own_property_names(
+        scope,
+        v8::GetPropertyNamesArgsBuilder::new()
+          .mode(v8::KeyCollectionMode::OwnOnly)
+          .property_filter(v8::PropertyFilter::SKIP_SYMBOLS)
+          .key_conversion(v8::KeyConversionMode::ConvertToString)
+          .build(),
+      )
+      .ok_or_else(|| {
+        CoreError::from(JsErrorBox::generic(format!(
+          "failed to enumerate synthetic module export updates for {specifier}"
+        )))
+      })?;
+    for i in 0..property_names.length() {
+      let key_val = property_names.get_index(scope, i).unwrap();
+      let key_str = key_val.to_string(scope).unwrap();
+      let value = exports_obj.get(scope, key_val).unwrap();
+      if !module
+        .set_synthetic_module_export(scope, key_str, value)
+        .unwrap_or(false)
+      {
+        return Err(CoreError::from(JsErrorBox::generic(format!(
+          "failed to set synthetic module export {} for {specifier}",
+          key_str.to_rust_string_lossy(scope)
+        ))));
+      }
+    }
+    Ok(true)
   }
 
   /// Creates a "synthetic module", that contains only a single, "default" export.
@@ -2124,7 +2172,7 @@ impl ModuleMap {
     // `npm:` packages) skip their post-evaluate `perform_microtask_checkpoint`.
     // Draining microtasks while V8 is inside `module.evaluate()` on an
     // async module graph leaves the evaluation promise permanently
-    // Pending — V8 advances AsyncModuleExecutionFulfilled for the resumed
+    // Pending -- V8 advances AsyncModuleExecutionFulfilled for the resumed
     // TLA dep but cannot then run `ExecuteModule` on the still-evaluating
     // parent.
     self.evaluating_top_level.set(true);
@@ -2456,7 +2504,7 @@ impl ModuleMap {
           self.dynamic_import_reject(scope, dyn_import_id, exception);
         }
         None => {
-          // Stream finished — the full module graph has been loaded.
+          // Stream finished -- the full module graph has been loaded.
           let state = self
             .dynamic_import_map
             .borrow()
@@ -2512,7 +2560,7 @@ impl ModuleMap {
                 continue;
               };
 
-              // Get the deferred namespace — this triggers evaluation on
+              // Get the deferred namespace -- this triggers evaluation on
               // first property access.
               let module_namespace = Self::module_namespace_for_promise_resolve(
                 tc_scope,
@@ -3090,7 +3138,7 @@ impl ModuleMap {
   /// Load and evaluate a script on demand. The evaluated result is
   /// cached in `loaded_script_results` so later callers (the JS
   /// `Deno.core.loadExtScript()` op, the `synthetic_esm` dispatch, etc.)
-  /// share a single evaluation — the source is consumed on first eval,
+  /// share a single evaluation -- the source is consumed on first eval,
   /// and re-evaluating polyfill IIFEs would clobber registered hooks and
   /// duplicate class identities. Circular dependencies are detected and
   /// cause an error.
@@ -3175,7 +3223,7 @@ impl ModuleMap {
     // `(function () { ... })();`. Strip the trailing `;`/whitespace so the
     // whole source becomes the operand of a single `return ( ... )`. This
     // way the function we compile below returns the IIFE's exports object
-    // — the same value the original `Script::run` produced as the script's
+    // -- the same value the original `Script::run` produced as the script's
     // completion value.
     let source_text: &str = AsRef::<str>::as_ref(&source_str);
     // Some polyfills ship a leading `"use strict";` directive (transpiled
@@ -3188,7 +3236,7 @@ impl ModuleMap {
       expr_start.trim_end_matches(|c: char| c.is_whitespace() || c == ';');
     // Emit `"use strict";` at the head of the compile_function body so
     // the IIFE still runs in strict mode (function bodies default to
-    // sloppy, unlike modules — and these polyfills were strict before
+    // sloppy, unlike modules -- and these polyfills were strict before
     // being lazified, so we preserve that).
     let wrapped_source = format!("\"use strict\"; return ({trimmed});");
     let name = v8::String::new(scope, specifier).unwrap();
@@ -3275,7 +3323,7 @@ impl ModuleMap {
   /// Stash the snapshot-time `__bootstrap` view registered from JS via
   /// `op_set_captured_bootstrap`. `load_ext_script` injects this value as
   /// the `__bootstrap` parameter when invoking each lazy script's compiled
-  /// function — keeping the value off `globalThis` so user code never sees
+  /// function -- keeping the value off `globalThis` so user code never sees
   /// it.
   pub(crate) fn set_captured_bootstrap(&self, value: v8::Global<v8::Value>) {
     *self.data.borrow().captured_bootstrap.borrow_mut() = Some(value);
@@ -3285,19 +3333,19 @@ impl ModuleMap {
 /// Skip past a lazy-loaded script's leading prologue (line/block comments and
 /// directive prologue like `"use strict";`) and return a slice that starts at
 /// the IIFE's opening `(function`. Returns `None` if no such opener is found
-/// — callers fall back to using the original source unchanged.
+/// -- callers fall back to using the original source unchanged.
 fn strip_script_prologue(source: &str) -> Option<&str> {
   let mut rest = source;
   loop {
     let trimmed = rest.trim_start();
     if let Some(after) = trimmed.strip_prefix("//") {
-      // Line comment — skip to end of line.
+      // Line comment -- skip to end of line.
       let nl = after.find('\n').map(|i| i + 1).unwrap_or(after.len());
       rest = &after[nl..];
       continue;
     }
     if let Some(after) = trimmed.strip_prefix("/*") {
-      // Block comment — skip to closing `*/`.
+      // Block comment -- skip to closing `*/`.
       let end = after.find("*/").map(|i| i + 2).unwrap_or(after.len());
       rest = &after[end..];
       continue;

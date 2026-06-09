@@ -4,9 +4,10 @@
 
 import { core, internals, primordials } from "ext:core/mod.js";
 import {
-  op_fs_cwd,
   op_get_env_no_permission_check,
   op_import_sync,
+  op_import_sync_main,
+  op_import_sync_main_with_source,
   op_import_sync_with_source,
   op_module_default_resolve,
   op_module_hooks_poll_load,
@@ -38,6 +39,7 @@ import {
   op_require_resolve_lookup_paths,
   op_require_stat,
   op_require_try_self,
+  op_set_synthetic_module_exports,
   op_stream_base_register_state,
 } from "ext:core/ops";
 const {
@@ -903,8 +905,46 @@ function nodeErrorCodeFromError(error) {
   if (typeof error?.code === "string") {
     return error.code;
   }
+  const inferred = nodeErrorCodeFromResolverMessage(error);
+  if (inferred !== null) {
+    return inferred;
+  }
   const match = RegExpPrototypeExec(/\bERR_[A-Z0-9_]+\b/, String(error));
   return match?.[0] ?? null;
+}
+
+function nodeErrorCodeFromResolverMessage(error) {
+  const message = typeof error?.message === "string"
+    ? error.message
+    : String(error);
+  if (StringPrototypeStartsWith(message, "Invalid module ")) {
+    return "ERR_INVALID_MODULE_SPECIFIER";
+  }
+  if (StringPrototypeStartsWith(message, "Only URLs with a scheme in:")) {
+    return "ERR_UNSUPPORTED_ESM_URL_SCHEME";
+  }
+  return null;
+}
+
+function ensureNodeErrorCode(error) {
+  if (typeof error?.code === "string") {
+    return error;
+  }
+  const code = nodeErrorCodeFromResolverMessage(error);
+  if (
+    code !== null &&
+    (typeof error === "object" || typeof error === "function") &&
+    error !== null
+  ) {
+    ObjectDefineProperty(error, "code", {
+      __proto__: null,
+      value: code,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
+  }
+  return error;
 }
 
 function isBarePackageLikeSpecifier(specifier) {
@@ -947,12 +987,13 @@ function executeEsmResolveHookChain(specifier, context) {
         );
         return { url: resolved, shortCircuit: true };
       } catch (e) {
-        const code = nodeErrorCodeFromError(e);
+        const error = ensureNodeErrorCode(e);
+        const code = nodeErrorCodeFromError(error);
         if (
           isBarePackageLikeSpecifier(spec) ||
           (code !== null && code !== "ERR_MODULE_NOT_FOUND")
         ) {
-          throw e;
+          throw error;
         }
         // Last-ditch fallback so hooks can still observe purely synthetic
         // specifiers that Deno's resolver rejects (e.g. ad-hoc URLs invented
@@ -1244,6 +1285,32 @@ function tryFile(requestPath, isMain) {
   return finalizeModulePath(requestPath, isMain);
 }
 
+function createEsmNotFoundErr(request, path) {
+  // eslint-disable-next-line no-restricted-syntax
+  const err = new Error(`Cannot find module '${request}'`);
+  err.code = "MODULE_NOT_FOUND";
+  if (path) {
+    err.path = path;
+  }
+  return err;
+}
+
+function finalizeEsmResolution(resolved, parentPath, pkgPath, isMain) {
+  if (RegExpPrototypeTest(ENCODED_PATH_SEPARATOR_PATTERN, resolved)) {
+    throw new internalErrors.ERR_INVALID_MODULE_SPECIFIER(
+      resolved,
+      'must not include encoded "/" or "\\" characters',
+      parentPath,
+    );
+  }
+  const filename = op_require_as_file_path(resolved) ?? resolved;
+  const actual = tryFile(filename, isMain);
+  if (actual) {
+    return actual;
+  }
+  throw createEsmNotFoundErr(filename, pkgPath);
+}
+
 function tryPackage(requestPath, exts, isMain, originalPath) {
   const packageJsonPath = pathResolve(
     requestPath,
@@ -1518,6 +1585,7 @@ function resolveExports(
   parentPath,
   usesLocalNodeModulesDir,
   conditions,
+  isMain,
 ) {
   // The implementation's behavior is meant to mirror resolution in ESM.
   const [, name, expansion = ""] =
@@ -1526,16 +1594,28 @@ function resolveExports(
     return;
   }
 
-  const resolved = op_require_resolve_exports(
-    usesLocalNodeModulesDir,
-    modulesPath,
-    request,
-    name,
-    expansion,
-    parentPath ?? "",
-    conditions,
-  );
-  return resolved ? decodePackageExportsPath(resolved) : false;
+  let resolved;
+  try {
+    resolved = op_require_resolve_exports(
+      usesLocalNodeModulesDir,
+      modulesPath,
+      request,
+      name,
+      expansion,
+      parentPath ?? "",
+      conditions,
+    );
+  } catch (e) {
+    throw ensureNodeErrorCode(e);
+  }
+  return resolved
+    ? finalizeEsmResolution(
+      decodePackageExportsPath(resolved),
+      parentPath,
+      pathResolve(modulesPath, name),
+      isMain,
+    )
+    : false;
 }
 
 Module._findPath = function (request, paths, isMain, parentPath, conditions) {
@@ -1573,6 +1653,7 @@ Module._findPath = function (request, paths, isMain, parentPath, conditions) {
         parentPath,
         usesLocalNodeModulesDir,
         conditions,
+        isMain,
       );
       if (exportsResolved) {
         return exportsResolved;
@@ -1827,7 +1908,7 @@ Module._load = function (request, parent, isMain) {
         } else if (result.format === "json") {
           mod.exports = JSONParse(stripBOM(source));
         } else if (result.format === "module") {
-          loadESMFromCJS(mod, builtinFilename, source, true);
+          loadESMFromCJS(mod, builtinFilename, source, true, false);
         } else {
           mod._compile(source, builtinFilename, undefined, true);
         }
@@ -2109,12 +2190,22 @@ Module._resolveFilename = function (
 
   if (parent?.filename) {
     if (request[0] === "#") {
-      const maybeResolved = op_require_package_imports_resolve(
-        parent.filename,
-        request,
-      );
+      let maybeResolved;
+      try {
+        maybeResolved = op_require_package_imports_resolve(
+          parent.filename,
+          request,
+        );
+      } catch (e) {
+        throw ensureNodeErrorCode(e);
+      }
       if (maybeResolved) {
-        return maybeResolved;
+        return finalizeEsmResolution(
+          maybeResolved,
+          parent.filename,
+          parent.filename,
+          isMain,
+        );
       }
     }
   }
@@ -2126,10 +2217,16 @@ Module._resolveFilename = function (
     ? op_require_try_self(parentPath, request, conditions)
     : undefined;
   if (selfResolved) {
+    const filename = finalizeEsmResolution(
+      selfResolved,
+      parentPath,
+      parentPath,
+      isMain,
+    );
     const cacheKey = request + "\x00" +
       (paths.length === 1 ? paths[0] : ArrayPrototypeJoin(paths, "\x00"));
-    Module._pathCache[cacheKey] = selfResolved;
-    return selfResolved;
+    Module._pathCache[cacheKey] = filename;
+    return filename;
   }
 
   // Look up the filename first, since that's the cache key.
@@ -2198,7 +2295,7 @@ function trySelfParentPath(parent) {
     return parent.filename;
   }
   if (parent.id === "<repl>" || parent.id === "internal/preload") {
-    return op_fs_cwd();
+    return process.cwd();
   }
   return undefined;
 }
@@ -2273,7 +2370,7 @@ Module.prototype.load = function (filename) {
         const format = result.format;
         const source = loadHookSourceToString(result.source);
         if (format === "module") {
-          loadESMFromCJS(this, this.filename, source, true);
+          loadESMFromCJS(this, this.filename, source, true, isMainModule(this));
         } else if (format === "commonjs") {
           this._compile(source, this.filename, "commonjs");
         } else if (format === "json") {
@@ -2851,7 +2948,31 @@ function isEsmSyntaxError(error) {
       error.message,
       "Cannot use import statement outside a module",
     ) ||
-    StringPrototypeIncludes(error.message, "Unexpected token 'export'")
+    StringPrototypeIncludes(error.message, "Unexpected token 'export'") ||
+    StringPrototypeIncludes(
+      error.message,
+      "Cannot use 'import.meta' outside a module",
+    ) ||
+    StringPrototypeIncludes(
+      error.message,
+      "Identifier 'module' has already been declared",
+    ) ||
+    StringPrototypeIncludes(
+      error.message,
+      "Identifier 'exports' has already been declared",
+    ) ||
+    StringPrototypeIncludes(
+      error.message,
+      "Identifier 'require' has already been declared",
+    ) ||
+    StringPrototypeIncludes(
+      error.message,
+      "Identifier '__filename' has already been declared",
+    ) ||
+    StringPrototypeIncludes(
+      error.message,
+      "Identifier '__dirname' has already been declared",
+    )
   );
 }
 
@@ -2962,7 +3083,13 @@ Module.prototype._compile = function (
     format = resolvedFormat;
   }
   if (format === "module") {
-    return loadESMFromCJS(this, filename, content, useSourceImport);
+    return loadESMFromCJS(
+      this,
+      filename,
+      content,
+      useSourceImport,
+      isMainModule(this),
+    );
   }
 
   let compiledWrapper;
@@ -2974,7 +3101,7 @@ Module.prototype._compile = function (
       format !== "commonjs" && err instanceof SyntaxError &&
       (op_require_can_parse_as_esm(content) || isEsmSyntaxError(err))
     ) {
-      return loadESMFromCJS(this, filename, content, useSourceImport);
+      return loadESMFromCJS(this, filename, content, true, isMainModule(this));
     }
     throw err;
   }
@@ -3017,7 +3144,13 @@ Module._extensions[".js"] = function (module, filename) {
   ) {
     return loadMaybeCjs(module, filename);
   } else if (StringPrototypeEndsWith(filename, ".mts")) {
-    return loadESMFromCJS(module, filename);
+    return loadESMFromCJS(
+      module,
+      filename,
+      undefined,
+      false,
+      isMainModule(module),
+    );
   } else if (StringPrototypeEndsWith(filename, ".cts")) {
     return loadCjs(module, filename);
   } else {
@@ -3071,13 +3204,30 @@ function normalizeRequireESMThrownError(error) {
   return normalized;
 }
 
-function loadESMFromCJS(module, filename, code, sourceFromHook = false) {
+function isMainModule(module) {
+  return module === mainModule || module === process.mainModule ||
+    module.id === ".";
+}
+
+function loadESMFromCJS(
+  module,
+  filename,
+  code,
+  sourceFromHook = false,
+  main = isMainModule(module),
+) {
   const specifier = url.pathToFileURL(filename).toString();
   let namespace;
   try {
-    namespace = sourceFromHook && code !== undefined
-      ? op_import_sync_with_source(specifier, code)
-      : op_import_sync(specifier);
+    if (main) {
+      namespace = sourceFromHook && code !== undefined
+        ? op_import_sync_main_with_source(specifier, code)
+        : op_import_sync_main(specifier);
+    } else {
+      namespace = sourceFromHook && code !== undefined
+        ? op_import_sync_with_source(specifier, code)
+        : op_import_sync(specifier);
+    }
   } catch (e) {
     if (
       e instanceof Error &&
@@ -3476,7 +3626,26 @@ Module._initPaths = function () {
   Module.globalPaths = ArrayPrototypeSlice(modulePaths);
 };
 
-function syncBuiltinESMExports() {}
+const syncBuiltinESMExportsCallbacksSymbol = Symbol.for(
+  "deno.node.syncBuiltinESMExports.callbacks",
+);
+
+function syncRegisteredBuiltinESMExports() {
+  const callbacks = globalThis[syncBuiltinESMExportsCallbacksSymbol];
+  if (callbacks == null) {
+    return;
+  }
+  for (const callback of callbacks) {
+    callback();
+  }
+}
+
+function syncBuiltinESMExports() {
+  op_set_synthetic_module_exports("ext:deno_node/_events.mjs", {
+    defaultMaxListeners: events.defaultMaxListeners,
+  });
+  syncRegisteredBuiltinESMExports();
+}
 
 Module.syncBuiltinESMExports = syncBuiltinESMExports;
 
@@ -4189,7 +4358,7 @@ function resolveRegisterSpecifier(specifier, parentUrl, options) {
   } catch {
     return new URL(
       specifierString,
-      url.pathToFileURL(op_fs_cwd() + "/").href,
+      url.pathToFileURL(process.cwd() + "/").href,
     ).href;
   }
 }
@@ -4202,6 +4371,17 @@ function resolveRegisterSpecifier(specifier, parentUrl, options) {
 export function register(specifier, parentUrl, options) {
   const loaderUrl = resolveRegisterSpecifier(specifier, parentUrl, options);
   const namespace = op_import_sync(loaderUrl);
+  if (typeof namespace.initialize === "function") {
+    namespace.initialize(options?.data);
+  }
+  if (ArrayIsArray(options?.transferList)) {
+    for (let i = 0; i < options.transferList.length; i++) {
+      const transferable = options.transferList[i];
+      if (typeof transferable?.unref === "function") {
+        transferable.unref();
+      }
+    }
+  }
   const hooks = {};
   if (typeof namespace.resolve === "function") {
     hooks.resolve = namespace.resolve;

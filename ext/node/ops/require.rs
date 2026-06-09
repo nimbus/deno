@@ -52,6 +52,7 @@ use node_resolver::ResolutionMode;
 use node_resolver::UrlOrPath;
 use node_resolver::UrlOrPathRef;
 use node_resolver::cache::NodeResolutionThreadLocalCache;
+use node_resolver::errors::InvalidModuleSpecifierError;
 use node_resolver::errors::PackageJsonLoadError;
 use sys_traits::FsMetadataValue;
 
@@ -118,6 +119,10 @@ pub enum RequireErrorKind {
   PackageImportsResolve(
     #[from] node_resolver::errors::PackageImportsResolveError,
   ),
+  #[class(generic)]
+  #[properties(inherit)]
+  #[error(transparent)]
+  InvalidModuleSpecifier(#[from] InvalidModuleSpecifierError),
   #[class(generic)]
   #[properties(inherit)]
   #[error(transparent)]
@@ -597,7 +602,10 @@ pub fn op_require_try_self<
       conditions,
       NodeResolutionKind::Execution,
     )?;
-    Ok(Some(url_or_path_to_string(r)?))
+    Ok(Some(cjs_url_or_path_to_string(
+      r,
+      Some(parent_path.to_string()),
+    )?))
   } else {
     Ok(None)
   }
@@ -720,7 +728,14 @@ pub fn op_require_resolve_exports<
     conditions,
     NodeResolutionKind::Execution,
   )?;
-  Ok(Some(url_or_path_to_string(r)?))
+  Ok(Some(cjs_url_or_path_to_string(
+    r,
+    if parent_path.is_empty() {
+      None
+    } else {
+      Some(parent_path.to_string())
+    },
+  )?))
 }
 
 deno_error::js_error_wrapper!(
@@ -794,7 +809,10 @@ pub fn op_require_package_imports_resolve<
       ResolutionMode::Require,
       NodeResolutionKind::Execution,
     )?;
-    Ok(Some(url_or_path_to_string(url)?))
+    Ok(Some(cjs_url_or_path_to_string(
+      url,
+      Some(referrer_path.display().to_string()),
+    )?))
   } else {
     Ok(None)
   }
@@ -979,6 +997,39 @@ fn url_or_path_to_string(
   } else {
     Ok(url.to_string_lossy().into_owned())
   }
+}
+
+fn cjs_url_or_path_to_string(
+  url: UrlOrPath,
+  maybe_referrer: Option<String>,
+) -> Result<String, RequireError> {
+  let resolved = url_or_path_to_string(url)?;
+  if has_encoded_path_separator(&resolved) {
+    return Err(
+      RequireErrorKind::InvalidModuleSpecifier(InvalidModuleSpecifierError {
+        request: resolved,
+        reason: Cow::Borrowed(
+          "must not include encoded \"/\" or \"\\\" characters",
+        ),
+        maybe_referrer,
+      })
+      .into_box(),
+    );
+  }
+  Ok(resolved)
+}
+
+fn has_encoded_path_separator(text: &str) -> bool {
+  let text = text.as_bytes();
+  text.windows(3).any(|window| {
+    window[0] == b'%'
+      && window[1] == b'5'
+      && (window[2] == b'c' || window[2] == b'C')
+  }) || text.windows(3).any(|window| {
+    window[0] == b'%'
+      && window[1] == b'2'
+      && (window[2] == b'f' || window[2] == b'F')
+  })
 }
 
 #[cfg(test)]

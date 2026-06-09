@@ -44,6 +44,7 @@ use crate::errors::BrowserMapDisabledError;
 use crate::errors::DataUrlReferrerError;
 use crate::errors::FinalizeResolutionError;
 use crate::errors::InvalidModuleSpecifierError;
+use crate::errors::InvalidPackageConfigError;
 use crate::errors::InvalidPackageTargetError;
 use crate::errors::LegacyResolveError;
 use crate::errors::MissingPkgJsonError;
@@ -248,6 +249,12 @@ impl LocalUrlOrPath {
 /// declaration files and to prevent accidentally probing
 /// multiple times.
 struct MaybeTypesResolvedUrl(LocalUrlOrPath);
+
+enum PackageTargetResolved {
+  Resolved(MaybeTypesResolvedUrl),
+  Null,
+  Undefined,
+}
 
 /// Kind of method that resolution succeeded with.
 enum ResolvedMethod {
@@ -821,7 +828,7 @@ impl<
         errors::InvalidModuleSpecifierError {
           request: text.into_owned(),
           reason: Cow::Borrowed(
-            "must not include encoded \"/\" or \"\\\\\" characters",
+            "must not include encoded \"/\" or \"\\\" characters",
           ),
           maybe_referrer: maybe_referrer.map(|r| match r.path() {
             // in this case, prefer showing the path string
@@ -1354,7 +1361,13 @@ impl<
     conditions: &[Cow<'static, str>],
     resolution_kind: NodeResolutionKind,
   ) -> Result<MaybeTypesResolvedUrl, PackageImportsResolveError> {
-    if name == "#" || name.ends_with('/') {
+    let imports =
+      referrer_pkg_json.and_then(|pkg_json| pkg_json.imports.as_ref());
+    if name == "#"
+      || name.ends_with('/')
+      || name.starts_with("#/")
+        && !package_imports_has_root_slash_pattern(imports)
+    {
       let reason = "is not a valid internal imports specifier name";
       return Err(
         errors::InvalidModuleSpecifierError {
@@ -1422,8 +1435,9 @@ impl<
         .into(),
       );
     }
-    let invalid_segment_re =
-      lazy_regex::regex!(r"(^|\\|/)(\.\.?|node_modules)(\\|/|$)");
+    let invalid_segment_re = lazy_regex::regex!(
+      r"(?i)(^|\\|/)((\.|%2e)(\.|%2e)?|(n|%6e)(o|%6f)(d|%64)(e|%65)(_|%5f)(m|%6d)(o|%6f)(d|%64)(u|%75)(l|%6c)(e|%65)(s|%73))(\\|/|$)"
+    );
     let pattern_re = lazy_regex::regex!(r"\*");
     if !target.starts_with("./") {
       if internal && !target.starts_with("../") && !target.starts_with('/') {
@@ -1514,6 +1528,18 @@ impl<
         .into(),
       );
     }
+    if has_encoded_path_separator(target) {
+      return Err(
+        InvalidModuleSpecifierError {
+          request: target.to_string(),
+          reason: Cow::Borrowed(
+            "must not include encoded \"/\" or \"\\\" characters",
+          ),
+          maybe_referrer: maybe_referrer.map(to_specifier_display_string),
+        }
+        .into(),
+      );
+    }
     if invalid_segment_re.is_match(&target[2..]) {
       return Err(
         InvalidPackageTargetError {
@@ -1526,9 +1552,26 @@ impl<
         .into(),
       );
     }
-    let package_path = package_json_path.parent().unwrap();
-    let resolved_path = package_path.join(target).clean();
-    if !resolved_path.starts_with(package_path) {
+    let invalid_package_target = || -> PackageTargetResolveError {
+      InvalidPackageTargetError {
+        pkg_json_path: package_json_path.to_path_buf(),
+        sub_path: match_.to_string(),
+        target: target.to_string(),
+        is_import: internal,
+        maybe_referrer: maybe_referrer.map(|r| r.display()),
+      }
+      .into()
+    };
+    let package_json_url =
+      deno_path_util::url_from_file_path(package_json_path)
+        .map_err(|_| invalid_package_target())?;
+    let resolved_url = package_json_url
+      .join(target)
+      .map_err(|_| invalid_package_target())?;
+    let package_url = package_json_url
+      .join("./")
+      .map_err(|_| invalid_package_target())?;
+    if !resolved_url.as_str().starts_with(package_url.as_str()) {
       return Err(
         InvalidPackageTargetError {
           pkg_json_path: package_json_path.to_path_buf(),
@@ -1540,11 +1583,24 @@ impl<
         .into(),
       );
     }
-    let path = if subpath.is_empty() {
-      LocalPath {
-        path: resolved_path,
-        known_exists: false,
-      }
+    let resolved_url = if subpath.is_empty() {
+      resolved_url
+    } else if has_encoded_path_separator(subpath) {
+      let request = if pattern {
+        match_.replace('*', subpath)
+      } else {
+        format!("{match_}{subpath}")
+      };
+      return Err(
+        InvalidModuleSpecifierError {
+          request,
+          reason: Cow::Borrowed(
+            "must not include encoded \"/\" or \"\\\" characters",
+          ),
+          maybe_referrer: maybe_referrer.map(to_specifier_display_string),
+        }
+        .into(),
+      );
     } else if invalid_segment_re.is_match(subpath) {
       let request = if pattern {
         match_.replace('*', subpath)
@@ -1562,21 +1618,19 @@ impl<
         .into(),
       );
     } else if pattern {
-      let resolved_path_str = resolved_path.to_string_lossy();
-      let replaced =
-        replace_package_target_pattern(pattern_re, &resolved_path_str, subpath);
-      LocalPath {
-        path: PathBuf::from(replaced.as_ref()),
-        known_exists: false,
-      }
+      let replaced = replace_package_target_pattern(
+        pattern_re,
+        resolved_url.as_str(),
+        subpath,
+      );
+      Url::parse(replaced.as_ref()).map_err(|_| invalid_package_target())?
     } else {
-      LocalPath {
-        path: resolved_path.join(subpath).clean(),
-        known_exists: false,
-      }
+      resolved_url
+        .join(subpath)
+        .map_err(|_| invalid_package_target())?
     };
     Ok(self.maybe_resolve_types(
-      LocalUrlOrPath::Path(path),
+      LocalUrlOrPath::Url(resolved_url),
       maybe_referrer,
       resolution_mode,
       conditions,
@@ -1611,7 +1665,10 @@ impl<
       resolution_kind,
     );
     match result {
-      Ok(maybe_resolved) => Ok(maybe_resolved),
+      Ok(PackageTargetResolved::Resolved(resolved)) => Ok(Some(resolved)),
+      Ok(PackageTargetResolved::Null | PackageTargetResolved::Undefined) => {
+        Ok(None)
+      }
       Err(err) => {
         if resolution_kind.is_types()
           && err.code() == NodeJsErrorCode::ERR_TYPES_NOT_FOUND
@@ -1619,18 +1676,20 @@ impl<
         {
           // try resolving with just "types" conditions for when someone misconfigures
           // and puts the "types" condition in the wrong place
-          if let Ok(Some(resolved)) = self.resolve_package_target_inner(
-            package_json_path,
-            target,
-            subpath,
-            package_subpath,
-            maybe_referrer,
-            resolution_mode,
-            pattern,
-            internal,
-            TYPES_ONLY_CONDITIONS,
-            resolution_kind,
-          ) {
+          if let Ok(PackageTargetResolved::Resolved(resolved)) = self
+            .resolve_package_target_inner(
+              package_json_path,
+              target,
+              subpath,
+              package_subpath,
+              maybe_referrer,
+              resolution_mode,
+              pattern,
+              internal,
+              TYPES_ONLY_CONDITIONS,
+              resolution_kind,
+            )
+          {
             return Ok(Some(resolved));
           }
         }
@@ -1653,7 +1712,7 @@ impl<
     internal: bool,
     conditions: &[Cow<'static, str>],
     resolution_kind: NodeResolutionKind,
-  ) -> Result<Option<MaybeTypesResolvedUrl>, PackageTargetResolveError> {
+  ) -> Result<PackageTargetResolved, PackageTargetResolveError> {
     if let Some(target) = target.as_str() {
       let url_or_path = self.resolve_package_target_string(
         target,
@@ -1667,15 +1726,15 @@ impl<
         conditions,
         resolution_kind,
       )?;
-      return Ok(Some(url_or_path));
+      return Ok(PackageTargetResolved::Resolved(url_or_path));
     } else if let Some(target_arr) = target.as_array() {
       if target_arr.is_empty() {
-        return Ok(None);
+        return Ok(PackageTargetResolved::Null);
       }
 
       let mut last_error = None;
       for target_item in target_arr {
-        let resolved_result = self.resolve_package_target(
+        let resolved_result = self.resolve_package_target_inner(
           package_json_path,
           target_item,
           subpath,
@@ -1689,8 +1748,13 @@ impl<
         );
 
         match resolved_result {
-          Ok(Some(resolved)) => return Ok(Some(resolved)),
-          Ok(None) => {
+          Ok(PackageTargetResolved::Resolved(resolved)) => {
+            return Ok(PackageTargetResolved::Resolved(resolved));
+          }
+          Ok(PackageTargetResolved::Undefined) => {
+            continue;
+          }
+          Ok(PackageTargetResolved::Null) => {
             last_error = None;
             continue;
           }
@@ -1705,23 +1769,31 @@ impl<
         }
       }
       if last_error.is_none() {
-        return Ok(None);
+        return Ok(PackageTargetResolved::Null);
       }
       return Err(last_error.unwrap());
     } else if let Some(target_obj) = target.as_object() {
-      for (key, condition_target) in target_obj {
-        // TODO(bartlomieju): verify that keys are not numeric
-        // return Err(errors::err_invalid_package_config(
-        //   to_file_path_string(package_json_url),
-        //   Some(base.as_str().to_string()),
-        //   Some("\"exports\" cannot contain numeric property keys.".to_string()),
-        // ));
+      for key in target_obj.keys() {
+        if is_array_index(key) {
+          return Err(
+            InvalidPackageConfigError {
+              package_json_path: package_json_path.to_path_buf(),
+              maybe_referrer: maybe_referrer.map(|referrer| referrer.display()),
+              message: Some(
+                "\"exports\" cannot contain numeric property keys.".to_string(),
+              ),
+            }
+            .into(),
+          );
+        }
+      }
 
+      for (key, condition_target) in target_obj {
         if key == "default"
           || conditions.contains(&Cow::Borrowed(key))
           || resolution_kind.is_types() && self.matches_types_key(key)
         {
-          let resolved = self.resolve_package_target(
+          let resolved = self.resolve_package_target_inner(
             package_json_path,
             condition_target,
             subpath,
@@ -1734,14 +1806,22 @@ impl<
             resolution_kind,
           )?;
           match resolved {
-            Some(resolved) => return Ok(Some(resolved)),
-            None => {
+            PackageTargetResolved::Resolved(resolved) => {
+              return Ok(PackageTargetResolved::Resolved(resolved));
+            }
+            PackageTargetResolved::Null => {
+              return Ok(PackageTargetResolved::Null);
+            }
+            PackageTargetResolved::Undefined => {
               continue;
             }
           }
         }
       }
-    } else if !target.is_null() {
+      return Ok(PackageTargetResolved::Undefined);
+    } else if target.is_null() {
+      return Ok(PackageTargetResolved::Null);
+    } else {
       return Err(
         InvalidPackageTargetError {
           pkg_json_path: package_json_path.to_path_buf(),
@@ -1753,8 +1833,6 @@ impl<
         .into(),
       );
     }
-
-    Ok(None)
   }
 
   fn matches_types_key(&self, key: &str) -> bool {
@@ -2570,6 +2648,19 @@ fn resolve_pkg_json_import<'a>(
   }
 }
 
+fn package_imports_has_root_slash_pattern(
+  imports: Option<&Map<String, Value>>,
+) -> bool {
+  imports.is_some_and(|imports| imports.contains_key("#/*"))
+}
+
+fn is_array_index(key: &str) -> bool {
+  let Ok(value) = key.parse::<u32>() else {
+    return false;
+  };
+  value < u32::MAX && value.to_string() == key
+}
+
 /// Reads a file from disk and classifies it as a [`BinValue`] —
 /// `Executable` for native binaries, `JsFile` for JavaScript bin scripts
 /// (resolving through npx shims when applicable). Returns `None` if the
@@ -3248,6 +3339,34 @@ mod tests {
   }
 
   #[test]
+  fn test_package_exports_target_preserves_percent_encoded_space() {
+    let resolver = test_node_resolver();
+    let package_json_path =
+      PathBuf::from("/node_modules/encoded-space/package.json");
+    let package_exports = json!({
+      ".": "./sp%20ce.js"
+    });
+    let package_exports = package_exports.as_object().unwrap();
+
+    let resolved = resolver
+      .package_exports_resolve(
+        &package_json_path,
+        ".",
+        package_exports,
+        None,
+        ResolutionMode::Import,
+        resolver.condition_resolver.resolve(ResolutionMode::Import),
+        NodeResolutionKind::Execution,
+      )
+      .unwrap();
+
+    assert_eq!(
+      resolved.into_path().unwrap(),
+      PathBuf::from("/node_modules/encoded-space/sp ce.js")
+    );
+  }
+
+  #[test]
   fn test_resolve_bin_entry_value() {
     // should resolve the specified value
     {
@@ -3634,6 +3753,31 @@ mod tests {
 
     // The wildcard still has to match a non-empty segment.
     assert!(resolve_pkg_json_import(&pkg, "#").is_none());
+  }
+
+  #[test]
+  fn test_resolve_pkg_json_import_root_slash_wildcard() {
+    let pkg = build_package_json(serde_json::json!({
+      "name": "pkg",
+      "imports": {
+        "#/*": "./src/*.js",
+        "#/initialslash": "./test.js"
+      }
+    }));
+
+    let wildcard =
+      resolve_pkg_json_import(&pkg, "#/foo").expect("#/foo should match #/*");
+    assert_eq!(wildcard.package_sub_path, "#/*");
+    assert_eq!(wildcard.sub_path, "foo");
+    assert!(wildcard.is_pattern);
+
+    let exact = resolve_pkg_json_import(&pkg, "#/initialslash")
+      .expect("#/initialslash should match the exact mapping first");
+    assert_eq!(exact.package_sub_path, "#/initialslash");
+    assert_eq!(exact.sub_path, "");
+    assert!(!exact.is_pattern);
+
+    assert!(package_imports_has_root_slash_pattern(pkg.imports.as_ref()));
   }
 
   #[test]

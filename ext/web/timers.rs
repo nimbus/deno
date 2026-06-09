@@ -36,9 +36,16 @@ fn expose_time(duration: Duration, out: &mut [u8]) {
   }
 }
 
+fn ensure_start_time(state: &mut OpState) -> &StartTime {
+  if !state.has::<StartTime>() {
+    state.put(StartTime::default());
+  }
+  state.borrow::<StartTime>()
+}
+
 #[op2(fast)]
 pub fn op_now(state: &mut OpState, #[buffer] buf: &mut [u8]) {
-  let start_time = state.borrow::<StartTime>();
+  let start_time = ensure_start_time(state);
   let elapsed = start_time.elapsed();
   expose_time(elapsed, buf);
 }
@@ -47,7 +54,7 @@ pub fn op_now(state: &mut OpState, #[buffer] buf: &mut [u8]) {
 pub fn op_time_origin(state: &mut OpState, #[buffer] buf: &mut [u8]) {
   // https://w3c.github.io/hr-time/#dfn-estimated-monotonic-time-of-the-unix-epoch
   let wall_time = SystemTime::now();
-  let monotonic_time = state.borrow::<StartTime>().elapsed();
+  let monotonic_time = ensure_start_time(state).elapsed();
   let epoch = wall_time.duration_since(UNIX_EPOCH).unwrap() - monotonic_time;
   expose_time(epoch, buf);
 }

@@ -193,7 +193,7 @@ pub(crate) fn externalize_sources(
   const INIT_VALUE: MaybeUninit<[usize; 3]> =
     MaybeUninit::<[usize; 3]>::uninit();
   // Size to match the actual iteration (`js + esm + lazy_esm`). `LoadedSources::len`
-  // also counts `lazy_loaded_js`, which are *not* externalized here — counting them
+  // also counts `lazy_loaded_js`, which are *not* externalized here -- counting them
   // leaves trailing uninitialized slots that later flow into V8's external_references
   // list and shift snapshot indices, causing miscompilation of JIT'd code that
   // references those entries.
@@ -1234,7 +1234,7 @@ fn import_meta_resolve(
   let import_meta_resolve_result = {
     let loader = loader.borrow();
     let loader = loader.as_ref();
-    loader.import_meta_resolve(&specifier_str, &referrer)
+    loader.import_meta_resolve_with_scope(scope, &specifier_str, &referrer)
   };
 
   match import_meta_resolve_result {
@@ -1318,6 +1318,7 @@ fn throw_dynamic_import_promise_error<'s, 'i>(
   name: &str,
   message: v8::Local<'s, v8::String>,
   code_value: Option<v8::Local<'s, v8::String>>,
+  url_value: Option<v8::Local<'s, v8::String>>,
 ) {
   let exception = match name {
     deno_error::builtin_classes::RANGE_ERROR => {
@@ -1334,10 +1335,20 @@ fn throw_dynamic_import_promise_error<'s, 'i>(
     }
     _ => v8::Exception::error(scope, message),
   };
-  if let Some(code_value) = code_value {
-    let code_key = CODE.v8_string(scope).unwrap();
+  if code_value.is_some() || url_value.is_some() {
     let exception_obj = exception.to_object(scope).unwrap();
-    exception_obj.set(scope, code_key.into(), code_value.into());
+    if let Some(code_value) = code_value {
+      let code_key = CODE.v8_string(scope).unwrap();
+      exception_obj.set(scope, code_key.into(), code_value.into());
+    }
+    if let Some(url_value) = url_value {
+      let url_key = URL.v8_string(scope).unwrap();
+      exception_obj.create_data_property(
+        scope,
+        url_key.into(),
+        url_value.into(),
+      );
+    }
   }
   scope.throw_exception(exception);
 }
@@ -1358,7 +1369,7 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
       maybe_node_esm_scope_reference_message(scope, arg, &name)
     {
       let message = v8::String::new(scope, &message).unwrap();
-      throw_dynamic_import_promise_error(scope, &name, message, None);
+      throw_dynamic_import_promise_error(scope, &name, message, None, None);
       return;
     }
     if !has_call_site(scope, arg) {
@@ -1368,6 +1379,15 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
       let code_value = arg
         .get(scope, code_key.into())
         .and_then(|code| code.try_into().ok());
+      let url_key = URL.v8_string(scope).unwrap();
+      let url_value =
+        if arg.has_own_property(scope, url_key.into()).unwrap_or(false) {
+          arg
+            .get(scope, url_key.into())
+            .and_then(|url| url.try_into().ok())
+        } else {
+          None
+        };
       let message_key = MESSAGE.v8_string(scope).unwrap();
       let message = arg.get(scope, message_key.into()).unwrap();
       let mut message: v8::Local<v8::String> = message.try_into().unwrap();
@@ -1385,6 +1405,7 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
         &name,
         message,
         Some(code_value),
+        url_value,
       );
       return;
     }

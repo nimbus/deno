@@ -25,6 +25,7 @@ use crate::io::AdaptiveBufferStrategy;
 use crate::io::BufMutView;
 use crate::io::BufView;
 use crate::io::ResourceId;
+use crate::modules::IntoModuleCodeString;
 use crate::modules::ModuleMap;
 use crate::modules::recursive_load::RecursiveModuleLoad;
 use crate::op2;
@@ -70,7 +71,10 @@ builtin_ops! {
   op_encode_binary_string,
   op_is_terminal,
   op_import_sync,
+  op_import_sync_main,
   op_import_sync_with_source,
+  op_import_sync_main_with_source,
+  op_set_synthetic_module_exports,
   ops_builtin_types::op_is_any_array_buffer,
   ops_builtin_types::op_is_arguments_object,
   ops_builtin_types::op_is_array_buffer,
@@ -531,23 +535,43 @@ async fn do_load_job<'s, 'i>(
   module_map_rc: Rc<ModuleMap>,
   specifier: &str,
   code: Option<String>,
+  main: bool,
 ) -> Result<ModuleId, CoreError> {
-  let root_id = RecursiveModuleLoad::side(
-    specifier.to_string(),
-    module_map_rc.clone(),
-    crate::modules::SideModuleKind::Sync,
-    code,
-  )
-  .await?
-  .run_to_completion(|load, step| match step {
-    crate::modules::recursive_load::RegisterStep::Register {
-      request,
-      source,
-    } => load
-      .register_and_recurse(scope, request, source)
-      .map_err(|e| e.into_error(scope, false, false)),
-  })
-  .await?;
+  let load = if main {
+    if let Some(code) = code {
+      module_map_rc
+        .new_es_module(
+          scope,
+          true,
+          specifier.to_string().into(),
+          code.into_module_code(),
+          false,
+          None,
+        )
+        .map_err(|e| e.into_error(scope, false, false))?;
+    }
+    RecursiveModuleLoad::main(specifier.to_string(), module_map_rc.clone())
+      .await?
+  } else {
+    RecursiveModuleLoad::side(
+      specifier.to_string(),
+      module_map_rc.clone(),
+      crate::modules::SideModuleKind::Sync,
+      code,
+    )
+    .await?
+  };
+
+  let root_id = load
+    .run_to_completion(|load, step| match step {
+      crate::modules::recursive_load::RegisterStep::Register {
+        request,
+        source,
+      } => load
+        .register_and_recurse(scope, request, source)
+        .map_err(|e| e.into_error(scope, false, false)),
+    })
+    .await?;
 
   let module = module_map_rc
     .get_module(scope, root_id)
@@ -563,7 +587,7 @@ async fn do_load_job<'s, 'i>(
         })?;
     }
     v8::ModuleStatus::Instantiated => {
-      // Already instantiated — caller (op_import_sync) will evaluate.
+      // Already instantiated -- caller (op_import_sync) will evaluate.
     }
     v8::ModuleStatus::Instantiating | v8::ModuleStatus::Evaluating => {
       return Err(
@@ -661,11 +685,55 @@ fn wrap_module<'s, 'i>(
   Some(wrapper_module)
 }
 
-#[op2(reentrant)]
-fn op_import_sync<'s, 'i>(
+fn maybe_import_sync_node_esm_scope_message(
+  message: &str,
+) -> Option<&'static str> {
+  match message {
+    "require is not defined" => Some(
+      "require is not defined in ES module scope, you can use import instead",
+    ),
+    "exports is not defined" => {
+      Some("exports is not defined in ES module scope")
+    }
+    "module is not defined" => Some("module is not defined in ES module scope"),
+    _ => None,
+  }
+}
+
+fn normalize_import_sync_node_esm_scope_error(error: CoreError) -> CoreError {
+  let CoreError(error_kind) = error;
+  let mut js_error = match *error_kind {
+    CoreErrorKind::Js(js_error) => js_error,
+    error_kind => return error_kind.into_box(),
+  };
+  if js_error.name.as_deref()
+    != Some(deno_error::builtin_classes::REFERENCE_ERROR)
+  {
+    return CoreErrorKind::Js(js_error).into_box();
+  }
+  let Some(old_message) = js_error.message.clone() else {
+    return CoreErrorKind::Js(js_error).into_box();
+  };
+  let Some(new_message) =
+    maybe_import_sync_node_esm_scope_message(&old_message)
+  else {
+    return CoreErrorKind::Js(js_error).into_box();
+  };
+  js_error.message = Some(new_message.to_string());
+  js_error.exception_message = js_error
+    .exception_message
+    .replace(&old_message, new_message);
+  if let Some(stack) = &mut js_error.stack {
+    *stack = stack.replace(&old_message, new_message);
+  }
+  CoreErrorKind::Js(js_error).into_box()
+}
+
+fn import_sync<'s, 'i>(
   scope: &mut v8::PinScope<'s, 'i>,
-  #[string] specifier: &str,
-  #[string] code: Option<String>,
+  specifier: &str,
+  code: Option<String>,
+  main: bool,
 ) -> Result<v8::Local<'s, v8::Value>, CoreError> {
   let module_map_rc = JsRealm::module_map_from(scope);
 
@@ -675,6 +743,7 @@ fn op_import_sync<'s, 'i>(
     module_map_rc.clone(),
     specifier,
     code,
+    main,
   ))?;
 
   // Check for re-entrant require() cycle: if this module is already on
@@ -721,7 +790,9 @@ fn op_import_sync<'s, 'i>(
         .import_sync_eval_stack
         .borrow_mut()
         .push(module_id);
-      let result = module_map_rc.mod_evaluate_sync(scope, module_id);
+      let result = module_map_rc
+        .mod_evaluate_sync(scope, module_id)
+        .map_err(normalize_import_sync_node_esm_scope_error);
       module_map_rc.import_sync_eval_stack.borrow_mut().pop();
       result?;
     }
@@ -729,15 +800,14 @@ fn op_import_sync<'s, 'i>(
       // OK
     }
     v8::ModuleStatus::Errored => {
-      return Err(
-        CoreErrorKind::Js(exception_to_err(
-          scope,
-          module.get_exception(),
-          false,
-          false,
-        ))
-        .into_box(),
-      );
+      let error = CoreErrorKind::Js(exception_to_err(
+        scope,
+        module.get_exception(),
+        false,
+        false,
+      ))
+      .into_box();
+      return Err(normalize_import_sync_node_esm_scope_error(error));
     }
   }
 
@@ -762,6 +832,24 @@ fn op_import_sync<'s, 'i>(
   }
 }
 
+#[op2(reentrant)]
+fn op_import_sync<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  #[string] specifier: &str,
+  #[string] code: Option<String>,
+) -> Result<v8::Local<'s, v8::Value>, CoreError> {
+  import_sync(scope, specifier, code, false)
+}
+
+#[op2(reentrant)]
+fn op_import_sync_main<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  #[string] specifier: &str,
+  #[string] code: Option<String>,
+) -> Result<v8::Local<'s, v8::Value>, CoreError> {
+  import_sync(scope, specifier, code, true)
+}
+
 /// Like `op_import_sync`, but when `code` is provided, compiles the source
 /// directly under the given specifier URL instead of going through the module
 /// loader. This ensures hook-provided source is used even if the module is
@@ -772,50 +860,26 @@ fn op_import_sync_with_source<'s, 'i>(
   #[string] specifier: &str,
   #[string] code: String,
 ) -> Result<v8::Local<'s, v8::Value>, CoreError> {
-  let module_map_rc = JsRealm::module_map_from(scope);
+  import_sync(scope, specifier, Some(code), false)
+}
 
-  let module_id = module_map_rc
-    .new_module_from_js_source(
-      scope,
-      false,
-      crate::modules::ModuleType::JavaScript,
-      crate::modules::ModuleName::from(specifier.to_string()),
-      crate::modules::ModuleCodeString::from(code),
-      false,
-      None,
-    )
-    .map_err(|e| e.into_error(scope, false, false))?;
+/// Like `op_import_sync_main`, but uses caller-provided source for the main
+/// module instead of fetching it through the module loader.
+#[op2(reentrant)]
+fn op_import_sync_main_with_source<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  #[string] specifier: &str,
+  #[string] code: String,
+) -> Result<v8::Local<'s, v8::Value>, CoreError> {
+  import_sync(scope, specifier, Some(code), true)
+}
 
-  module_map_rc
-    .instantiate_module(scope, module_id)
-    .map_err(|e| {
-      let exception = v8::Local::new(scope, e);
-      CoreErrorKind::Js(exception_to_err(scope, exception, false, false))
-        .into_box()
-    })?;
-
-  module_map_rc.mod_evaluate_sync(scope, module_id)?;
-
-  let module = module_map_rc
-    .get_module(scope, module_id)
-    .expect("Module must exist");
-
-  let namespace = module.get_module_namespace().cast::<v8::Object>();
-
-  v8::tc_scope!(let scope, scope);
-
-  let default = v8_static_strings::DEFAULT.v8_string(scope).unwrap();
-  let es_module = v8_static_strings::ESMODULE.v8_string(scope).unwrap();
-  if namespace.has_own_property(scope, default.into()) == Some(true)
-    && namespace.has_own_property(scope, es_module.into()) == Some(false)
-  {
-    let Some(module) = wrap_module(scope, module) else {
-      let exception = scope.exception().unwrap();
-      return exception_to_err_result(scope, exception, false, false)
-        .map_err(|e| CoreErrorKind::Js(e).into_box());
-    };
-    Ok(v8::Local::new(scope, module.get_module_namespace()))
-  } else {
-    Ok(v8::Local::new(scope, namespace).into())
-  }
+#[op2(fast)]
+fn op_set_synthetic_module_exports<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  #[string] specifier: &str,
+  exports: v8::Local<'s, v8::Object>,
+) -> Result<bool, CoreError> {
+  JsRealm::module_map_from(scope)
+    .set_synthetic_module_exports(scope, specifier, exports)
 }
