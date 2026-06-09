@@ -502,6 +502,12 @@ const kProceed = Symbol("proceed");
 const kRemoteSettings = Symbol("remote-settings");
 const kRequestAsyncResource = Symbol("requestAsyncResource");
 const kSentHeaders = Symbol("sent-headers");
+const kClientStreamCreatedDiagnosticsPublished = Symbol(
+  "client-stream-created-diagnostics-published",
+);
+const kClientStreamStartDiagnosticsPublished = Symbol(
+  "client-stream-start-diagnostics-published",
+);
 // Tracks whether the server-side 'stream' event has fired for this stream.
 // Used by onStreamClose to defer destroy/close work when nghttp2 closes a
 // stream in the same mem_recv batch that created it (e.g. peer flow-control
@@ -1279,7 +1285,11 @@ function requestOnConnect(headersList, options) {
   // HEADERS together in priority order; settings frames come out
   // first, matching Node's libuv-driven write sequence.
   setImmediate(scheduleSendPending, session);
-  if (onClientStreamStartChannel.hasSubscribers) {
+  if (
+    onClientStreamStartChannel.hasSubscribers &&
+    !this[kClientStreamStartDiagnosticsPublished]
+  ) {
+    this[kClientStreamStartDiagnosticsPublished] = true;
     onClientStreamStartChannel.publish({
       stream: this,
       headers: this.sentHeaders,
@@ -1531,17 +1541,11 @@ function onSessionHeaders(
     } else {
       // eslint-disable-next-line no-use-before-define
       stream = new ClientHttp2Stream(session, handle, id, {});
-      if (onClientStreamCreatedChannel.hasSubscribers) {
-        onClientStreamCreatedChannel.publish({
-          stream,
-          headers: obj,
-        });
-      }
-      if (onClientStreamStartChannel.hasSubscribers) {
-        onClientStreamStartChannel.publish({
-          stream,
-          headers: obj,
-        });
+      if (
+        onClientStreamCreatedChannel.hasSubscribers ||
+        onClientStreamStartChannel.hasSubscribers
+      ) {
+        process.nextTick(publishClientStreamLifecycleDiagnostics, stream, obj);
       }
       if (endOfStream) {
         // deno-lint-ignore prefer-primordials
@@ -1613,6 +1617,21 @@ function onSessionHeaders(
   if (endOfStream) {
     // deno-lint-ignore prefer-primordials
     stream.push(null);
+  }
+}
+
+function publishClientStreamLifecycleDiagnostics(stream, headers) {
+  if (onClientStreamCreatedChannel.hasSubscribers) {
+    onClientStreamCreatedChannel.publish({
+      stream,
+      headers,
+    });
+  }
+  if (onClientStreamStartChannel.hasSubscribers) {
+    onClientStreamStartChannel.publish({
+      stream,
+      headers,
+    });
   }
 }
 
@@ -4606,6 +4625,13 @@ class ClientHttp2Session extends Http2Session {
       headersList,
       options,
     );
+    if (onClientStreamCreatedChannel.hasSubscribers) {
+      stream[kClientStreamCreatedDiagnosticsPublished] = true;
+      onClientStreamCreatedChannel.publish({
+        stream,
+        headers: stream.sentHeaders,
+      });
+    }
     if (this.connecting) {
       if (this[kPendingRequestCalls] !== null) {
         ArrayPrototypePush(this[kPendingRequestCalls], onConnect);
@@ -4620,8 +4646,19 @@ class ClientHttp2Session extends Http2Session {
       onConnect();
     }
 
-    if (onClientStreamCreatedChannel.hasSubscribers) {
+    if (
+      onClientStreamCreatedChannel.hasSubscribers &&
+      !stream[kClientStreamCreatedDiagnosticsPublished]
+    ) {
+      stream[kClientStreamCreatedDiagnosticsPublished] = true;
       onClientStreamCreatedChannel.publish({
+        stream,
+        headers: stream.sentHeaders,
+      });
+    }
+    if (onClientStreamStartChannel.hasSubscribers) {
+      stream[kClientStreamStartDiagnosticsPublished] = true;
+      onClientStreamStartChannel.publish({
         stream,
         headers: stream.sentHeaders,
       });

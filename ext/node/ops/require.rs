@@ -7,12 +7,38 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use boxed_error::Boxed;
+use deno_ast::EmitOptions;
+use deno_ast::MediaType;
+use deno_ast::ParseParams;
+use deno_ast::ProgramRef;
+use deno_ast::SourceMap;
+use deno_ast::SourceMapOption;
+use deno_ast::swc::ast::ArrowExpr;
+use deno_ast::swc::ast::BindingIdent;
+use deno_ast::swc::ast::BlockStmtOrExpr;
+use deno_ast::swc::ast::CallExpr;
+use deno_ast::swc::ast::Callee;
+use deno_ast::swc::ast::Expr;
+use deno_ast::swc::ast::ExprOrSpread;
+use deno_ast::swc::ast::Ident;
+use deno_ast::swc::ast::IdentName;
+use deno_ast::swc::ast::Import;
+use deno_ast::swc::ast::Lit;
+use deno_ast::swc::ast::MemberExpr;
+use deno_ast::swc::ast::MemberProp;
+use deno_ast::swc::ast::Pat;
+use deno_ast::swc::ast::Program;
+use deno_ast::swc::ast::Str;
+use deno_ast::swc::common::DUMMY_SP;
+use deno_ast::swc::common::SyntaxContext;
+use deno_ast::swc::common::comments::NoopComments;
+use deno_ast::swc::ecma_visit::VisitMut;
+use deno_ast::swc::ecma_visit::VisitMutWith;
 use deno_core::FastString;
 use deno_core::JsRuntimeInspector;
 use deno_core::OpState;
 use deno_core::op2;
 use deno_core::url::Url;
-use deno_core::v8;
 use deno_error::JsErrorBox;
 use deno_package_json::PackageJsonRc;
 use deno_path_util::normalize_path;
@@ -781,29 +807,168 @@ pub fn op_require_break_on_next_statement(state: Rc<RefCell<OpState>>) {
 }
 
 #[op2(fast)]
-pub fn op_require_can_parse_as_esm(
-  scope: &mut v8::PinScope<'_, '_>,
-  #[string] source: &str,
-) -> bool {
-  v8::tc_scope!(scope, scope);
-  let Some(source) = v8::String::new(scope, source) else {
+pub fn op_require_can_parse_as_esm(#[string] source: &str) -> bool {
+  require_can_parse_as_esm_source(source)
+}
+
+fn require_can_parse_as_esm_source(source: &str) -> bool {
+  let Ok(specifier) = Url::parse("file:///require-esm-syntax-probe.js") else {
     return false;
   };
-  let origin = v8::ScriptOrigin::new(
-    scope,
-    source.into(),
-    0,
-    0,
-    false,
-    0,
-    None,
-    true,
-    false,
-    true,
-    None,
-  );
-  let mut source = v8::script_compiler::Source::new(source, Some(&origin));
-  v8::script_compiler::compile_module(scope, &mut source).is_some()
+  deno_ast::parse_program(ParseParams {
+    specifier,
+    text: source.to_owned().into(),
+    media_type: MediaType::JavaScript,
+    capture_tokens: false,
+    scope_analysis: false,
+    maybe_syntax: None,
+  })
+  .is_ok_and(|parsed| !parsed.compute_is_script())
+}
+
+#[op2]
+#[string]
+pub fn op_require_trace_dynamic_imports(
+  #[string] parent_url: &str,
+  #[string] source: &str,
+) -> Option<String> {
+  trace_dynamic_imports_source(parent_url, source)
+}
+
+fn trace_dynamic_imports_source(
+  parent_url: &str,
+  source: &str,
+) -> Option<String> {
+  if !source.contains("import") {
+    return None;
+  }
+
+  let Ok(specifier) = Url::parse(parent_url) else {
+    return None;
+  };
+  let parsed = deno_ast::parse_program(ParseParams {
+    specifier: specifier.clone(),
+    text: source.to_owned().into(),
+    media_type: MediaType::JavaScript,
+    capture_tokens: false,
+    scope_analysis: false,
+    maybe_syntax: None,
+  })
+  .ok()?;
+  let mut program = (*parsed.program()).clone();
+  let mut rewriter = DynamicImportTracingRewriter {
+    parent_url: parent_url.to_string(),
+    rewritten: false,
+  };
+  program.visit_mut_with(&mut rewriter);
+  if !rewriter.rewritten {
+    return None;
+  }
+
+  let source_map = SourceMap::single(specifier, source.to_string());
+  let program_ref = match &program {
+    Program::Module(module) => ProgramRef::Module(module),
+    Program::Script(script) => ProgramRef::Script(script),
+  };
+  deno_ast::emit(
+    program_ref,
+    &NoopComments,
+    &source_map,
+    &EmitOptions {
+      source_map: SourceMapOption::None,
+      ..Default::default()
+    },
+  )
+  .ok()
+  .map(|emitted| emitted.text)
+}
+
+struct DynamicImportTracingRewriter {
+  parent_url: String,
+  rewritten: bool,
+}
+
+impl VisitMut for DynamicImportTracingRewriter {
+  fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
+    call.visit_mut_children_with(self);
+
+    let import_token = match &call.callee {
+      Callee::Import(import_token) => *import_token,
+      _ => return,
+    };
+    let original_args = std::mem::take(&mut call.args);
+    let loader = dynamic_import_loader(import_token, original_args.len());
+
+    let mut traced_args = Vec::with_capacity(original_args.len() + 2);
+    traced_args.push(string_arg(&self.parent_url));
+    traced_args.push(expr_arg(loader));
+    traced_args.extend(original_args);
+
+    call.callee =
+      Callee::Expr(Box::new(global_helper_expr("__denoNodeTraceModuleImport")));
+    call.args = traced_args;
+    call.type_args = None;
+    self.rewritten = true;
+  }
+}
+
+fn dynamic_import_loader(import_token: Import, arg_count: usize) -> Expr {
+  let identifiers: Vec<Ident> = (0..arg_count)
+    .map(|index| {
+      Ident::new_no_ctxt(format!("__denoNodeImportArg{index}").into(), DUMMY_SP)
+    })
+    .collect();
+  let params = identifiers
+    .iter()
+    .cloned()
+    .map(|id| Pat::Ident(BindingIdent { id, type_ann: None }))
+    .collect();
+  let import_args = identifiers
+    .into_iter()
+    .map(|id| expr_arg(Expr::Ident(id)))
+    .collect();
+  Expr::Arrow(ArrowExpr {
+    span: DUMMY_SP,
+    ctxt: SyntaxContext::empty(),
+    params,
+    body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Call(CallExpr {
+      span: DUMMY_SP,
+      ctxt: SyntaxContext::empty(),
+      callee: Callee::Import(import_token),
+      args: import_args,
+      type_args: None,
+    })))),
+    is_async: false,
+    is_generator: false,
+    type_params: None,
+    return_type: None,
+  })
+}
+
+fn global_helper_expr(name: &str) -> Expr {
+  Expr::Member(MemberExpr {
+    span: DUMMY_SP,
+    obj: Box::new(Expr::Ident(Ident::new_no_ctxt(
+      "globalThis".into(),
+      DUMMY_SP,
+    ))),
+    prop: MemberProp::Ident(IdentName::new(name.into(), DUMMY_SP)),
+  })
+}
+
+fn string_arg(value: &str) -> ExprOrSpread {
+  expr_arg(Expr::Lit(Lit::Str(Str {
+    span: DUMMY_SP,
+    value: value.into(),
+    raw: None,
+  })))
+}
+
+fn expr_arg(expr: Expr) -> ExprOrSpread {
+  ExprOrSpread {
+    spread: None,
+    expr: Box::new(expr),
+  }
 }
 
 fn url_or_path_to_string(
@@ -813,5 +978,60 @@ fn url_or_path_to_string(
     Ok(url.into_path()?.to_string_lossy().into_owned())
   } else {
     Ok(url.to_string_lossy().into_owned())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::require_can_parse_as_esm_source;
+  use super::trace_dynamic_imports_source;
+
+  #[test]
+  fn require_esm_probe_ignores_dynamic_import_expression() {
+    assert!(!require_can_parse_as_esm_source(
+      r#"const mod = import("node:fs"); module.exports = mod;"#,
+    ));
+  }
+
+  #[test]
+  fn require_esm_probe_detects_static_module_syntax() {
+    assert!(require_can_parse_as_esm_source(
+      r#"import fs from "node:fs"; export default fs;"#,
+    ));
+  }
+
+  #[test]
+  fn dynamic_import_trace_rewrite_wraps_import_expression() {
+    let rewritten = trace_dynamic_imports_source(
+      "file:///app/mod.cjs",
+      r#"const result = import("node:http");"#,
+    )
+    .expect("dynamic import should rewrite");
+
+    assert!(
+      rewritten.contains(
+        r#"globalThis.__denoNodeTraceModuleImport("file:///app/mod.cjs""#
+      ),
+      "rewritten source should call the tracing helper: {rewritten}"
+    );
+    assert!(
+      rewritten.contains("import(__denoNodeImportArg0)"),
+      "rewritten source should preserve a real dynamic import in the loader callback: {rewritten}"
+    );
+    assert!(
+      rewritten.contains("\"node:http\""),
+      "rewritten source should preserve the original specifier: {rewritten}"
+    );
+  }
+
+  #[test]
+  fn dynamic_import_trace_rewrite_leaves_unrelated_source_untouched() {
+    assert_eq!(
+      trace_dynamic_imports_source(
+        "file:///app/mod.cjs",
+        r#"module.exports = require("node:fs");"#,
+      ),
+      None
+    );
   }
 }

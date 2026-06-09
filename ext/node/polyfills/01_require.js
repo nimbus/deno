@@ -18,6 +18,7 @@ import {
   op_require_as_file_path,
   op_require_break_on_next_statement,
   op_require_can_parse_as_esm,
+  op_require_trace_dynamic_imports,
   op_require_init_paths,
   op_require_is_deno_dir_package,
   op_require_is_maybe_cjs,
@@ -2118,6 +2119,462 @@ Module.prototype.load = function (filename) {
 // Loads a module at the given file path. Returns that module's
 // `exports` property.
 const moduleRequireDc = diagnosticsChannel.tracingChannel("module.require");
+const moduleImportDc = diagnosticsChannel.tracingChannel("module.import");
+
+function traceDynamicModuleImport(parentURL, loader, ...args) {
+  if (!moduleImportDc.hasSubscribers) {
+    return loader(...args);
+  }
+
+  return moduleImportDc.tracePromise(() => loader(...args), {
+    __proto__: null,
+    parentURL,
+    url: args[0],
+  });
+}
+
+ObjectDefineProperty(globalThis, "__denoNodeTraceModuleImport", {
+  __proto__: null,
+  configurable: true,
+  writable: true,
+  value: traceDynamicModuleImport,
+});
+
+const lockRequestStartChannel = diagnosticsChannel.channel(
+  "locks.request.start",
+);
+const lockRequestGrantChannel = diagnosticsChannel.channel(
+  "locks.request.grant",
+);
+const lockRequestMissChannel = diagnosticsChannel.channel("locks.request.miss");
+const lockRequestEndChannel = diagnosticsChannel.channel("locks.request.end");
+const webLocksByName = new SafeMap();
+let webLockRequestId = 0;
+
+function webLockAbortError() {
+  if (typeof globalThis.DOMException === "function") {
+    return new globalThis.DOMException(
+      "The operation was aborted",
+      "AbortError",
+    );
+  }
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function webLockNotSupportedError(message) {
+  if (typeof globalThis.DOMException === "function") {
+    return new globalThis.DOMException(message, "NotSupportedError");
+  }
+  const error = new Error(message);
+  error.name = "NotSupportedError";
+  return error;
+}
+
+function publishWebLockStart(name, mode) {
+  if (lockRequestStartChannel.hasSubscribers) {
+    lockRequestStartChannel.publish({ name, mode });
+  }
+}
+
+function publishWebLockGrant(name, mode) {
+  if (lockRequestGrantChannel.hasSubscribers) {
+    lockRequestGrantChannel.publish({ name, mode });
+  }
+}
+
+function publishWebLockMiss(name, mode, ifAvailable) {
+  if (ifAvailable && lockRequestMissChannel.hasSubscribers) {
+    lockRequestMissChannel.publish({ name, mode });
+  }
+}
+
+function publishWebLockEnd(name, mode, ifAvailable, steal, error) {
+  if (lockRequestEndChannel.hasSubscribers) {
+    lockRequestEndChannel.publish({ name, mode, ifAvailable, steal, error });
+  }
+}
+
+class WebLock {
+  constructor(name, mode) {
+    this.name = name;
+    this.mode = mode;
+  }
+}
+
+function webLockStateForName(name) {
+  let state = webLocksByName.get(name);
+  if (state === undefined) {
+    state = { held: [], pending: [] };
+    webLocksByName.set(name, state);
+  }
+  return state;
+}
+
+function canGrantWebLock(state, mode) {
+  if (state.held.length === 0) {
+    return true;
+  }
+  return mode === "shared" &&
+    state.held.every((held) => held.mode === "shared");
+}
+
+function removeWebLockPending(state, entry) {
+  const index = state.pending.indexOf(entry);
+  if (index >= 0) {
+    state.pending.splice(index, 1);
+    return true;
+  }
+  return false;
+}
+
+function cleanupWebLockState(name, state) {
+  if (state.held.length === 0 && state.pending.length === 0) {
+    webLocksByName.delete(name);
+  }
+}
+
+function rejectWebLockEntry(entry, error) {
+  if (entry.done) {
+    return;
+  }
+  entry.done = true;
+  entry.cleanupSignal?.();
+  publishWebLockEnd(
+    entry.name,
+    entry.mode,
+    entry.ifAvailable,
+    entry.steal,
+    error,
+  );
+  entry.reject(error);
+}
+
+function releaseWebLockEntry(entry, error, processQueue = true) {
+  const state = webLockStateForName(entry.name);
+  const heldIndex = state.held.indexOf(entry);
+  if (heldIndex >= 0) {
+    state.held.splice(heldIndex, 1);
+  }
+  entry.cleanupSignal?.();
+  if (!entry.done) {
+    entry.done = true;
+    publishWebLockEnd(
+      entry.name,
+      entry.mode,
+      entry.ifAvailable,
+      entry.steal,
+      error,
+    );
+  }
+  if (processQueue) {
+    processWebLockQueue(entry.name);
+  }
+  cleanupWebLockState(entry.name, state);
+}
+
+function settleWebLockCallback(entry, lock) {
+  Promise.resolve()
+    .then(() => entry.callback(lock))
+    .then(
+      (result) => {
+        if (entry.stolen) {
+          return;
+        }
+        releaseWebLockEntry(entry, undefined);
+        entry.resolve(result);
+      },
+      (error) => {
+        if (entry.stolen) {
+          return;
+        }
+        releaseWebLockEntry(entry, error);
+        entry.reject(error);
+      },
+    );
+}
+
+function grantWebLockEntry(entry) {
+  const state = webLockStateForName(entry.name);
+  state.held.push(entry);
+  publishWebLockGrant(entry.name, entry.mode);
+  settleWebLockCallback(entry, new WebLock(entry.name, entry.mode));
+}
+
+function missWebLockEntry(entry) {
+  publishWebLockMiss(entry.name, entry.mode, entry.ifAvailable);
+  settleWebLockCallback(entry, null);
+}
+
+function stealWebLocks(name) {
+  const state = webLockStateForName(name);
+  for (const held of [...state.held]) {
+    held.stolen = true;
+    const error = webLockAbortError();
+    releaseWebLockEntry(held, error, false);
+    held.reject(error);
+  }
+  for (const pending of [...state.pending]) {
+    pending.stolen = true;
+    removeWebLockPending(state, pending);
+    rejectWebLockEntry(pending, webLockAbortError());
+  }
+}
+
+function processWebLockQueue(name) {
+  const state = webLockStateForName(name);
+  for (let index = 0; index < state.pending.length;) {
+    const entry = state.pending[index];
+    if (!canGrantWebLock(state, entry.mode)) {
+      break;
+    }
+    state.pending.splice(index, 1);
+    grantWebLockEntry(entry);
+    if (entry.mode === "exclusive") {
+      break;
+    }
+  }
+}
+
+class WebLockManager {
+  request(name, options, callback = undefined) {
+    return Promise.resolve().then(() => {
+      if (callback === undefined) {
+        callback = options;
+        options = undefined;
+      }
+      name = String(name);
+      if (typeof callback !== "function") {
+        throw new TypeError("The \"callback\" argument must be a function.");
+      }
+      if (options === undefined || typeof options === "function") {
+        options = {};
+      }
+      const mode = options.mode ?? "exclusive";
+      if (mode !== "exclusive" && mode !== "shared") {
+        throw new TypeError("Lock mode must be 'exclusive' or 'shared'.");
+      }
+      const ifAvailable = !!options.ifAvailable;
+      const steal = !!options.steal;
+      const signal = options.signal;
+      if (name[0] === "-") {
+        throw webLockNotSupportedError("Lock name may not start with hyphen");
+      }
+      if (ifAvailable && steal) {
+        throw webLockNotSupportedError(
+          "ifAvailable and steal are mutually exclusive",
+        );
+      }
+      if (steal && mode !== "exclusive") {
+        throw webLockNotSupportedError(
+          'mode: "shared" and steal are mutually exclusive',
+        );
+      }
+      if (signal && (steal || ifAvailable)) {
+        throw webLockNotSupportedError(
+          "signal cannot be used with steal or ifAvailable",
+        );
+      }
+      if (signal?.aborted) {
+        throw signal.reason ?? webLockAbortError();
+      }
+
+      return new Promise((resolve, reject) => {
+        const entry = {
+          callback,
+          clientId: `node-${webLockRequestId++}`,
+          cleanupSignal: undefined,
+          done: false,
+          ifAvailable,
+          mode,
+          name,
+          reject,
+          resolve,
+          signal,
+          steal,
+          stolen: false,
+        };
+        publishWebLockStart(name, mode);
+        if (signal) {
+          const abort = () => {
+            const state = webLockStateForName(name);
+            if (removeWebLockPending(state, entry)) {
+              rejectWebLockEntry(entry, signal.reason ?? webLockAbortError());
+              cleanupWebLockState(name, state);
+            }
+          };
+          signal.addEventListener("abort", abort, { once: true });
+          entry.cleanupSignal = () =>
+            signal.removeEventListener("abort", abort);
+        }
+
+        if (steal) {
+          stealWebLocks(name);
+        }
+
+        const state = webLockStateForName(name);
+        if (canGrantWebLock(state, mode)) {
+          grantWebLockEntry(entry);
+        } else if (ifAvailable) {
+          missWebLockEntry(entry);
+        } else {
+          state.pending.push(entry);
+        }
+      });
+    });
+  }
+
+  query() {
+    return Promise.resolve({
+      held: [...webLocksByName.values()].flatMap((state) =>
+        state.held.map((held) => ({
+          clientId: held.clientId,
+          mode: held.mode,
+          name: held.name,
+        }))
+      ),
+      pending: [...webLocksByName.values()].flatMap((state) =>
+        state.pending.map((pending) => ({
+          clientId: pending.clientId,
+          mode: pending.mode,
+          name: pending.name,
+        }))
+      ),
+    });
+  }
+}
+
+const webLockManager = new WebLockManager();
+
+function getNodeCompatNavigatorPlatform() {
+  const platform = globalThis.process?.platform ?? "unknown";
+  const arch = globalThis.process?.arch ?? "unknown";
+  if (platform === "darwin") {
+    return "MacIntel";
+  }
+  if (platform === "win32") {
+    return "Win32";
+  }
+  if (platform === "linux") {
+    if (arch === "ia32") {
+      return "Linux i686";
+    }
+    if (arch === "x64") {
+      return "Linux x86_64";
+    }
+    return `Linux ${arch}`;
+  }
+  if (platform === "freebsd") {
+    if (arch === "ia32") {
+      return "FreeBSD i386";
+    }
+    if (arch === "x64") {
+      return "FreeBSD amd64";
+    }
+    return `FreeBSD ${arch}`;
+  }
+  if (platform === "openbsd") {
+    if (arch === "ia32") {
+      return "OpenBSD i386";
+    }
+    if (arch === "x64") {
+      return "OpenBSD amd64";
+    }
+    return `OpenBSD ${arch}`;
+  }
+  if (platform === "sunos") {
+    if (arch === "ia32") {
+      return "SunOS i86pc";
+    }
+    return `SunOS ${arch}`;
+  }
+  if (platform === "aix") {
+    return "AIX";
+  }
+  return `${platform[0]?.toUpperCase() ?? "U"}${platform.slice(1)} ${arch}`;
+}
+
+function installNodeCompatNavigator() {
+  const existingNavigator = globalThis.navigator;
+  const navigatorObject = typeof existingNavigator === "object" &&
+      existingNavigator !== null
+    ? existingNavigator
+    : {};
+  if (!("locks" in navigatorObject)) {
+    ObjectDefineProperty(navigatorObject, "locks", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() {
+        return webLockManager;
+      },
+    });
+  }
+  if (!("hardwareConcurrency" in navigatorObject)) {
+    ObjectDefineProperty(navigatorObject, "hardwareConcurrency", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() {
+        return 1;
+      },
+    });
+  }
+  if (!("language" in navigatorObject)) {
+    ObjectDefineProperty(navigatorObject, "language", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() {
+        return "en-US";
+      },
+    });
+  }
+  if (!("languages" in navigatorObject)) {
+    ObjectDefineProperty(navigatorObject, "languages", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() {
+        return ["en-US"];
+      },
+    });
+  }
+  if (!("platform" in navigatorObject)) {
+    ObjectDefineProperty(navigatorObject, "platform", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() {
+        return getNodeCompatNavigatorPlatform();
+      },
+    });
+  }
+  if (!("userAgent" in navigatorObject)) {
+    ObjectDefineProperty(navigatorObject, "userAgent", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() {
+        const version = globalThis.process?.version ?? "v0.0.0";
+        const majorEnd = version.indexOf(".", 1);
+        return `Node.js/${version.slice(1, majorEnd < 0 ? undefined : majorEnd)}`;
+      },
+    });
+  }
+  if (existingNavigator !== navigatorObject) {
+    ObjectDefineProperty(globalThis, "navigator", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: navigatorObject,
+    });
+  }
+}
+
+installNodeCompatNavigator();
 
 Module.prototype.require = function (id) {
   if (typeof id !== "string") {
@@ -2227,6 +2684,13 @@ function requireEsmEnabled() {
   return getOptionValue("--experimental-require-module") !== false;
 }
 
+function traceCommonJsDynamicImports(filename, content) {
+  return op_require_trace_dynamic_imports(
+    url.pathToFileURL(filename).toString(),
+    content,
+  ) ?? content;
+}
+
 function wrapSafe(
   filename,
   content,
@@ -2256,7 +2720,8 @@ function wrapSafe(
         0,
         wrapperEnd.length - DEFAULT_CJS_WRAPPER_END.length,
       );
-      const patchedBody = `${prefix}${wrappedContent}${suffix}`;
+      const patchedBody =
+        `${prefix}${traceCommonJsDynamicImports(filename, wrappedContent)}${suffix}`;
       [f, err] = core.compileFunction(
         patchedBody,
         url.pathToFileURL(filename).toString(),
@@ -2271,14 +2736,14 @@ function wrapSafe(
       );
     } else {
       [f, err] = core.evalContext(
-        Module.wrap(content),
+        Module.wrap(traceCommonJsDynamicImports(filename, content)),
         url.pathToFileURL(filename).toString(),
         [format !== "module"],
       );
     }
   } else {
     [f, err] = core.compileFunction(
-      content,
+      traceCommonJsDynamicImports(filename, content),
       url.pathToFileURL(filename).toString(),
       [format !== "module"],
       [
