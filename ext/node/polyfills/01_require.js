@@ -61,6 +61,7 @@ const {
   ObjectKeys,
   ObjectPrototype,
   ObjectSetPrototypeOf,
+  PromisePrototypeThen,
   Proxy,
   ReflectSet,
   RegExpPrototypeExec,
@@ -83,6 +84,7 @@ const {
   StringPrototypeSlice,
   StringPrototypeSplit,
   StringPrototypeStartsWith,
+  StringPrototypeToLowerCase,
   SyntaxError,
   TypeError,
   decodeURIComponent,
@@ -682,11 +684,11 @@ function executeLoadHookChain(fileUrl, context) {
   if (loadHooks.length === 0) return null;
 
   let index = 0;
-  let currentContext = context;
+  let currentContext = addImportAssertionsAlias(context);
 
   function nextLoad(loadUrl, ctx) {
     if (ctx !== undefined && ctx !== null) {
-      currentContext = { ...currentContext, ...ctx };
+      currentContext = mergeLoaderHookContext(currentContext, ctx);
     }
 
     if (index >= loadHooks.length) {
@@ -695,6 +697,11 @@ function executeLoadHookChain(fileUrl, context) {
       if (StringPrototypeStartsWith(loadUrl, "node:")) {
         return { source: null, format: "builtin", shortCircuit: true };
       }
+      const dataUrlResult = defaultLoadDataUrl(
+        loadUrl,
+        currentContext?.format,
+      );
+      if (dataUrlResult !== null) return dataUrlResult;
       const filePath = StringPrototypeStartsWith(loadUrl, "file://")
         ? url.fileURLToPath(loadUrl)
         : loadUrl;
@@ -734,6 +741,141 @@ function executeLoadHookChain(fileUrl, context) {
   }
 
   return nextLoad(fileUrl, context);
+}
+
+function defaultLoadDataUrl(loadUrl, format) {
+  if (!StringPrototypeStartsWith(loadUrl, "data:")) return null;
+  const commaIndex = StringPrototypeIndexOf(loadUrl, ",");
+  if (commaIndex < 0) return null;
+  const mediaType = StringPrototypeSlice(loadUrl, 5, commaIndex);
+  const lowerMediaType = StringPrototypeToLowerCase(mediaType);
+  if (StringPrototypeIncludes(lowerMediaType, ";base64")) return null;
+  const encodedSource = StringPrototypeSlice(loadUrl, commaIndex + 1);
+  let source;
+  try {
+    source = decodeURIComponent(encodedSource);
+  } catch {
+    source = encodedSource;
+  }
+  const mimeType = StringPrototypeSplit(lowerMediaType, ";")[0] ?? "";
+  const inferredFormat = format ?? (
+    mimeType === "application/json"
+      ? "json"
+      : mimeType === "application/wasm"
+      ? "wasm"
+      : mimeType === "text/javascript" ||
+          mimeType === "application/javascript" ||
+          mimeType === "text/ecmascript" ||
+          mimeType === "application/ecmascript"
+      ? "module"
+      : undefined
+  );
+  return {
+    source,
+    format: inferredFormat,
+    shortCircuit: true,
+  };
+}
+
+function addImportAssertionsAlias(context) {
+  if (
+    context === null ||
+    (typeof context !== "object" && typeof context !== "function")
+  ) {
+    return context;
+  }
+  ObjectDefineProperty(context, "importAssertions", {
+    __proto__: null,
+    configurable: true,
+    enumerable: false,
+    get() {
+      emitImportAssertionsDeprecationWarning();
+      return context.importAttributes;
+    },
+    set(value) {
+      emitImportAssertionsDeprecationWarning();
+      context.importAttributes = value;
+    },
+  });
+  return context;
+}
+
+function mergeLoaderHookContext(currentContext, nextContext) {
+  const merged = { ...currentContext, ...nextContext };
+  if (
+    nextContext !== null &&
+    (typeof nextContext === "object" || typeof nextContext === "function") &&
+    ObjectHasOwn(nextContext, "importAssertions")
+  ) {
+    emitImportAssertionsDeprecationWarning();
+    if (!ObjectHasOwn(nextContext, "importAttributes")) {
+      merged.importAttributes = nextContext.importAssertions;
+    }
+  }
+  return addImportAssertionsAlias(merged);
+}
+
+function emitImportAssertionsDeprecationWarning() {
+  process.emitWarning(
+    "Use `importAttributes` instead of `importAssertions`",
+    "DeprecationWarning",
+  );
+}
+
+function importAttributesFromHookResult(result) {
+  if (
+    result === null ||
+    (typeof result !== "object" && typeof result !== "function")
+  ) {
+    return undefined;
+  }
+  if (ObjectHasOwn(result, "importAssertions")) {
+    emitImportAssertionsDeprecationWarning();
+    if (!ObjectHasOwn(result, "importAttributes")) {
+      return result.importAssertions;
+    }
+  }
+  return result.importAttributes;
+}
+
+function hookFormatFromAttributes(format, importAttributes) {
+  if (typeof format === "string") return format;
+  if (importAttributes?.type === "json") return "json";
+  return undefined;
+}
+
+function importAttributesFromRequestedType(requestedType) {
+  const importAttributes = { __proto__: null };
+  if (typeof requestedType === "string") {
+    importAttributes.type = requestedType;
+  }
+  return importAttributes;
+}
+
+function setEsmHookResolvedFormat(resolvedUrl, requestedType, format) {
+  let formatsByType = esmHookResolvedFormats.get(resolvedUrl);
+  if (formatsByType === undefined) {
+    formatsByType = new SafeMap();
+    esmHookResolvedFormats.set(resolvedUrl, formatsByType);
+  }
+  formatsByType.set(requestedType ?? null, format);
+}
+
+function deleteEsmHookResolvedFormat(resolvedUrl, requestedType) {
+  const formatsByType = esmHookResolvedFormats.get(resolvedUrl);
+  if (formatsByType === undefined) return;
+  formatsByType.delete(requestedType ?? null);
+  if (formatsByType.size === 0) esmHookResolvedFormats.delete(resolvedUrl);
+}
+
+function takeEsmHookResolvedFormat(resolvedUrl, requestedType) {
+  const formatsByType = esmHookResolvedFormats.get(resolvedUrl);
+  if (formatsByType === undefined) return undefined;
+  const key = requestedType ?? null;
+  const format = formatsByType.get(key);
+  formatsByType.delete(key);
+  if (formatsByType.size === 0) esmHookResolvedFormats.delete(resolvedUrl);
+  return format;
 }
 
 function isValidLoadHookSource(source, format) {
@@ -786,11 +928,11 @@ function executeEsmResolveHookChain(specifier, context) {
   if (resolveHooks.length === 0) return null;
 
   let index = 0;
-  let currentContext = context;
+  let currentContext = addImportAssertionsAlias(context);
 
   function nextResolve(spec, ctx) {
     if (ctx !== undefined && ctx !== null) {
-      currentContext = { ...currentContext, ...ctx };
+      currentContext = mergeLoaderHookContext(currentContext, ctx);
     }
     if (index >= resolveHooks.length) {
       if (StringPrototypeStartsWith(spec, "node:")) {
@@ -832,6 +974,16 @@ function executeEsmResolveHookChain(specifier, context) {
       return nextResolve(s, c);
     };
     const result = hook(spec, currentContext, wrappedNext);
+    if (!nextCalled && core.isPromise(result)) {
+      return PromisePrototypeThen(result, (resolved) => {
+        if (!resolved?.shortCircuit) {
+          throw new TypeError(
+            "resolve hook must return { shortCircuit: true } or call nextResolve",
+          );
+        }
+        return resolved;
+      });
+    }
     if (!nextCalled && !result?.shortCircuit) {
       throw new TypeError(
         "resolve hook must return { shortCircuit: true } or call nextResolve",
@@ -843,7 +995,24 @@ function executeEsmResolveHookChain(specifier, context) {
   return nextResolve(specifier, context);
 }
 
-function esmResolveHookCallback(specifier, referrer) {
+function finalizeEsmResolveHookResult(result, requestedType) {
+  const resolvedUrl = result?.url ?? null;
+  if (typeof resolvedUrl === "string") {
+    const importAttributes = importAttributesFromHookResult(result);
+    const resolvedFormat = hookFormatFromAttributes(
+      result?.format,
+      importAttributes,
+    );
+    if (typeof resolvedFormat === "string") {
+      setEsmHookResolvedFormat(resolvedUrl, requestedType, resolvedFormat);
+      return { url: resolvedUrl, format: resolvedFormat };
+    }
+    deleteEsmHookResolvedFormat(resolvedUrl, requestedType);
+  }
+  return resolvedUrl;
+}
+
+function esmResolveHookCallback(specifier, referrer, requestedType) {
   if (
     StringPrototypeStartsWith(specifier, "ext:") ||
     StringPrototypeStartsWith(referrer ?? "", "ext:")
@@ -853,17 +1022,18 @@ function esmResolveHookCallback(specifier, referrer) {
   const context = {
     parentURL: referrer || undefined,
     conditions: ["node", "import"],
-    importAttributes: { __proto__: null },
+    importAttributes: importAttributesFromRequestedType(requestedType),
   };
   try {
     const result = executeEsmResolveHookChain(specifier, context);
-    const resolvedUrl = result?.url ?? null;
-    if (typeof resolvedUrl === "string" && typeof result?.format === "string") {
-      esmHookResolvedFormats.set(resolvedUrl, result.format);
-    } else if (typeof resolvedUrl === "string") {
-      esmHookResolvedFormats.delete(resolvedUrl);
+    if (core.isPromise(result)) {
+      const finalized = PromisePrototypeThen(
+        result,
+        (resolved) => finalizeEsmResolveHookResult(resolved, requestedType),
+      );
+      return finalized;
     }
-    return resolvedUrl;
+    return finalizeEsmResolveHookResult(result, requestedType);
   } catch (e) {
     return { error: String(e), code: nodeErrorCodeFromError(e) };
   }
@@ -881,11 +1051,11 @@ function executeEsmLoadHookChain(fileUrl, context) {
   if (loadHooks.length === 0) return null;
 
   let index = 0;
-  let currentContext = context;
+  let currentContext = addImportAssertionsAlias(context);
 
   function nextLoad(loadUrl, ctx) {
     if (ctx !== undefined && ctx !== null) {
-      currentContext = { ...currentContext, ...ctx };
+      currentContext = mergeLoaderHookContext(currentContext, ctx);
     }
     if (index >= loadHooks.length) {
       // End of chain - perform default load so user hooks calling
@@ -893,6 +1063,11 @@ function executeEsmLoadHookChain(fileUrl, context) {
       if (StringPrototypeStartsWith(loadUrl, "node:")) {
         return { source: null, format: "builtin", shortCircuit: true };
       }
+      const dataUrlResult = defaultLoadDataUrl(
+        loadUrl,
+        currentContext?.format,
+      );
+      if (dataUrlResult !== null) return dataUrlResult;
       if (StringPrototypeStartsWith(loadUrl, "file://")) {
         try {
           const source = op_require_read_file(url.fileURLToPath(loadUrl));
@@ -920,6 +1095,16 @@ function executeEsmLoadHookChain(fileUrl, context) {
       return nextLoad(u, c);
     };
     const result = hook(loadUrl, currentContext, wrappedNext);
+    if (!nextCalled && core.isPromise(result)) {
+      return PromisePrototypeThen(result, (resolved) => {
+        if (!resolved?.shortCircuit) {
+          throw new TypeError(
+            "load hook must return { shortCircuit: true } or call nextLoad",
+          );
+        }
+        return resolved;
+      });
+    }
     if (!nextCalled && !result?.shortCircuit) {
       throw new TypeError(
         "load hook must return { shortCircuit: true } or call nextLoad",
@@ -940,20 +1125,19 @@ function _startEsmLoadLoop() {
       core.unrefOpPromise(pollPromise);
       const req = await pollPromise;
       if (req === null) break;
-      const [id, fileUrl] = req;
+      const [id, fileUrl, requestedType] = req;
       if (StringPrototypeStartsWith(fileUrl, "ext:")) {
         op_module_hooks_respond_load(id, null, null, null);
         continue;
       }
-      const resolvedFormat = esmHookResolvedFormats.get(fileUrl);
-      esmHookResolvedFormats.delete(fileUrl);
+      const resolvedFormat = takeEsmHookResolvedFormat(fileUrl, requestedType);
       const context = {
         format: resolvedFormat,
         conditions: ["node", "import"],
-        importAttributes: { __proto__: null },
+        importAttributes: importAttributesFromRequestedType(requestedType),
       };
       try {
-        const result = executeEsmLoadHookChain(fileUrl, context);
+        const result = await executeEsmLoadHookChain(fileUrl, context);
         if (result?.format === "builtin") {
           op_module_hooks_respond_load(id, null, "builtin", null);
         } else if (result !== null && result.source != null) {
@@ -3990,16 +4174,44 @@ export function stripTypeScriptTypes(code, options = undefined) {
 
 Module.stripTypeScriptTypes = stripTypeScriptTypes;
 
-/**
- * @param {string | URL} _specifier
- * @param {string | URL} _parentUrl
- * @param {{ parentURL: string | URL, data: any, transferList: any[] }} [_options]
- */
-export function register(_specifier, _parentUrl, _options) {
-  // TODO(@marvinhagemeister): Stub implementation for programs registering
-  // TypeScript loaders. We don't support registering loaders for file
-  // types that Deno itself doesn't support at the moment.
+function resolveRegisterSpecifier(specifier, parentUrl, options) {
+  if (specifier instanceof URL) return specifier.href;
+  const specifierString = String(specifier);
+  const base = options?.parentURL ?? parentUrl;
+  if (base !== undefined) {
+    return new URL(
+      specifierString,
+      base instanceof URL ? base.href : String(base),
+    ).href;
+  }
+  try {
+    return new URL(specifierString).href;
+  } catch {
+    return new URL(
+      specifierString,
+      url.pathToFileURL(op_fs_cwd() + "/").href,
+    ).href;
+  }
+}
 
+/**
+ * @param {string | URL} specifier
+ * @param {string | URL} parentUrl
+ * @param {{ parentURL: string | URL, data: any, transferList: any[] }} [options]
+ */
+export function register(specifier, parentUrl, options) {
+  const loaderUrl = resolveRegisterSpecifier(specifier, parentUrl, options);
+  const namespace = op_import_sync(loaderUrl);
+  const hooks = {};
+  if (typeof namespace.resolve === "function") {
+    hooks.resolve = namespace.resolve;
+  }
+  if (typeof namespace.load === "function") {
+    hooks.load = namespace.load;
+  }
+  if (hooks.resolve !== undefined || hooks.load !== undefined) {
+    registerHooks(hooks);
+  }
   return undefined;
 }
 

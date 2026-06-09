@@ -237,6 +237,17 @@ pub type CustomModuleEvaluationCb = Box<
   ) -> Result<CustomModuleEvaluationKind, deno_error::JsErrorBox>,
 >;
 
+/// Callback that can override the default export value for a JSON module.
+/// Embedders can use this to align JSON module identity with host module
+/// caches while preserving the native JSON module type.
+pub type JsonModuleEvaluationCb = Box<
+  dyn Fn(
+    &mut v8::PinScope,
+    &ModuleName,
+    v8::Global<v8::Value>,
+  ) -> Result<v8::Global<v8::Value>, deno_error::JsErrorBox>,
+>;
+
 /// A callback to get the code cache for a script.
 /// (specifier, code) -> ...
 pub type EvalContextGetCodeCacheCb = Box<

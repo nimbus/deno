@@ -290,7 +290,9 @@ fn raw_try_write_vectored(
   }
   let err = std::io::Error::last_os_error();
   match err.raw_os_error() {
-    Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => UV_EAGAIN,
+    Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => {
+      UV_EAGAIN
+    }
     _ => super::io_error_to_uv(&err),
   }
 }

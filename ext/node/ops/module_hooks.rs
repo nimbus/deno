@@ -8,7 +8,9 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::task::Waker;
 
+use deno_core::JsRuntime;
 use deno_core::OpState;
+use deno_core::RequestedModuleType;
 use deno_core::op2;
 use deno_core::v8;
 use deno_error::AdditionalProperties;
@@ -20,6 +22,7 @@ use deno_error::PropertyValue;
 struct PendingLoad {
   id: u32,
   url: String,
+  requested_module_type: RequestedModuleType,
 }
 
 /// Load hook result: (source, format). Format is e.g. "commonjs", "module".
@@ -88,11 +91,13 @@ pub struct LoaderHookRegistry {
   pending_loads: Rc<RefCell<VecDeque<PendingLoad>>>,
   load_waker: Rc<RefCell<Option<Waker>>>,
   load_senders: Rc<RefCell<HashMap<u32, LoadSender>>>,
-  /// Maps load request ID to URL for dedup tracking.
-  load_id_keys: Rc<RefCell<HashMap<u32, String>>>,
+  /// Maps load request ID to URL/request-type for dedup tracking.
+  load_id_keys: Rc<RefCell<HashMap<u32, (String, RequestedModuleType)>>>,
   /// Piggybacking senders for duplicate load requests.
-  load_waiters: Rc<RefCell<HashMap<String, Vec<LoadSender>>>>,
+  load_waiters:
+    Rc<RefCell<HashMap<(String, RequestedModuleType), Vec<LoadSender>>>>,
   default_resolve: Rc<RefCell<Option<DefaultResolveCb>>>,
+  resolved_formats: Rc<RefCell<HashMap<(String, RequestedModuleType), String>>>,
 }
 
 impl LoaderHookRegistry {
@@ -127,11 +132,24 @@ impl LoaderHookRegistry {
     }
   }
 
+  /// Return and clear the loader format that a resolve hook attached to `url`.
+  pub fn take_resolved_format(
+    &self,
+    url: &str,
+    requested_module_type: &RequestedModuleType,
+  ) -> Option<String> {
+    self
+      .resolved_formats
+      .borrow_mut()
+      .remove(&(url.to_string(), requested_module_type.clone()))
+  }
+
   pub fn resolve(
     &self,
     scope: &mut v8::PinScope,
     specifier: &str,
     referrer: &str,
+    requested_module_type: &RequestedModuleType,
   ) -> Result<Option<String>, JsErrorBox> {
     let callbacks = self.resolve_callback.borrow();
     let Some(callback) = callbacks.as_ref() else {
@@ -143,18 +161,30 @@ impl LoaderHookRegistry {
       .ok_or_else(|| JsErrorBox::generic("failed to allocate specifier"))?;
     let referrer = v8::String::new(scope, referrer)
       .ok_or_else(|| JsErrorBox::generic("failed to allocate referrer"))?;
-    let Some(result) =
-      callback.call(scope, recv, &[specifier.into(), referrer.into()])
-    else {
+    let requested_type = requested_module_type
+      .as_str()
+      .and_then(|ty| v8::String::new(scope, ty))
+      .map_or_else(|| v8::undefined(scope).into(), |ty| ty.into());
+    let Some(result) = callback.call(
+      scope,
+      recv,
+      &[specifier.into(), referrer.into(), requested_type],
+    ) else {
       return Err(JsErrorBox::generic("module resolve hook failed"));
     };
+    let result = settle_resolve_hook_result(scope, result)?;
     if result.is_null_or_undefined() {
       return Ok(None);
     }
     if result.is_string() {
       let result = v8::Local::<v8::String>::try_from(result)
         .map_err(|_| JsErrorBox::generic("module resolve hook failed"))?;
-      return Ok(Some(result.to_rust_string_lossy(scope)));
+      let url = result.to_rust_string_lossy(scope);
+      self
+        .resolved_formats
+        .borrow_mut()
+        .remove(&(url.clone(), requested_module_type.clone()));
+      return Ok(Some(url));
     }
     if let Ok(result) = v8::Local::<v8::Object>::try_from(result) {
       let error_key = v8::String::new(scope, "error")
@@ -177,6 +207,37 @@ impl LoaderHookRegistry {
           code,
         }));
       }
+
+      let url_key = v8::String::new(scope, "url")
+        .ok_or_else(|| JsErrorBox::generic("failed to allocate url key"))?;
+      if let Some(url) = result.get(scope, url_key.into())
+        && !url.is_null_or_undefined()
+      {
+        let url = url
+          .to_string(scope)
+          .ok_or_else(|| JsErrorBox::generic("module resolve hook failed"))?
+          .to_rust_string_lossy(scope);
+        let format_key = v8::String::new(scope, "format").ok_or_else(|| {
+          JsErrorBox::generic("failed to allocate format key")
+        })?;
+        let format = result
+          .get(scope, format_key.into())
+          .filter(|format| !format.is_null_or_undefined())
+          .and_then(|format| format.to_string(scope))
+          .map(|format| format.to_rust_string_lossy(scope));
+        if let Some(format) = format {
+          self
+            .resolved_formats
+            .borrow_mut()
+            .insert((url.clone(), requested_module_type.clone()), format);
+        } else {
+          self
+            .resolved_formats
+            .borrow_mut()
+            .remove(&(url.clone(), requested_module_type.clone()));
+        }
+        return Ok(Some(url));
+      }
     }
     Err(JsErrorBox::generic(
       "module resolve hook must return a string or null",
@@ -189,15 +250,17 @@ impl LoaderHookRegistry {
   pub fn push_load(
     &self,
     url: String,
+    requested_module_type: &RequestedModuleType,
   ) -> deno_core::futures::channel::oneshot::Receiver<Result<LoadResult, String>>
   {
+    let key = (url.clone(), requested_module_type.clone());
     // Dedup: if there's already a pending load for this URL, piggyback.
-    if self.load_waiters.borrow().contains_key(&url) {
+    if self.load_waiters.borrow().contains_key(&key) {
       let (sender, receiver) = deno_core::futures::channel::oneshot::channel();
       self
         .load_waiters
         .borrow_mut()
-        .get_mut(&url)
+        .get_mut(&key)
         .unwrap()
         .push(sender);
       return receiver;
@@ -205,21 +268,77 @@ impl LoaderHookRegistry {
     self
       .load_waiters
       .borrow_mut()
-      .insert(url.clone(), Vec::new());
+      .insert(key.clone(), Vec::new());
 
     let id = self.next_id();
     let (sender, receiver) = deno_core::futures::channel::oneshot::channel();
     self.load_senders.borrow_mut().insert(id, sender);
-    self.load_id_keys.borrow_mut().insert(id, url.clone());
-    self
-      .pending_loads
-      .borrow_mut()
-      .push_back(PendingLoad { id, url });
+    self.load_id_keys.borrow_mut().insert(id, key);
+    self.pending_loads.borrow_mut().push_back(PendingLoad {
+      id,
+      url,
+      requested_module_type: requested_module_type.clone(),
+    });
     if let Some(waker) = self.load_waker.borrow_mut().take() {
       waker.wake();
     }
     receiver
   }
+}
+
+fn settle_resolve_hook_result<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  result: v8::Local<'s, v8::Value>,
+) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
+  let Ok(promise) = v8::Local::<v8::Promise>::try_from(result) else {
+    return Ok(result);
+  };
+  for _ in 0..8 {
+    JsRuntime::drain_next_tick_and_macrotasks_from_scope(scope)
+      .map_err(|error| JsErrorBox::generic(error.to_string()))?;
+    if promise.state() != v8::PromiseState::Pending {
+      break;
+    }
+  }
+  match promise.state() {
+    v8::PromiseState::Fulfilled => Ok(promise.result(scope)),
+    v8::PromiseState::Rejected => {
+      let error = promise.result(scope);
+      Err(JsErrorBox::from_err(ModuleHookError {
+        message: hook_error_message(scope, error),
+        code: hook_error_code(scope, error),
+      }))
+    }
+    v8::PromiseState::Pending => Err(JsErrorBox::from_err(ModuleHookError {
+      message: "resolve hook returned a pending promise".to_string(),
+      code: None,
+    })),
+  }
+}
+
+fn hook_error_message(
+  scope: &mut v8::PinScope,
+  error: v8::Local<v8::Value>,
+) -> String {
+  error
+    .to_string(scope)
+    .map(|message| message.to_rust_string_lossy(scope))
+    .unwrap_or_else(|| "module resolve hook failed".to_string())
+}
+
+fn hook_error_code(
+  scope: &mut v8::PinScope,
+  error: v8::Local<v8::Value>,
+) -> Option<String> {
+  let Ok(error) = v8::Local::<v8::Object>::try_from(error) else {
+    return None;
+  };
+  let code_key = v8::String::new(scope, "code")?;
+  error
+    .get(scope, code_key.into())
+    .filter(|code| !code.is_null_or_undefined())
+    .and_then(|code| code.to_string(scope))
+    .map(|code| code.to_rust_string_lossy(scope))
 }
 
 /// Mark hooks as active. Called from JS when `registerHooks()` is invoked.
@@ -234,17 +353,21 @@ pub fn op_module_hooks_register(
   registry.load_active.set(has_load);
 }
 
-/// Poll for a pending load request. Returns `[id, url]` or null.
+/// Poll for a pending load request. Returns `[id, url, requestedType]` or null.
 #[op2]
 #[serde]
 pub async fn op_module_hooks_poll_load(
   state: Rc<RefCell<OpState>>,
-) -> Result<Option<(u32, String)>, JsErrorBox> {
+) -> Result<Option<(u32, String, Option<String>)>, JsErrorBox> {
   let registry = state.borrow().borrow::<LoaderHookRegistry>().clone();
 
   std::future::poll_fn(|cx| {
     if let Some(req) = registry.pending_loads.borrow_mut().pop_front() {
-      return std::task::Poll::Ready(Ok(Some((req.id, req.url))));
+      return std::task::Poll::Ready(Ok(Some((
+        req.id,
+        req.url,
+        req.requested_module_type.as_str().map(ToOwned::to_owned),
+      ))));
     }
     *registry.load_waker.borrow_mut() = Some(cx.waker().clone());
     std::task::Poll::Pending

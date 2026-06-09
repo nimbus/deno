@@ -1258,6 +1258,90 @@ pub(crate) fn op_disabled_fn(
   scope.throw_exception(exception);
 }
 
+fn is_likely_file_backed_js_module(file_name: &str) -> bool {
+  if let Ok(url) = Url::parse(file_name) {
+    return url.scheme() != "data" && url.path().ends_with(".js");
+  }
+  file_name
+    .split(['?', '#'])
+    .next()
+    .map(|file_name| file_name.ends_with(".js"))
+    .unwrap_or(false)
+}
+
+fn maybe_node_esm_scope_reference_message<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  arg: v8::Local<'s, v8::Value>,
+  name: &str,
+) -> Option<String> {
+  if name != deno_error::builtin_classes::REFERENCE_ERROR {
+    return None;
+  }
+
+  let msg = v8::Exception::create_message(scope, arg);
+  let arg_obj: v8::Local<v8::Object> = arg.try_into().ok()?;
+  let message_key = MESSAGE.v8_string(scope).unwrap();
+  let message = arg_obj.get(scope, message_key.into())?;
+  let message: v8::Local<v8::String> = message.try_into().ok()?;
+  let message = message.to_rust_string_lossy(scope);
+
+  match message.as_ref() {
+    "require is not defined" => Some(
+      "require is not defined in ES module scope, you can use import instead"
+        .to_string(),
+    ),
+    "exports is not defined" => {
+      Some("exports is not defined in ES module scope".to_string())
+    }
+    "module is not defined" => {
+      let is_file_backed_js_module = JsStackFrame::from_v8_message(scope, msg)
+        .and_then(|frame| frame.file_name)
+        .map(|file_name| is_likely_file_backed_js_module(&file_name))
+        .unwrap_or(false);
+      if is_file_backed_js_module {
+        Some(
+          "module is not defined in ES module scope\n\
+          This file is being treated as an ES module because it has a '.js' file extension. \
+          To treat it as a CommonJS script, rename it to use the '.cjs' file extension."
+            .to_string(),
+        )
+      } else {
+        Some("module is not defined in ES module scope".to_string())
+      }
+    }
+    _ => None,
+  }
+}
+
+fn throw_dynamic_import_promise_error<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  name: &str,
+  message: v8::Local<'s, v8::String>,
+  code_value: Option<v8::Local<'s, v8::String>>,
+) {
+  let exception = match name {
+    deno_error::builtin_classes::RANGE_ERROR => {
+      v8::Exception::range_error(scope, message)
+    }
+    deno_error::builtin_classes::TYPE_ERROR => {
+      v8::Exception::type_error(scope, message)
+    }
+    deno_error::builtin_classes::SYNTAX_ERROR => {
+      v8::Exception::syntax_error(scope, message)
+    }
+    deno_error::builtin_classes::REFERENCE_ERROR => {
+      v8::Exception::reference_error(scope, message)
+    }
+    _ => v8::Exception::error(scope, message),
+  };
+  if let Some(code_value) = code_value {
+    let code_key = CODE.v8_string(scope).unwrap();
+    let exception_obj = exception.to_object(scope).unwrap();
+    exception_obj.set(scope, code_key.into(), code_value.into());
+  }
+  scope.throw_exception(exception);
+}
+
 fn catch_dynamic_import_promise_error<'s, 'i>(
   scope: &mut v8::PinScope<'s, 'i>,
   args: v8::FunctionCallbackArguments<'s>,
@@ -1270,6 +1354,13 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
     let name = e.name.unwrap_or_else(|| {
       deno_error::builtin_classes::GENERIC_ERROR.to_string()
     });
+    if let Some(message) =
+      maybe_node_esm_scope_reference_message(scope, arg, &name)
+    {
+      let message = v8::String::new(scope, &message).unwrap();
+      throw_dynamic_import_promise_error(scope, &name, message, None);
+      return;
+    }
     if !has_call_site(scope, arg) {
       let msg = v8::Exception::create_message(scope, arg);
       let arg: v8::Local<v8::Object> = arg.try_into().unwrap();
@@ -1287,26 +1378,14 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
           format!("{} at {location}", message.to_rust_string_lossy(scope));
         message = v8::String::new(scope, &str).unwrap();
       }
-      let exception = match name.as_str() {
-        deno_error::builtin_classes::RANGE_ERROR => {
-          v8::Exception::range_error(scope, message)
-        }
-        deno_error::builtin_classes::TYPE_ERROR => {
-          v8::Exception::type_error(scope, message)
-        }
-        deno_error::builtin_classes::SYNTAX_ERROR => {
-          v8::Exception::syntax_error(scope, message)
-        }
-        deno_error::builtin_classes::REFERENCE_ERROR => {
-          v8::Exception::reference_error(scope, message)
-        }
-        _ => v8::Exception::error(scope, message),
-      };
       let code_value = code_value
         .unwrap_or_else(|| ERR_MODULE_NOT_FOUND.v8_string(scope).unwrap());
-      let exception_obj = exception.to_object(scope).unwrap();
-      exception_obj.set(scope, code_key.into(), code_value.into());
-      scope.throw_exception(exception);
+      throw_dynamic_import_promise_error(
+        scope,
+        &name,
+        message,
+        Some(code_value),
+      );
       return;
     }
   }

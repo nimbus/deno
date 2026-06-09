@@ -1062,11 +1062,14 @@ impl ModuleMap {
       } else {
         ResolutionKind::Import
       };
-      let module_specifier = match self.resolve_with_scope(
+      let requested_module_type =
+        get_requested_module_type_from_attributes(&attributes);
+      let module_specifier = match self.resolve_with_scope_and_type(
         tc_scope,
         &import_specifier,
         name.as_ref(),
         resolve_kind,
+        &requested_module_type,
       ) {
         Ok(s) => s,
         Err(e) => {
@@ -1083,8 +1086,6 @@ impl ModuleMap {
           }
         }
       };
-      let requested_module_type =
-        get_requested_module_type_from_attributes(&attributes);
       let referrer_source_offset = if let ModuleType::Wasm = module_type {
         // Wasm sources will have been rendered to synthetic JS modules, so any
         // `ModuleRequest::referrer:source_offset`s we get from v8 are not
@@ -1223,7 +1224,19 @@ impl ModuleMap {
         return Err(ModuleError::Exception(exception));
       }
     };
-    let exports = vec![(ascii_str!("default"), parsed_json)];
+    let parsed_json = v8::Global::new(tc_scope, parsed_json);
+    let default_export = {
+      let state = JsRuntime::state_from(tc_scope);
+      if let Some(json_module_evaluation_cb) = &state.json_module_evaluation_cb
+      {
+        json_module_evaluation_cb(tc_scope, &name, parsed_json)
+          .map_err(|e| ModuleError::Core(e.into()))?
+      } else {
+        parsed_json
+      }
+    };
+    let default_export = v8::Local::new(tc_scope, default_export);
+    let exports = vec![(ascii_str!("default"), default_export)];
     Ok(self.new_synthetic_module(tc_scope, name, ModuleType::Json, exports))
   }
 
@@ -1481,12 +1494,13 @@ impl ModuleMap {
     self.loader.borrow().resolve(specifier, referrer, kind)
   }
 
-  pub fn resolve_with_scope(
+  pub fn resolve_with_scope_and_type(
     &self,
     scope: &mut v8::PinScope,
     specifier: &str,
     referrer: &str,
     kind: ResolutionKind,
+    requested_module_type: &RequestedModuleType,
   ) -> ModuleResolveResponse {
     if specifier.starts_with("ext:")
       && !referrer.starts_with("ext:")
@@ -1507,10 +1521,13 @@ impl ModuleMap {
       return Err(JsErrorBox::type_error(msg));
     }
 
-    self
-      .loader
-      .borrow()
-      .resolve_with_scope(scope, specifier, referrer, kind)
+    self.loader.borrow().resolve_with_scope_and_type(
+      scope,
+      specifier,
+      referrer,
+      kind,
+      requested_module_type,
+    )
   }
 
   /// Called by `module_resolve_callback` during module instantiation.
@@ -1543,11 +1560,12 @@ impl ModuleMap {
       get_requested_module_type_from_attributes(&import_attributes);
     let resolved_specifier = match pre_resolved_specifier {
       Some(specifier) => specifier,
-      None => match self.resolve_with_scope(
+      None => match self.resolve_with_scope_and_type(
         scope,
         specifier,
         referrer,
         ResolutionKind::Import,
+        &module_type,
       ) {
         Ok(s) => s,
         Err(e) => {
@@ -1632,11 +1650,12 @@ impl ModuleMap {
     resolver_handle: v8::Global<v8::PromiseResolver>,
     cped_handle: v8::Global<v8::Value>,
   ) -> bool {
-    let resolve_response = self.resolve_with_scope(
+    let resolve_response = self.resolve_with_scope_and_type(
       scope,
       &specifier,
       &referrer,
       ResolutionKind::DynamicImport,
+      &requested_module_type,
     );
 
     // Fast path: if the module is already loaded, resolve the import
@@ -1677,7 +1696,10 @@ impl ModuleMap {
 
         // No pending TLA, safe to resolve immediately
         let resolver = resolver_handle.open(scope);
-        let module_namespace = module.get_module_namespace();
+        let module_namespace = Self::module_namespace_for_promise_resolve(
+          scope,
+          module.get_module_namespace(),
+        );
         resolver.resolve(scope, module_namespace).unwrap();
 
         return false;
@@ -1694,7 +1716,10 @@ impl ModuleMap {
       match self.lazy_load_esm_module(scope, module_specifier.as_str()) {
         Ok(module_ns) => {
           let resolver = resolver_handle.open(scope);
-          let module_ns_local = v8::Local::new(scope, module_ns);
+          let module_ns_local = Self::module_namespace_for_promise_resolve(
+            scope,
+            v8::Local::new(scope, module_ns),
+          );
           resolver.resolve(scope, module_ns_local).unwrap();
           return false;
         }
@@ -1725,7 +1750,10 @@ impl ModuleMap {
       {
         Ok(module_ns) => {
           let resolver = resolver_handle.open(scope);
-          let module_ns_local = v8::Local::new(scope, module_ns);
+          let module_ns_local = Self::module_namespace_for_promise_resolve(
+            scope,
+            v8::Local::new(scope, module_ns),
+          );
           resolver.resolve(scope, module_ns_local).unwrap();
           return false;
         }
@@ -2193,7 +2221,10 @@ impl ModuleMap {
         .get_handle(module_id)
         .map(|handle| v8::Local::new(scope, handle))
     {
-      let module_namespace = module.get_module_namespace();
+      let module_namespace = Self::module_namespace_for_promise_resolve(
+        scope,
+        module.get_module_namespace(),
+      );
 
       for resolver_handle in waiters {
         let resolver = resolver_handle.open(scope);
@@ -2246,6 +2277,19 @@ impl ModuleMap {
     }
   }
 
+  fn module_namespace_for_promise_resolve<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    module_namespace: v8::Local<'s, v8::Value>,
+  ) -> v8::Local<'s, v8::Value> {
+    if let Ok(module_namespace_object) =
+      v8::Local::<v8::Object>::try_from(module_namespace)
+    {
+      let null = v8::null(scope);
+      let _ = module_namespace_object.set_prototype(scope, null.into());
+    }
+    module_namespace
+  }
+
   pub(crate) fn dynamic_import_resolve(
     &self,
     scope: &mut v8::PinScope,
@@ -2273,7 +2317,10 @@ impl ModuleMap {
     // resolving the promise might initiate another `import()` which will
     // in turn call `bindings::host_import_module_dynamically_callback` which
     // will reach into `ModuleMap` from within the isolate.
-    let module_namespace = module.get_module_namespace();
+    let module_namespace = Self::module_namespace_for_promise_resolve(
+      scope,
+      module.get_module_namespace(),
+    );
     resolver.resolve(scope, module_namespace).unwrap();
     self.dyn_module_evaluate_idle_counter.set(0);
     if !JsRealm::state_from_scope(scope).has_tick_scheduled() {
@@ -2467,8 +2514,12 @@ impl ModuleMap {
 
               // Get the deferred namespace — this triggers evaluation on
               // first property access.
-              let module_namespace = module
-                .get_module_namespace_with_phase(v8::ModuleImportPhase::kDefer);
+              let module_namespace = Self::module_namespace_for_promise_resolve(
+                tc_scope,
+                module.get_module_namespace_with_phase(
+                  v8::ModuleImportPhase::kDefer,
+                ),
+              );
 
               let promise = v8::Local::<v8::Promise>::try_from(promise_val)
                 .expect("evaluate_for_import_defer should return a promise");

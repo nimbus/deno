@@ -72,6 +72,7 @@ use crate::modules::ExtCodeCache;
 use crate::modules::ExtModuleLoader;
 use crate::modules::IntoModuleCodeString;
 use crate::modules::IntoModuleName;
+use crate::modules::JsonModuleEvaluationCb;
 use crate::modules::ModuleId;
 use crate::modules::ModuleLoader;
 use crate::modules::ModuleMap;
@@ -460,6 +461,7 @@ pub struct JsRuntimeState {
     Option<WaitForInspectorDisconnectCallback>,
   pub(crate) validate_import_attributes_cb: Option<ValidateImportAttributesCb>,
   pub(crate) custom_module_evaluation_cb: Option<CustomModuleEvaluationCb>,
+  pub(crate) json_module_evaluation_cb: Option<JsonModuleEvaluationCb>,
   pub(crate) vm_dynamic_import_callbacks:
     RefCell<HashMap<u32, v8::Global<v8::Function>>>,
   pub(crate) next_vm_dynamic_import_callback_id: Cell<u32>,
@@ -598,6 +600,10 @@ pub struct RuntimeOptions {
   /// A callback that allows to evaluate a custom type of a module - eg.
   /// embedders might implement loading WASM or test modules.
   pub custom_module_evaluation_cb: Option<CustomModuleEvaluationCb>,
+
+  /// A callback that can override the default export value for native JSON
+  /// modules after the source has parsed.
+  pub json_module_evaluation_cb: Option<JsonModuleEvaluationCb>,
 
   /// Callbacks to retrieve and store code cache for scripts evaluated
   /// through evalContext.
@@ -749,6 +755,13 @@ impl JsRuntime {
     state.op_state.clone()
   }
 
+  pub fn drain_next_tick_and_macrotasks_from_scope(
+    scope: &mut v8::PinScope,
+  ) -> Result<(), Box<JsError>> {
+    let context_state = JsRealm::state_from_scope(scope);
+    Self::drain_next_tick_and_macrotasks(scope, &context_state)
+  }
+
   pub(crate) fn has_more_work(scope: &mut v8::PinScope) -> bool {
     EventLoopPendingState::new_from_scope(scope).is_pending()
   }
@@ -838,6 +851,7 @@ impl JsRuntime {
       op_state: op_state.clone(),
       validate_import_attributes_cb: options.validate_import_attributes_cb,
       custom_module_evaluation_cb: options.custom_module_evaluation_cb,
+      json_module_evaluation_cb: options.json_module_evaluation_cb,
       vm_dynamic_import_callbacks: Default::default(),
       next_vm_dynamic_import_callback_id: Cell::new(1),
       eval_context_get_code_cache_cb: RefCell::new(

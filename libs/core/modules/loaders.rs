@@ -91,6 +91,19 @@ pub trait ModuleLoader {
     self.resolve(specifier, referrer, kind)
   }
 
+  /// Resolve with access to the current V8 scope and the import attributes
+  /// parsed from the module request.
+  fn resolve_with_scope_and_type(
+    &self,
+    scope: &mut v8::PinScope,
+    specifier: &str,
+    referrer: &str,
+    kind: ResolutionKind,
+    _requested_module_type: &RequestedModuleType,
+  ) -> ModuleResolveResponse {
+    self.resolve_with_scope(scope, specifier, referrer, kind)
+  }
+
   /// Override to customize the behavior of `import.meta.resolve` resolution.
   ///
   /// The default implementation calls `self.resolve()`.

@@ -1333,6 +1333,110 @@ async fn dyn_import_err() {
 }
 
 #[tokio::test]
+async fn dyn_import_node_esm_scope_reference_error_messages() {
+  let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::new([
+    (
+      Url::parse("data:text/javascript,require;").unwrap(),
+      ascii_str!("require;"),
+    ),
+    (
+      Url::parse("data:text/javascript,exports={};").unwrap(),
+      ascii_str!("exports = {};"),
+    ),
+    (
+      Url::parse("data:text/javascript,require_custom;").unwrap(),
+      ascii_str!("require_custom;"),
+    ),
+    (
+      Url::parse("data:text/javascript,require;//.js").unwrap(),
+      ascii_str!("require;//.js"),
+    ),
+    (
+      Url::parse("file:///cjs.js").unwrap(),
+      ascii_str!("module.exports = 'asdf';"),
+    ),
+  ])));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    module_loader: Some(loader),
+    ..Default::default()
+  });
+
+  poll_fn(move |cx| {
+    runtime
+      .execute_script(
+        "file:///dyn_import_node_esm_scope_reference_error_messages.js",
+        r#"
+        async function assertRejected(specifier, expected, unexpected) {
+          let error;
+          try {
+            await import(specifier);
+          } catch (caught) {
+            error = caught;
+          }
+          if (!error) {
+            throw new Error("expected " + specifier + " to reject");
+          }
+          if (error.name !== "ReferenceError") {
+            throw new Error("expected ReferenceError, got " + error.name);
+          }
+          if (expected !== undefined && error.message !== expected) {
+            throw new Error("unexpected message for " + specifier + ": " + error.message);
+          }
+          if (unexpected !== undefined && error.message.includes(unexpected)) {
+            throw new Error("unexpected hint for " + specifier + ": " + error.message);
+          }
+        }
+
+        (async () => {
+          await assertRejected(
+            "data:text/javascript,require;",
+            "require is not defined in ES module scope, you can use import instead",
+          );
+          await assertRejected(
+            "data:text/javascript,exports={};",
+            "exports is not defined in ES module scope",
+          );
+          await assertRejected(
+            "data:text/javascript,require_custom;",
+            "require_custom is not defined",
+            "in ES module scope",
+          );
+          try {
+            await import("/cjs.js");
+            throw new Error("expected /cjs.js to reject");
+          } catch (error) {
+            if (error.name !== "ReferenceError") {
+              throw new Error("expected ReferenceError, got " + error.name);
+            }
+            if (!error.message.includes("use the '.cjs' file extension")) {
+              throw new Error("missing .cjs hint: " + error.message);
+            }
+          }
+          await assertRejected(
+            "data:text/javascript,require;//.js",
+            "require is not defined in ES module scope, you can use import instead",
+            "use the '.cjs' file extension",
+          );
+        })();
+        "#,
+      )
+      .unwrap();
+
+    match runtime.poll_event_loop(cx, Default::default()) {
+      Poll::Ready(Ok(_)) => {}
+      Poll::Ready(Err(error)) => {
+        panic!("dynamic import ESM-scope reference probe failed: {error:?}");
+      }
+      Poll::Pending => {
+        panic!("dynamic import ESM-scope reference probe stalled")
+      }
+    }
+    Poll::Ready(())
+  })
+  .await;
+}
+
+#[tokio::test]
 async fn dyn_import_recurse_err() {
   let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::default()));
   let mut runtime = JsRuntime::new(RuntimeOptions {
@@ -1394,6 +1498,58 @@ async fn dyn_import_ok() {
       Poll::Ready(Ok(_))
     ));
     assert_eq!(loader.counts(), ModuleLoadEventCounts::new(2, 1, 1, 1));
+    Poll::Ready(())
+  })
+  .await;
+}
+
+#[tokio::test]
+async fn dyn_import_namespace_ignores_object_prototype_then() {
+  let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::with(
+    Url::parse("data:text/javascript,").unwrap(),
+    ascii_str!(""),
+  )));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    module_loader: Some(loader.clone()),
+    ..Default::default()
+  });
+  poll_fn(move |cx| {
+    runtime
+      .execute_script(
+        "file:///dyn_import_prototype_pollution.js",
+        r#"
+        Object.defineProperty(Object.prototype, "then", {
+          get() {
+            throw new Error("unexpected Object.prototype.then lookup");
+          },
+          configurable: true,
+        });
+        let called = false;
+        (async () => {
+          await import("data:text/javascript,").then((mod) => {
+            called = true;
+            if (Object.getPrototypeOf(mod) !== null) {
+              throw new Error("module namespace prototype must be null");
+            }
+          });
+          if (!called) {
+            throw new Error("dynamic import then handler was not called");
+          }
+        })();
+        "#,
+      )
+      .unwrap();
+
+    match runtime.poll_event_loop(cx, Default::default()) {
+      Poll::Ready(Ok(_)) => {}
+      Poll::Ready(Err(error)) => {
+        panic!("dynamic import prototype pollution probe failed: {error:?}");
+      }
+      Poll::Pending => {
+        panic!("dynamic import prototype pollution probe stalled")
+      }
+    }
+    assert_eq!(loader.counts(), ModuleLoadEventCounts::new(1, 1, 1, 1));
     Poll::Ready(())
   })
   .await;
