@@ -27,6 +27,7 @@ const { core, primordials } = __bootstrap;
 const {
   ArrayPrototypePop,
   Error,
+  ErrorCaptureStackTrace,
   FunctionPrototypeBind,
   ReflectApply,
   ObjectDefineProperties,
@@ -34,6 +35,8 @@ const {
   ObjectSetPrototypeOf,
   ObjectValues,
   PromisePrototypeThen,
+  PromiseResolve,
+  StringPrototypeReplace,
 } = primordials;
 
 const { nextTick } = core.loadExtScript("ext:deno_node/_next_tick.ts");
@@ -49,6 +52,21 @@ class NodeFalsyValueRejectionError extends Error {
   }
 }
 
+function callbackifyOnRejected(reason, cb) {
+  if (!reason) {
+    reason = new NodeFalsyValueRejectionError(reason);
+    ErrorCaptureStackTrace(reason, callbackifyOnRejected);
+    if (typeof reason.stack === "string") {
+      reason.stack = StringPrototypeReplace(
+        reason.stack,
+        "\n    at processTicksAndRejections ",
+        "\n    at process.processTicksAndRejections ",
+      );
+    }
+  }
+  return cb(reason);
+}
+
 function callbackify(original) {
   validateFunction(original, "original");
 
@@ -62,12 +80,9 @@ function callbackify(original) {
     // In true node style we process the callback on `nextTick` with all the
     // implications (stack, `uncaughtException`, `async_hooks`)
     PromisePrototypeThen(
-      ReflectApply(original, this, args),
+      PromiseResolve(ReflectApply(original, this, args)),
       (ret) => nextTick(cb, null, ret),
-      (rej) => {
-        rej = rej || new NodeFalsyValueRejectionError(rej);
-        return nextTick(cb, rej);
-      },
+      (rej) => nextTick(callbackifyOnRejected, rej, cb),
     );
   }
 

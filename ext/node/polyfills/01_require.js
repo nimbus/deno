@@ -3883,6 +3883,38 @@ export function findSourceMap(path) {
 Module.findSourceMap = findSourceMap;
 Module.SourceMap = SourceMap;
 
+let sourceMapsSupport = {
+  enabled: true,
+  nodeModules: false,
+  generatedCode: true,
+};
+
+function setSourceMapsSupport(enabled, options = undefined) {
+  internalValidators.validateBoolean(enabled, "enabled");
+  if (options !== undefined) {
+    internalValidators.validateObject(options, "options");
+    if (options.nodeModules !== undefined) {
+      internalValidators.validateBoolean(
+        options.nodeModules,
+        "options.nodeModules",
+      );
+    }
+    if (options.generatedCode !== undefined) {
+      internalValidators.validateBoolean(
+        options.generatedCode,
+        "options.generatedCode",
+      );
+    }
+  }
+  sourceMapsSupport = {
+    enabled,
+    nodeModules: options?.nodeModules ?? sourceMapsSupport.nodeModules,
+    generatedCode: options?.generatedCode ?? sourceMapsSupport.generatedCode,
+  };
+}
+
+Module.setSourceMapsSupport = setSourceMapsSupport;
+
 /**
  * @param {string} code
  * @param {{ mode?: "strip" | "transform", sourceMap?: boolean, sourceUrl?: string }} [options]
