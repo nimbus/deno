@@ -12,6 +12,7 @@ const {
   ArrayPrototypePush,
   ObjectFreeze,
   ObjectPrototypeToString,
+  StringPrototypeCharCodeAt,
   SymbolDispose,
   SymbolSpecies,
 } = primordials;
@@ -107,7 +108,16 @@ function getHeapSnapshot(options?: Record<string, unknown>) {
     validateObject(options, "options");
   }
   const data = op_v8_take_heap_snapshot();
-  return lazyStream().Readable.from(Buffer.from(data));
+  // Building the Readable stream creates internal promises (Readable.from and
+  // the subsequent resume). Suppress promise-hook reporting around it so those
+  // infrastructure promises are not surfaced to user async_hooks/promiseHooks
+  // callbacks (precedent: ext/node/polyfills/fs.ts).
+  core.incPromiseHooksSuppressed();
+  try {
+    return lazyStream().Readable.from(Buffer.from(data));
+  } finally {
+    core.decPromiseHooksSuppressed();
+  }
 }
 const heapSpaceStatisticsBuffer = new Float64Array(4);
 
@@ -202,6 +212,21 @@ function setFlagsFromString(flags: string) {
       shadowV8Flags.delete(key);
     }
   }
+}
+function isStringOneByteRepresentation(content: string) {
+  if (typeof content !== "string") {
+    throw new codes.ERR_INVALID_ARG_TYPE("content", "string", content);
+  }
+  // A string has a one-byte (latin1) backing store iff every code unit fits in
+  // a single byte. Node's native fast path inspects V8's internal flat
+  // representation; the code-unit scan is an equivalent observable answer
+  // without requiring a V8 fast-API binding.
+  for (let i = 0; i < content.length; i++) {
+    if (StringPrototypeCharCodeAt(content, i) > 0xff) {
+      return false;
+    }
+  }
+  return true;
 }
 function stopCoverage() {
   notImplemented("v8.stopCoverage");
@@ -775,6 +800,7 @@ return {
   getHeapSnapshot,
   getHeapSpaceStatistics,
   getHeapStatistics,
+  isStringOneByteRepresentation,
   promiseHooks,
   queryObjects,
   setFlagsFromString,

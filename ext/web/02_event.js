@@ -1296,7 +1296,27 @@ function formatForRaw(value) {
 }
 
 class MessageEvent extends Event {
+  #data = null;
+  #origin = "";
+  #lastEventId = "";
+  #ports = ObjectFreeze([]);
   #source = null;
+
+  get data() {
+    return this.#data;
+  }
+
+  get origin() {
+    return this.#origin;
+  }
+
+  get lastEventId() {
+    return this.#lastEventId;
+  }
+
+  get ports() {
+    return this.#ports;
+  }
 
   get source() {
     return this.#source;
@@ -1309,12 +1329,12 @@ class MessageEvent extends Event {
       composed: eventInitDict?.composed ?? false,
     });
 
-    this.data = eventInitDict?.data ?? null;
+    this.#data = eventInitDict?.data ?? null;
     const ports = eventInitDict?.ports;
     if (ports == null) {
       // `ports` is a FrozenArray<MessagePort> per the HTML spec, so the
       // exposed array must be read-only.
-      this.ports = ObjectFreeze([]);
+      this.#ports = ObjectFreeze([]);
     } else {
       // MessageEvent ports: iterable validation + per-element MessagePort
       // type check. Matches the messages Node asserts on so the
@@ -1352,14 +1372,14 @@ class MessageEvent extends Event {
         arr[i++] = p;
       }
       // `ports` is a FrozenArray<MessagePort> per the HTML spec.
-      this.ports = ObjectFreeze(arr);
+      this.#ports = ObjectFreeze(arr);
     }
     // origin and lastEventId are USVString per spec, so coerce to string
     // (Node's test passes numbers and expects string coercion).
-    this.origin = eventInitDict?.origin === undefined
+    this.#origin = eventInitDict?.origin === undefined
       ? ""
       : String(eventInitDict.origin);
-    this.lastEventId = eventInitDict?.lastEventId === undefined
+    this.#lastEventId = eventInitDict?.lastEventId === undefined
       ? ""
       : String(eventInitDict.lastEventId);
     const source = eventInitDict?.source;

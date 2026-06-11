@@ -476,6 +476,16 @@ pub async fn op_crypto_sign_key(
               CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
               _ => return Err(CryptoError::UnsupportedAlgorithm),
             };
+            // P-384 field size is 48 bytes; bits2field requires at least
+            // half that (24 bytes). Left-pad shorter hashes to meet the
+            // minimum.
+            let prehash = if prehash.len() < 24 {
+              let mut padded = vec![0u8; 24 - prehash.len()];
+              padded.extend_from_slice(&prehash);
+              padded
+            } else {
+              prehash
+            };
             let signature: P384Signature =
               signing_key.sign_prehash(&prehash)?;
             signature.to_bytes().to_vec()
@@ -723,6 +733,16 @@ pub async fn op_crypto_verify_key(
                   CryptoHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
                   CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
                   _ => return Err(CryptoError::UnsupportedAlgorithm),
+                };
+                // P-384 field size is 48 bytes; bits2field requires at
+                // least half that (24 bytes). Left-pad shorter hashes to
+                // meet the minimum.
+                let prehash = if prehash.len() < 24 {
+                  let mut padded = vec![0u8; 24 - prehash.len()];
+                  padded.extend_from_slice(&prehash);
+                  padded
+                } else {
+                  prehash
                 };
                 verifying_key.verify_prehash(&prehash, &signature).is_ok()
               }

@@ -519,7 +519,13 @@ function newReadableStreamFromStreamReadable(
     return { highWaterMark };
   };
 
-  const strategy = evaluateStrategyOrFallback(options?.strategy);
+  // When the underlying source is a byte stream, the WebStreams ReadableStream
+  // constructor forbids a strategy that defines a `size` algorithm. Always use
+  // a size-less `{ highWaterMark }` strategy for byte streams, regardless of
+  // objectMode, to match upstream Node's `strategy = isBYOB ? { highWaterMark }`.
+  const strategy = options?.type === "bytes"
+    ? { highWaterMark }
+    : evaluateStrategyOrFallback(options?.strategy);
 
   let controller;
 

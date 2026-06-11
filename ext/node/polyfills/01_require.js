@@ -2052,6 +2052,21 @@ Module._resolveFilename = function (
     );
   }
 
+  // A dynamic import of a CommonJS module passes a full file:// URL string
+  // down to this CJS bridge (e.g. `import(fixtures.fileURL('empty.cjs'))`).
+  // Convert it to an OS path up front so _resolveLookupPaths/_findPath can
+  // stat a real absolute path instead of throwing MODULE_NOT_FOUND on the
+  // raw URL. On conversion failure leave `request` unchanged so virtual
+  // file:// URLs still reach the resolve-hook fallback below, mirroring the
+  // catch in the hook branch.
+  if (StringPrototypeStartsWith(request, "file://")) {
+    try {
+      request = url.fileURLToPath(request);
+    } catch {
+      // Leave request unchanged; virtual file:// URLs are handled by hooks.
+    }
+  }
+
   // Run resolve hooks if registered (and not already inside a hook)
   if (
     hookEntries.length > 0 && !insideResolveHook &&

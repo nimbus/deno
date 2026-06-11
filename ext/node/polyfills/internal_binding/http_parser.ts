@@ -275,6 +275,16 @@ HTTPParser.prototype.free = function (this: any) {
 };
 
 HTTPParser.prototype.remove = function (this: any) {
+  // Fire the async_hooks destroy hook for the parser's tracked
+  // AsyncResource before the parser is detached/recycled, matching Node's
+  // native HTTPParser which emits AsyncWrap destroy on remove. This runs
+  // here (not in free()) because _http_common.js's freeParser calls
+  // remove() -> cleanParser() -> free(), and cleanParser() nulls
+  // _asyncResource, so by free() time the resource is already gone.
+  if (this._asyncResource) {
+    this._asyncResource.emitDestroy();
+    this._asyncResource = undefined;
+  }
   this._native.remove();
 };
 

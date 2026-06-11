@@ -866,7 +866,7 @@ function structuredClone(value, options) {
   }
 
   const prefix = "Failed to execute 'structuredClone'";
-  webidl.requiredArguments(arguments.length, 1, prefix);
+  webidl.requiredArguments(arguments.length, 1, prefix, ["value"]);
   options = webidl.converters.StructuredSerializeOptions(
     options,
     prefix,

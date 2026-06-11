@@ -108,7 +108,15 @@ function randomBytes(
         if (process.domain && process.domain.listenerCount("error") > 0) {
           process.domain.emit("error", callbackErr);
         } else {
-          throw callbackErr;
+          // Mirror Node's MakeCallback: a throw from the user callback must
+          // reach 'uncaughtException' WHILE this asyncId is still the current
+          // executionAsyncId, so the handler observes the right id. Dispatch
+          // _fatalException inline here (before the finally pops the id). Only
+          // re-throw when no handler claimed it, so the default crash path is
+          // preserved.
+          if (!process._fatalException(callbackErr)) {
+            throw callbackErr;
+          }
         }
       } finally {
         emitAfter(asyncId);

@@ -189,7 +189,7 @@ class AbortSignal extends EventTarget {
 
   constructor(key = null) {
     if (key !== illegalConstructorKey) {
-      throw new TypeError("Illegal constructor");
+      webidl.illegalConstructor();
     }
     super();
   }

@@ -5734,14 +5734,14 @@ class ReadableStreamBYOBReader {
 
     if (getArrayBufferByteLength(buffer) === 0) {
       if (isDetachedBuffer(buffer)) {
-        return PromiseReject(
-          new TypeError("view's buffer has been detached"),
-        );
+        const e = new TypeError("view's buffer has been detached");
+        e.code = "ERR_INVALID_STATE";
+        return PromiseReject(e);
       }
 
-      return PromiseReject(
-        new TypeError("view's buffer must have non-zero byteLength"),
-      );
+      const e = new TypeError("view's buffer must have non-zero byteLength");
+      e.code = "ERR_INVALID_STATE";
+      return PromiseReject(e);
     }
 
     if (options.min === 0) {
@@ -5914,9 +5914,11 @@ class ReadableStreamBYOBRequest {
       buffer = DataViewPrototypeGetBuffer(view);
     }
     if (isDetachedBuffer(buffer)) {
-      throw new TypeError(
+      const e = new TypeError(
         "The given view's buffer has been detached and so cannot be used as a response",
       );
+      e.code = "ERR_INVALID_STATE";
+      throw e;
     }
     readableByteStreamControllerRespondWithNewView(this[_controller], view);
   }
@@ -6895,6 +6897,9 @@ function setUpCrossRealmTransformReadable(stream, port) {
     port.close();
   });
   port.start();
+  // The cross-realm transfer port must not keep the event loop alive; Node's
+  // internal transfer ports are unref'd by default.
+  port.unref();
   const startAlgorithm = () => undefined;
   const pullAlgorithm = () => {
     packAndPostMessage(port, "pull", undefined);
@@ -6953,6 +6958,9 @@ function setUpCrossRealmTransformWritable(stream, port) {
     port.close();
   });
   port.start();
+  // The cross-realm transfer port must not keep the event loop alive; Node's
+  // internal transfer ports are unref'd by default.
+  port.unref();
   const startAlgorithm = () => undefined;
   const writeAlgorithm = (chunk) => {
     if (!backpressurePromise) {

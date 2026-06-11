@@ -78,8 +78,11 @@ const {
   JSONParse,
   JSONStringify,
   MathCeil,
+  NumberIsFinite,
+  NumberParseInt,
   ObjectAssign,
   ObjectDefineProperty,
+  ObjectFreeze,
   ObjectHasOwn,
   ObjectPrototypeIsPrototypeOf,
   SafeArrayIterator,
@@ -87,6 +90,7 @@ const {
   StringFromCharCode,
   StringPrototypeCharCodeAt,
   StringPrototypeIncludes,
+  StringPrototypeSplit,
   StringPrototypeToLowerCase,
   StringPrototypeToUpperCase,
   Symbol,
@@ -127,7 +131,18 @@ const recognisedUsages = [
   "decapsulateBits",
 ];
 
-function keyAlgorithmMismatch() {
+function keyAlgorithmMismatch(operation) {
+  // Node <= 22 surfaced the unified "Unable to use this key to {op}" message at
+  // the algorithm-mismatch site; Node 23+ introduced a distinct "Key algorithm
+  // mismatch". Emit the message matching the Node version this runtime reports
+  // so each compatibility lane matches upstream WebCrypto semantics exactly.
+  const nodeVersion = globalThis.process?.versions?.node;
+  if (typeof nodeVersion === "string") {
+    const major = NumberParseInt(StringPrototypeSplit(nodeVersion, ".")[0], 10);
+    if (NumberIsFinite(major) && major <= 22) {
+      return unableToUseKey(operation);
+    }
+  }
   return new DOMException("Key algorithm mismatch", "InvalidAccessError");
 }
 
@@ -136,6 +151,25 @@ function unableToUseKey(operation) {
     `Unable to use this key to ${operation}`,
     "InvalidAccessError",
   );
+}
+
+function publicKeyAlgorithmMismatch(expectedName) {
+  // Node <= 22 surfaces a per-algorithm message from the
+  // EcdhKeyDeriveParams 'public' validator (e.g. "algorithm.public must be an
+  // ECDH key"); Node 23+ surfaces a generic "key algorithm mismatch". Emit the
+  // message matching the Node version this runtime reports so each
+  // compatibility lane matches upstream WebCrypto semantics exactly.
+  const nodeVersion = globalThis.process?.versions?.node;
+  if (typeof nodeVersion === "string") {
+    const major = NumberParseInt(StringPrototypeSplit(nodeVersion, ".")[0], 10);
+    if (NumberIsFinite(major) && major <= 22) {
+      return new DOMException(
+        `algorithm.public must be an ${expectedName} key`,
+        "InvalidAccessError",
+      );
+    }
+  }
+  return new DOMException("key algorithm mismatch", "InvalidAccessError");
 }
 
 function invalidThis(receiver) {
@@ -435,28 +469,48 @@ function normalizeAlgorithm(algorithm, op) {
  */
 function copyBuffer(input) {
   if (isTypedArray(input)) {
+    // A detached typed array reports a zero byte-length; constructing a view
+    // over its detached backing buffer would throw a raw TypeError. Node treats
+    // a detached input as zero-length data, so return an empty copy and let the
+    // downstream operation surface its own (e.g. OperationError) check.
+    const byteLength = TypedArrayPrototypeGetByteLength(
+      /** @type {Uint8Array} */ (input),
+    );
+    if (byteLength === 0) {
+      return new Uint8Array(0);
+    }
     return TypedArrayPrototypeSlice(
       new Uint8Array(
         TypedArrayPrototypeGetBuffer(/** @type {Uint8Array} */ (input)),
         TypedArrayPrototypeGetByteOffset(/** @type {Uint8Array} */ (input)),
-        TypedArrayPrototypeGetByteLength(/** @type {Uint8Array} */ (input)),
+        byteLength,
       ),
     );
   } else if (isDataView(input)) {
+    const byteLength = DataViewPrototypeGetByteLength(
+      /** @type {DataView} */ (input),
+    );
+    if (byteLength === 0) {
+      return new Uint8Array(0);
+    }
     return TypedArrayPrototypeSlice(
       new Uint8Array(
         DataViewPrototypeGetBuffer(/** @type {DataView} */ (input)),
         DataViewPrototypeGetByteOffset(/** @type {DataView} */ (input)),
-        DataViewPrototypeGetByteLength(/** @type {DataView} */ (input)),
+        byteLength,
       ),
     );
   }
   // ArrayBuffer
+  const byteLength = ArrayBufferPrototypeGetByteLength(input);
+  if (byteLength === 0) {
+    return new Uint8Array(0);
+  }
   return TypedArrayPrototypeSlice(
     new Uint8Array(
       input,
       0,
-      ArrayBufferPrototypeGetByteLength(input),
+      byteLength,
     ),
   );
 }
@@ -466,8 +520,11 @@ const _algorithm = Symbol("[[algorithm]]");
 const _extractable = Symbol("[[extractable]]");
 const _usages = Symbol("[[usages]]");
 const _type = Symbol("[[type]]");
-const _algorithmView = Symbol("[[algorithmView]]");
-const _usagesView = Symbol("[[usagesView]]");
+// Cached [[SameObject]] views for the `algorithm` and `usages` getters: WebIDL
+// requires each access to return the same reference, and Node asserts
+// `key.algorithm === key.algorithm` / `key.usages === key.usages`.
+const _cachedAlgorithm = Symbol("[[cachedAlgorithm]]");
+const _cachedUsages = Symbol("[[cachedUsages]]");
 
 function cloneKeyAlgorithm(algorithm) {
   const clone = ObjectAssign({}, algorithm);
@@ -475,6 +532,46 @@ function cloneKeyAlgorithm(algorithm) {
     clone.hash = ObjectAssign({}, algorithm.hash);
   }
   return clone;
+}
+
+// RSA-PSS hash output sizes in bytes, used to bound `algorithm.saltLength`.
+const RSA_PSS_HASH_OUTPUT_BYTES = {
+  __proto__: null,
+  "SHA-1": 20,
+  "SHA-256": 32,
+  "SHA-384": 48,
+  "SHA-512": 64,
+};
+
+// Per RFC 8017 the PSS salt length must satisfy sLen <= emLen - hLen - 2, where
+// for byte-aligned WebCrypto keys emLen == modulusLength / 8. Node validates this
+// at the JS layer and rejects an over-large `algorithm.saltLength` with an
+// OperationError whose `cause` is an ERR_OUT_OF_RANGE error (rather than letting
+// the native op throw a bare Error). Mirror that exact shape.
+function validateRsaPssSaltLength(key, normalizedAlgorithm) {
+  const saltLength = normalizedAlgorithm.saltLength;
+  if (typeof saltLength !== "number") {
+    return;
+  }
+  const algorithm = key[_algorithm];
+  const hashBytes = RSA_PSS_HASH_OUTPUT_BYTES[algorithm.hash.name];
+  const modulusLength = algorithm.modulusLength;
+  if (hashBytes === undefined || typeof modulusLength !== "number") {
+    return;
+  }
+  const max = modulusLength / 8 - hashBytes - 2;
+  if (saltLength > max) {
+    const cause = new RangeError(
+      `The value of "algorithm.saltLength" is out of range. It must be >= 0 && <= ${max}. Received ${saltLength}`,
+    );
+    cause.code = "ERR_OUT_OF_RANGE";
+    const error = new DOMException(
+      "The operation failed for an operation-specific reason",
+      "OperationError",
+    );
+    error.cause = cause;
+    throw error;
+  }
 }
 
 class CryptoKey {
@@ -490,10 +587,6 @@ class CryptoKey {
   [_handle];
   /** @type {object} */
   [kKeyObject];
-  /** @type {object | undefined} */
-  [_algorithmView];
-  /** @type {string[] | undefined} */
-  [_usagesView];
 
   constructor() {
     webidl.illegalConstructor();
@@ -514,19 +607,23 @@ class CryptoKey {
   /** @returns {string[]} */
   get usages() {
     webidl.assertBranded(this, CryptoKeyPrototype);
-    if (this[_usagesView] === undefined) {
-      this[_usagesView] = ArrayPrototypeFilter(this[_usages], () => true);
+    if (this[_cachedUsages] === undefined) {
+      // Freeze the cached array so the stable [[SameObject]] reference cannot be
+      // mutated by callers, matching Node's frozen `key.usages`.
+      this[_cachedUsages] = ObjectFreeze(
+        ArrayPrototypeFilter(this[_usages], () => true),
+      );
     }
-    return this[_usagesView];
+    return this[_cachedUsages];
   }
 
   /** @returns {object} */
   get algorithm() {
     webidl.assertBranded(this, CryptoKeyPrototype);
-    if (this[_algorithmView] === undefined) {
-      this[_algorithmView] = cloneKeyAlgorithm(this[_algorithm]);
+    if (this[_cachedAlgorithm] === undefined) {
+      this[_cachedAlgorithm] = cloneKeyAlgorithm(this[_algorithm]);
     }
-    return this[_algorithmView];
+    return this[_cachedAlgorithm];
   }
 
   /**
@@ -1449,7 +1546,7 @@ class SubtleCrypto {
 
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
-      throw keyAlgorithmMismatch();
+      throw keyAlgorithmMismatch("encrypt");
     }
 
     // 9.
@@ -1486,7 +1583,7 @@ class SubtleCrypto {
 
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
-      throw keyAlgorithmMismatch();
+      throw keyAlgorithmMismatch("decrypt");
     }
 
     // 9.
@@ -1727,7 +1824,7 @@ class SubtleCrypto {
 
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
-      throw keyAlgorithmMismatch();
+      throw keyAlgorithmMismatch("sign");
     }
 
     // 9.
@@ -1763,6 +1860,11 @@ class SubtleCrypto {
             "InvalidAccessError",
           );
         }
+
+        // Bound the PSS salt length before invoking the native op so an
+        // over-large `algorithm.saltLength` surfaces Node's ERR_OUT_OF_RANGE
+        // OperationError rather than a bare native error.
+        validateRsaPssSaltLength(key, normalizedAlgorithm);
 
         // 2.
         const hashAlgorithm = key[_algorithm].hash.name;
@@ -1914,7 +2016,9 @@ class SubtleCrypto {
       ArrayPrototypeIncludes(["private", "secret"], result[_type]) &&
       keyUsages.length == 0
     ) {
-      throw new SyntaxError("Invalid key usage");
+      throw new SyntaxError(
+        `Usages cannot be empty when importing a ${result[_type]} key.`,
+      );
     }
 
     return result;
@@ -1999,7 +2103,7 @@ class SubtleCrypto {
 
     if (key.extractable === false) {
       throw new DOMException(
-        "Key is not extractable",
+        "key is not extractable",
         "InvalidAccessError",
       );
     }
@@ -2180,7 +2284,7 @@ class SubtleCrypto {
     const keyData = WeakMapPrototypeGet(KEY_STORE, handle);
 
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
-      throw keyAlgorithmMismatch();
+      throw keyAlgorithmMismatch("verify");
     }
 
     if (!ArrayPrototypeIncludes(key[_usages], "verify")) {
@@ -2211,6 +2315,11 @@ class SubtleCrypto {
             "InvalidAccessError",
           );
         }
+
+        // Bound the PSS salt length before invoking the native op so an
+        // over-large `algorithm.saltLength` surfaces Node's ERR_OUT_OF_RANGE
+        // OperationError rather than a bare native error.
+        validateRsaPssSaltLength(key, normalizedAlgorithm);
 
         const hashAlgorithm = key[_algorithm].hash.name;
         return await op_crypto_verify_key({
@@ -2319,7 +2428,7 @@ class SubtleCrypto {
 
     // 8.
     if (normalizedAlgorithm.name !== wrappingKey[_algorithm].name) {
-      throw keyAlgorithmMismatch();
+      throw keyAlgorithmMismatch("wrapKey");
     }
 
     // 9.
@@ -2331,7 +2440,7 @@ class SubtleCrypto {
     // 11.
     if (key[_extractable] === false) {
       throw new DOMException(
-        "Key is not extractable",
+        "key is not extractable",
         "InvalidAccessError",
       );
     }
@@ -2473,7 +2582,7 @@ class SubtleCrypto {
 
     // 11.
     if (normalizedAlgorithm.name !== unwrappingKey[_algorithm].name) {
-      throw keyAlgorithmMismatch();
+      throw keyAlgorithmMismatch("unwrapKey");
     }
 
     // 12.
@@ -5042,7 +5151,10 @@ function importKeyEC(
             ),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException(
+          `Unsupported key usage for a ${normalizedAlgorithm.name} key`,
+          "SyntaxError",
+        );
       }
 
       // 3.
@@ -5083,7 +5195,10 @@ function importKeyEC(
             ),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException(
+          `Unsupported key usage for a ${normalizedAlgorithm.name} key`,
+          "SyntaxError",
+        );
       }
 
       // 2-9.
@@ -5123,7 +5238,10 @@ function importKeyEC(
               ),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException(
+            `Unsupported key usage for a ${normalizedAlgorithm.name} key`,
+            "SyntaxError",
+          );
         }
       } else if (keyUsages.length != 0) {
         throw new DOMException("Key usage must be empty", "SyntaxError");
@@ -5166,7 +5284,10 @@ function importKeyEC(
           (u) => !ArrayPrototypeIncludes(supportedUsages[keyType], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException(
+          `Unsupported key usage for a ${normalizedAlgorithm.name} key`,
+          "SyntaxError",
+        );
       }
 
       // 3.
@@ -6502,6 +6623,7 @@ function exportKeyEd25519(format, key, innerKey) {
       const jwk = {
         kty: "OKP",
         crv: "Ed25519",
+        alg: "Ed25519",
         x,
         "key_ops": key.usages,
         ext: key[_extractable],
@@ -6678,9 +6800,12 @@ function exportKeyEC(format, key, innerKey) {
     case "spki": {
       // 1.
       if (key[_type] !== "public") {
+        // spki is only a valid export format for a public key. Node leaves the
+        // export result undefined for a non-public key and surfaces a
+        // NotSupportedError, so match that here instead of InvalidAccessError.
         throw new DOMException(
-          "Key is not a public key",
-          "InvalidAccessError",
+          `Unable to export ${key[_algorithm].name} ${key[_type]} key using spki format`,
+          "NotSupportedError",
         );
       }
 
@@ -6861,10 +6986,7 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
       }
       // 4.
       if (publicKey[_algorithm].name !== baseKey[_algorithm].name) {
-        throw new DOMException(
-          "key algorithm mismatch",
-          "InvalidAccessError",
-        );
+        throw publicKeyAlgorithmMismatch(baseKey[_algorithm].name);
       }
       // 5.
       if (
@@ -6915,6 +7037,21 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
       if (length === null || length % 8 !== 0) {
         throw new DOMException("Invalid length", "OperationError");
       }
+      // The HkdfParams 'salt' and 'info' members are required; Node rejects a
+      // missing member with code ERR_MISSING_OPTION before the length===0
+      // short-circuit, so enforce their presence here to match upstream.
+      if (normalizedAlgorithm.salt === undefined) {
+        throw decorateMissingOptionError(
+          new TypeError("'salt' is required"),
+          "salt",
+        );
+      }
+      if (normalizedAlgorithm.info === undefined) {
+        throw decorateMissingOptionError(
+          new TypeError("'info' is required"),
+          "info",
+        );
+      }
       if (length === 0) {
         return TypedArrayPrototypeGetBuffer(new Uint8Array(0));
       }
@@ -6949,10 +7086,7 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
       }
       // 4.
       if (publicKey[_algorithm].name !== baseKey[_algorithm].name) {
-        throw new DOMException(
-          "key algorithm mismatch",
-          "InvalidAccessError",
-        );
+        throw publicKeyAlgorithmMismatch(baseKey[_algorithm].name);
       }
 
       // 5.
@@ -6997,10 +7131,7 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
       }
       // 4.
       if (publicKey[_algorithm].name !== baseKey[_algorithm].name) {
-        throw new DOMException(
-          "key algorithm mismatch",
-          "InvalidAccessError",
-        );
+        throw publicKeyAlgorithmMismatch(baseKey[_algorithm].name);
       }
 
       // 5.

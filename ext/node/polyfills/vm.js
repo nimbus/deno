@@ -41,6 +41,7 @@ const {
 const {
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
+  ERR_INVALID_THIS,
   ERR_MODULE_LINK_MISMATCH,
   ERR_VM_MODULE_ALREADY_LINKED,
   ERR_VM_MODULE_DIFFERENT_CONTEXT,
@@ -565,6 +566,18 @@ function isModule(object) {
     ObjectPrototypeHasOwnProperty(object, kWrap);
 }
 
+// Mirror Node's validateThisInternalField(this, kWrap, ctorName): module
+// methods and accessors must be invoked on a real module instance (one that
+// owns the internal kWrap field), otherwise they throw ERR_INVALID_THIS.
+function validateModuleThis(obj, ctorName) {
+  if (
+    typeof obj !== "object" || obj === null ||
+    !ObjectPrototypeHasOwnProperty(obj, kWrap)
+  ) {
+    throw new ERR_INVALID_THIS(ctorName);
+  }
+}
+
 function buildModuleRequests(wrap) {
   const raw = op_vm_module_get_module_requests(wrap);
   const out = [];
@@ -627,11 +640,15 @@ class Module {
   }
 
   link(linker) {
+    validateModuleThis(this, "Module");
     if (typeof linker !== "function") {
       throw new ERR_INVALID_ARG_TYPE("linker", "function", linker);
     }
-    if (this.status !== "unlinked") {
+    if (this.status === "linked") {
       throw new ERR_VM_MODULE_ALREADY_LINKED();
+    }
+    if (this.status !== "unlinked") {
+      throw new ERR_VM_MODULE_STATUS("must be unlinked");
     }
     this[kLinkingStatus] = "linking";
     return PromisePrototypeThen(this[kLink](linker), (v) => {
@@ -705,10 +722,13 @@ class Module {
 
   evaluate(options = { __proto__: null }) {
     try {
+      validateModuleThis(this, "Module");
       validateObject(options, "options");
       const status = op_vm_module_get_status(this[kWrap]);
-      // Allow evaluate from linked (2), evaluating (3), evaluated (4), errored (5).
-      if (status < 2) {
+      // Allow evaluate only from linked (2), evaluated (4), errored (5).
+      // Reject evaluating (3): a re-entrant evaluate while the module is
+      // already evaluating would otherwise reach V8 and abort.
+      if (status !== 2 && status !== 4 && status !== 5) {
         throw new ERR_VM_MODULE_STATUS(
           "must be one of linked, evaluated, or errored",
         );
@@ -891,6 +911,7 @@ class SyntheticModule extends Module {
   }
 
   setExport(name, value) {
+    validateModuleThis(this, "SyntheticModule");
     validateString(name, "name");
     const status = op_vm_module_get_status(this[kWrap]);
     if (status < 2) {

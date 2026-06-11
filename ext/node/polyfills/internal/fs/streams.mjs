@@ -8,6 +8,7 @@ const {
   MathMin,
   NumberPOSITIVE_INFINITY,
   ObjectDefineProperty,
+  ObjectPrototypeHasOwnProperty,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   PromisePrototypeThen,
@@ -18,12 +19,16 @@ const {
 } = primordials;
 const {
   ERR_INVALID_ARG_TYPE,
+  ERR_INVALID_THIS,
   ERR_METHOD_NOT_IMPLEMENTED,
   ERR_OUT_OF_RANGE,
+  ERR_STREAM_DESTROYED,
+  genericNodeError,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { kEmptyObject } = core.loadExtScript("ext:deno_node/internal/util.mjs");
 const { deprecate } = core.loadExtScript("ext:deno_node/util.ts");
 const {
+  validateBoolean,
   validateFunction,
   validateInteger,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
@@ -49,6 +54,15 @@ const kIoDone = Symbol("kIoDone");
 const kIsPerformingIO = Symbol("kIsPerformingIO");
 const kFs = Symbol("kFs");
 const kHandle = Symbol("kHandle");
+
+function validateThisInternalField(object, fieldKey, className) {
+  if (
+    typeof object !== "object" || object === null ||
+    !ObjectPrototypeHasOwnProperty(object, fieldKey)
+  ) {
+    throw new ERR_INVALID_THIS(className);
+  }
+}
 
 function _construct(callback) {
   // deno-lint-ignore no-this-alias
@@ -140,12 +154,20 @@ const FileHandleOperations = (handle) => {
 function close(stream, err, cb) {
   if (!stream.fd) {
     cb(err);
-  } else {
-    stream[kFs].close(stream.fd, (er) => {
-      cb(er || err);
+  } else if (stream.flush) {
+    stream[kFs].fsync(stream.fd, (flushErr) => {
+      _close(stream, err || flushErr, cb);
     });
-    stream.fd = null;
+  } else {
+    _close(stream, err, cb);
   }
+}
+
+function _close(stream, err, cb) {
+  stream[kFs].close(stream.fd, (er) => {
+    cb(er || err);
+  });
+  stream.fd = null;
 }
 
 function importFd(stream, options) {
@@ -252,9 +274,11 @@ ObjectSetPrototypeOf(ReadStream, lazyStream().Readable);
 ObjectDefineProperty(ReadStream.prototype, "autoClose", {
   __proto__: null,
   get() {
+    validateThisInternalField(this, kFs, "ReadStream");
     return this._readableState.autoDestroy;
   },
   set(val) {
+    validateThisInternalField(this, kFs, "ReadStream");
     this._readableState.autoDestroy = val;
   },
 });
@@ -422,6 +446,14 @@ export function WriteStream(path, options) {
     validateFunction(this[kFs].close, "options.fs.close");
   }
 
+  this.flush = options.flush;
+  if (this.flush == null) {
+    this.flush = false;
+  } else {
+    validateBoolean(this.flush, "options.flush");
+    validateFunction(this[kFs].fsync, "options.fs.fsync");
+  }
+
   // It's enough to override either, in which case only one will be used.
   if (!this[kFs].write) {
     this._write = null;
@@ -454,9 +486,11 @@ ObjectSetPrototypeOf(WriteStream, lazyStream().Writable);
 ObjectDefineProperty(WriteStream.prototype, "autoClose", {
   __proto__: null,
   get() {
+    validateThisInternalField(this, kFs, "WriteStream");
     return this._writableState.autoDestroy;
   },
   set(val) {
+    validateThisInternalField(this, kFs, "WriteStream");
     this._writableState.autoDestroy = val;
   },
 });
@@ -472,9 +506,74 @@ WriteStream.prototype.open = openWriteFs;
 
 WriteStream.prototype._construct = _construct;
 
+function writeAll(data, size, pos, cb, retries = 0) {
+  this[kFs].write(this.fd, data, 0, size, pos, (er, bytesWritten, buffer) => {
+    // No data currently available and operation should be retried later.
+    if (er?.code === "EAGAIN") {
+      er = null;
+      bytesWritten = 0;
+    }
+
+    if (this.destroyed || er) {
+      return cb(er || new ERR_STREAM_DESTROYED("write"));
+    }
+
+    this.bytesWritten += bytesWritten;
+
+    retries = bytesWritten ? 0 : retries + 1;
+    size -= bytesWritten;
+    pos += bytesWritten;
+
+    // Try writing non-zero number of bytes up to 5 times.
+    if (retries > 5) {
+      cb(genericNodeError("write failed", { code: "ERR_SYSTEM_ERROR" }));
+    } else if (size) {
+      writeAll.call(this, buffer.slice(bytesWritten), size, pos, cb, retries);
+    } else {
+      cb();
+    }
+  });
+}
+
+function writevAll(chunks, size, pos, cb, retries = 0) {
+  this[kFs].writev(this.fd, chunks, this.pos ?? null, (er, bytesWritten, buffers) => {
+    // No data currently available and operation should be retried later.
+    if (er?.code === "EAGAIN") {
+      er = null;
+      bytesWritten = 0;
+    }
+
+    if (this.destroyed || er) {
+      return cb(er || new ERR_STREAM_DESTROYED("writev"));
+    }
+
+    this.bytesWritten += bytesWritten;
+
+    retries = bytesWritten ? 0 : retries + 1;
+    size -= bytesWritten;
+    pos += bytesWritten;
+
+    // Try writing non-zero number of bytes up to 5 times.
+    if (retries > 5) {
+      cb(genericNodeError("writev failed", { code: "ERR_SYSTEM_ERROR" }));
+    } else if (size) {
+      writevAll.call(
+        this,
+        [Buffer.concat(buffers).slice(bytesWritten)],
+        size,
+        pos,
+        cb,
+        retries,
+      );
+    } else {
+      cb();
+    }
+  });
+}
+
 WriteStream.prototype._write = function (data, _encoding, cb) {
   this[kIsPerformingIO] = true;
-  this[kFs].write(this.fd, data, 0, data.length, this.pos, (er, bytes) => {
+  writeAll.call(this, data, data.length, this.pos, (er) => {
     this[kIsPerformingIO] = false;
     if (this.destroyed) {
       // Tell ._destroy() that it's safe to close the fd now.
@@ -482,12 +581,7 @@ WriteStream.prototype._write = function (data, _encoding, cb) {
       return this.emit(kIoDone, er);
     }
 
-    if (er) {
-      return cb(er);
-    }
-
-    this.bytesWritten += bytes;
-    cb();
+    cb(er);
   });
 
   if (this.pos !== undefined) {
@@ -508,7 +602,7 @@ WriteStream.prototype._writev = function (data, cb) {
   }
 
   this[kIsPerformingIO] = true;
-  this[kFs].writev(this.fd, chunks, this.pos ?? null, (er, bytes) => {
+  writevAll.call(this, chunks, size, this.pos, (er) => {
     this[kIsPerformingIO] = false;
     if (this.destroyed) {
       // Tell ._destroy() that it's safe to close the fd now.
@@ -516,12 +610,7 @@ WriteStream.prototype._writev = function (data, cb) {
       return this.emit(kIoDone, er);
     }
 
-    if (er) {
-      return cb(er);
-    }
-
-    this.bytesWritten += bytes;
-    cb();
+    cb(er);
   });
 
   if (this.pos !== undefined) {

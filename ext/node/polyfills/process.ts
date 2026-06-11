@@ -917,6 +917,15 @@ function _removeAllSignalListeners(
 // @ts-ignore TS doesn't work well with ES5 classes
 const process = new Process();
 
+// Mirror Node's `lib/domain.js` module-load default (`process.domain = null`).
+// Node sets this when `require('domain')` first runs; the Deno fork evaluates
+// `domain.ts` into the startup snapshot before the `process` global exists, so
+// the assignment cannot live there (it throws `process is not defined` at init).
+// Seeding the property here, where `process` is the in-scope singleton, gives
+// `process.domain === null` (not `undefined`) from first read onward, matching
+// Node. The domain polyfill's enter/exit paths overwrite it as domains activate.
+process.domain = null;
+
 // `node:process` exposes `stdin`/`stdout`/`stderr` as ESM named exports. The
 // underlying streams are constructed lazily via accessor properties on
 // `process` (see `defineLazyStream` below), so the `let` bindings stay

@@ -530,8 +530,6 @@ Decipheriv.prototype.final = function (
     return encoding === "buffer" ? Buffer.from([]) : "";
   }
 
-  _lazyInitDecipherDecoder(this, encoding);
-
   const bs = this._blockSize;
   let buf = new FastBuffer(bs);
   op_node_decipheriv_final(
@@ -541,6 +539,13 @@ Decipheriv.prototype.final = function (
     buf,
     this._authTag || NO_TAG,
   );
+
+  // Match Node's ordering: run the BoringSSL final() (which verifies the AEAD
+  // auth tag) before initializing the StringDecoder. Otherwise an encoding
+  // change here would mask an auth-tag-mismatch error for tampered ciphertext.
+  if (encoding !== "buffer") {
+    _lazyInitDecipherDecoder(this, encoding);
+  }
 
   if (!this._needsBlockCache || this._cache.cache.byteLength === 0) {
     this._finalized = true;

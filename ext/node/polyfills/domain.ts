@@ -35,6 +35,12 @@ let stack = [];
 let _stack = stack;
 let active = null;
 
+// Note: Node's `process.domain = null` module-load default is seeded in
+// process.ts where the `process` singleton is in scope. It cannot live here:
+// this module is evaluated into the startup snapshot before the `process`
+// global exists, so a top-level reference throws `process is not defined` and
+// aborts JsRuntime initialization.
+
 // Map asyncId -> domain for tracking async operations
 const pairing = new SafeMap();
 

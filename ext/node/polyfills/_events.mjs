@@ -1187,9 +1187,6 @@ function listenersController() {
   };
 }
 
-const kAsyncResource = Symbol("kAsyncResource");
-const kEventEmitter = Symbol("kEventEmitter");
-
 // EventEmitterAsyncResource and its helper class are defined lazily to avoid
 // eagerly loading node:async_hooks (which provides AsyncResource).
 let _EventEmitterAsyncResource;
@@ -1198,21 +1195,22 @@ function getEventEmitterAsyncResource() {
   const { AsyncResource } = lazyAsyncHooks();
 
   class EventEmitterReferencingAsyncResource extends AsyncResource {
+    #eventEmitter;
+
     constructor(ee, type, options) {
       super(type, options);
-      this[kEventEmitter] = ee;
+      this.#eventEmitter = ee;
     }
 
     get eventEmitter() {
-      if (this[kEventEmitter] === undefined) {
-        throw new ERR_INVALID_THIS("EventEmitterReferencingAsyncResource");
-      }
-      return this[kEventEmitter];
+      return this.#eventEmitter;
     }
   }
 
   _EventEmitterAsyncResource = class EventEmitterAsyncResource
     extends EventEmitter {
+    #asyncResource;
+
     constructor(options = undefined) {
       let name;
       if (typeof options === "string") {
@@ -1226,7 +1224,7 @@ function getEventEmitterAsyncResource() {
       }
       super(options);
 
-      this[kAsyncResource] = new EventEmitterReferencingAsyncResource(
+      this.#asyncResource = new EventEmitterReferencingAsyncResource(
         this,
         name,
         options,
@@ -1234,10 +1232,7 @@ function getEventEmitterAsyncResource() {
     }
 
     emit(event, ...args) {
-      if (this[kAsyncResource] === undefined) {
-        throw new ERR_INVALID_THIS("EventEmitterAsyncResource");
-      }
-      const { asyncResource } = this;
+      const asyncResource = this.#asyncResource;
       ArrayPrototypeUnshift(args, super.emit, this, event);
       return FunctionPrototypeApply(
         asyncResource.runInAsyncScope,
@@ -1247,31 +1242,19 @@ function getEventEmitterAsyncResource() {
     }
 
     emitDestroy() {
-      if (this[kAsyncResource] === undefined) {
-        throw new ERR_INVALID_THIS("EventEmitterAsyncResource");
-      }
-      this.asyncResource.emitDestroy();
+      this.#asyncResource.emitDestroy();
     }
 
     get asyncId() {
-      if (this[kAsyncResource] === undefined) {
-        throw new ERR_INVALID_THIS("EventEmitterAsyncResource");
-      }
-      return this.asyncResource.asyncId();
+      return this.#asyncResource.asyncId();
     }
 
     get triggerAsyncId() {
-      if (this[kAsyncResource] === undefined) {
-        throw new ERR_INVALID_THIS("EventEmitterAsyncResource");
-      }
-      return this.asyncResource.triggerAsyncId();
+      return this.#asyncResource.triggerAsyncId();
     }
 
     get asyncResource() {
-      if (this[kAsyncResource] === undefined) {
-        throw new ERR_INVALID_THIS("EventEmitterAsyncResource");
-      }
-      return this[kAsyncResource];
+      return this.#asyncResource;
     }
   };
 

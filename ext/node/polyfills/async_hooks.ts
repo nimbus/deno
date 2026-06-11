@@ -168,6 +168,13 @@ class AsyncResource {
         value: fn.length,
         writable: false,
       },
+      "asyncResource": {
+        __proto__: null,
+        configurable: true,
+        enumerable: true,
+        value: this,
+        writable: true,
+      },
     });
     return bound;
   }

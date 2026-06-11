@@ -294,7 +294,7 @@ class PerformanceMark extends PerformanceEntry {
         `Cannot construct PerformanceMark: startTime cannot be negative, received ${startTime}`,
       );
     }
-    this[_detail] = getStructuredClone()(detail);
+    this[_detail] = detail == null ? null : getStructuredClone()(detail);
   }
 
   toJSON() {
@@ -353,7 +353,7 @@ class PerformanceMeasure extends PerformanceEntry {
 
     super(name, "measure", startTime, duration, key);
     this[webidl.brand] = webidl.brand;
-    this[_detail] = getStructuredClone()(detail);
+    this[_detail] = detail == null ? null : getStructuredClone()(detail);
   }
 
   toJSON() {
