@@ -1399,8 +1399,26 @@ function toRealPath(requestPath) {
   return rp;
 }
 
-function defaultExtensionLookupOrder() {
-  return [".js", ".json", ".node"];
+// Mirror upstream `_findPath`, which uses `ObjectKeys(Module._extensions)` so a
+// custom `require.extensions[".foo.bar"] = ...` participates in bare-request
+// resolution. Upstream registers only `.js`/`.json`/`.node`, folding `.cjs` and
+// `.mjs` into the `.js` handler; this fork instead registers `.cjs`/`.mjs`/
+// `.wasm` as dispatch-only `_extensions` entries, so they must be filtered out
+// of the bare auto-try set to preserve upstream resolution parity (a bare
+// `require("./foo")` must not silently resolve `foo.mjs`). The result is
+// `[".js", ".json", ".node", ...userRegisteredExtensions]`, identical to the
+// previously hard-coded list when no custom extension is registered.
+function bareRequestExtensionLookupOrder() {
+  const keys = ObjectKeys(Module._extensions);
+  const exts = [];
+  for (let i = 0; i < keys.length; i++) {
+    const ext = keys[i];
+    if (ext === ".cjs" || ext === ".mjs" || ext === ".wasm") {
+      continue;
+    }
+    ArrayPrototypePush(exts, ext);
+  }
+  return exts;
 }
 
 function tryExtensions(p, exts, isMain) {
@@ -1689,7 +1707,7 @@ Module._findPath = function (request, paths, isMain, parentPath, conditions) {
       if (!filename) {
         // Try it with each of the extensions
         if (exts === undefined) {
-          exts = defaultExtensionLookupOrder();
+          exts = bareRequestExtensionLookupOrder();
         }
         filename = tryExtensions(basePath, exts, isMain);
       }
@@ -1698,7 +1716,7 @@ Module._findPath = function (request, paths, isMain, parentPath, conditions) {
     if (!filename && rc === 1) { // Directory.
       // try it with each of the extensions at "index"
       if (exts === undefined) {
-        exts = defaultExtensionLookupOrder();
+        exts = bareRequestExtensionLookupOrder();
       }
       filename = tryPackage(basePath, exts, isMain, request);
     }
