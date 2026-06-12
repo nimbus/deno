@@ -54,6 +54,7 @@ const {
   ArrayPrototypeSplice,
   Error,
   JSONParse,
+  NumberParseInt,
   ObjectCreate,
   ObjectDefineProperty,
   ObjectEntries,
@@ -1867,6 +1868,27 @@ Module._load = function (request, parent, isMain) {
       : "node:" + filename;
     // Slice 'node:' prefix
     const id = StringPrototypeSlice(builtinFilename, 5);
+
+    // The `domain` module is mutually exclusive with a registered
+    // process.setUncaughtExceptionCaptureCallback() through Node 24: Node
+    // throws ERR_DOMAIN_CALLBACK_NOT_AVAILABLE from the domain module body on
+    // first load. Node 25+ removed the restriction so the two coexist.
+    // domain.ts is evaluated into the startup snapshot here, so enforce the
+    // same version-gated check at the user require() of node:domain.
+    if (id === "domain") {
+      const nodeVersion = globalThis.process?.versions?.node;
+      const nodeMajor = typeof nodeVersion === "string"
+        ? NumberParseInt(nodeVersion, 10)
+        : 24;
+      if (
+        nodeMajor <= 24 &&
+        typeof globalThis.process?.hasUncaughtExceptionCaptureCallback ===
+          "function" &&
+        globalThis.process.hasUncaughtExceptionCaptureCallback()
+      ) {
+        throw new internalErrors.ERR_DOMAIN_CALLBACK_NOT_AVAILABLE();
+      }
+    }
 
     // Run load hooks for builtins if registered. Node invokes the load hook
     // chain on every require() of a builtin, so do this before the cache
