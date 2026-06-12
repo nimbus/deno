@@ -21,6 +21,7 @@ const {
   op_vm_module_get_namespace,
   op_vm_module_get_status,
   op_vm_module_instantiate,
+  op_vm_module_is_graph_async,
   op_vm_module_link,
   op_vm_module_set_synthetic_export,
   op_vm_script_create_cached_data,
@@ -849,6 +850,16 @@ class SourceTextModule extends Module {
 
   instantiate() {
     op_vm_module_instantiate(this[kWrap]);
+  }
+
+  hasAsyncGraph() {
+    // V8's Module::IsGraphAsync requires the module to be at least
+    // instantiated; statuses below 2 are "unlinked"/"linking" (see the
+    // `namespace` getter), so reject them with the same error Node raises.
+    if (op_vm_module_get_status(this[kWrap]) < 2) {
+      throw new ERR_VM_MODULE_STATUS("must not be unlinked or linking");
+    }
+    return op_vm_module_is_graph_async(this[kWrap]);
   }
 }
 

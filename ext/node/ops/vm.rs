@@ -2179,6 +2179,19 @@ pub fn op_vm_module_get_status(
   module.get_status() as u32
 }
 
+// Backs `vm.SourceTextModule.prototype.hasAsyncGraph()` (Node 24+). V8's
+// `Module::IsGraphAsync` reports whether this module or any module in its
+// requested-module graph contains top-level await; it requires the module to be
+// at least instantiated, which the JS wrapper enforces before calling.
+#[op2(fast)]
+pub fn op_vm_module_is_graph_async(
+  #[cppgc] this: &ContextifyModule,
+  scope: &mut v8::PinScope<'_, '_>,
+) -> bool {
+  let module = this.module.get(scope).unwrap();
+  module.is_graph_async()
+}
+
 #[op2]
 pub fn op_vm_module_get_namespace<'a>(
   scope: &mut v8::PinScope<'a, '_>,
