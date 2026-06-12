@@ -50,6 +50,7 @@ const {
   ERR_VM_MODULE_CACHED_DATA_REJECTED,
   ERR_VM_MODULE_CANNOT_CREATE_CACHED_DATA,
   ERR_VM_MODULE_DIFFERENT_CONTEXT,
+  ERR_VM_MODULE_LINK_FAILURE,
   ERR_VM_MODULE_NOT_MODULE,
   ERR_VM_MODULE_STATUS,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
@@ -615,14 +616,17 @@ class Module {
   }
 
   get identifier() {
+    validateModuleThis(this, "Module");
     return op_vm_module_get_identifier(this[kWrap]);
   }
 
   get context() {
+    validateModuleThis(this, "Module");
     return this[kContext];
   }
 
   get namespace() {
+    validateModuleThis(this, "Module");
     const status = op_vm_module_get_status(this[kWrap]);
     if (status < 2) {
       throw new ERR_VM_MODULE_STATUS("must not be unlinked or linking");
@@ -631,6 +635,7 @@ class Module {
   }
 
   get status() {
+    validateModuleThis(this, "Module");
     if (this[kLinkingStatus] !== null) {
       return this[kLinkingStatus];
     }
@@ -638,6 +643,7 @@ class Module {
   }
 
   get error() {
+    validateModuleThis(this, "Module");
     if (this.status !== "errored") {
       throw new ERR_VM_MODULE_STATUS("must be errored");
     }
@@ -660,7 +666,13 @@ class Module {
       this[kLinkingStatus] = null;
       return v;
     }, (e) => {
-      this[kLinkingStatus] = null;
+      // A link failure (linker returned a non-Module, a different-context
+      // module, or a duplicate cache-key mismatch) leaves the module
+      // permanently `errored`, matching Node's vm.SourceTextModule status
+      // machine. Returning to `null` here would let `status` fall back to the
+      // V8 module status (still `kUninstantiated` -> "unlinked"), which Node
+      // never reports after a failed link.
+      this[kLinkingStatus] = "errored";
       throw e;
     });
   }
@@ -713,6 +725,15 @@ class Module {
       if (m.context !== this[kContext]) {
         throw new ERR_VM_MODULE_DIFFERENT_CONTEXT();
       }
+      // Node fails the link (ERR_VM_MODULE_LINK_FAILURE, cause = the dependency's
+      // own error) when a resolved dependency is already in `errored` state,
+      // rather than letting V8 instantiate over an errored graph node.
+      if (m.status === "errored") {
+        throw new ERR_VM_MODULE_LINK_FAILURE(
+          `request for '${requests[i].specifier}' resolved to an errored module`,
+          m.error,
+        );
+      }
       ArrayPrototypePush(wraps, m[kWrap]);
     }
 
@@ -729,6 +750,13 @@ class Module {
     try {
       validateModuleThis(this, "Module");
       validateObject(options, "options");
+      // Node validates the options (including the breakOnSigint type) BEFORE
+      // checking module status, so an invalid option on an unlinked module
+      // surfaces ERR_INVALID_ARG_TYPE rather than ERR_VM_MODULE_STATUS. The
+      // isolate does not honor SIGINT interruption, so the value is validated
+      // but otherwise unused.
+      const { breakOnSigint = false } = options;
+      validateBoolean(breakOnSigint, "options.breakOnSigint");
       const status = op_vm_module_get_status(this[kWrap]);
       // Allow evaluate only from linked (2), evaluated (4), errored (5).
       // Reject evaluating (3): a re-entrant evaluate while the module is
@@ -806,10 +834,12 @@ class SourceTextModule extends Module {
   }
 
   get moduleRequests() {
+    validateModuleThis(this, "SourceTextModule");
     return this[kModuleRequests];
   }
 
   get dependencySpecifiers() {
+    validateModuleThis(this, "SourceTextModule");
     if (this[kDependencySpecifiers] === undefined) {
       this[kDependencySpecifiers] = ObjectFreeze(
         ArrayPrototypeMap(this[kModuleRequests], (r) => r.specifier),
