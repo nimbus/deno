@@ -1634,6 +1634,11 @@ pub struct ContextifyModule {
   /// to surface `ERR_VM_MODULE_LINK_FAILURE` when `instantiate()` is called
   /// without first linking.
   is_linked: Cell<bool>,
+  /// Set true when this source-text module was constructed with a `cachedData`
+  /// option that V8 rejected (the cache did not match the source). Read once by
+  /// the JS wrapper to raise ERR_VM_MODULE_CACHED_DATA_REJECTED. Always false
+  /// for synthetic modules and for source-text modules built without a cache.
+  cached_data_rejected: Cell<bool>,
   /// If this is a synthetic module, the V8 identity hash used as the key in
   /// `SYNTHETIC_CALLBACKS`. Stored separately so `Drop` can clean up the
   /// registry entry without needing a v8 scope.
@@ -1690,6 +1695,7 @@ pub fn op_vm_module_create_source_text_module<'a>(
   column_offset: i32,
   context_object: Option<v8::Local<'a, v8::Object>>,
   import_module_dynamically_id: i32,
+  #[buffer] cached_data: Option<JsBuffer>,
 ) -> Option<ContextifyModule> {
   let (context, microtask_queue) =
     resolve_module_context(scope, context_object)?;
@@ -1712,16 +1718,43 @@ pub fn op_vm_module_create_source_text_module<'a>(
     host_defined_options,
   );
 
-  let mut compile_source =
-    v8::script_compiler::Source::new(source, Some(&origin));
+  let mut compile_source = if let Some(cached_data) = cached_data {
+    let cached_data = v8::script_compiler::CachedData::new(&cached_data);
+    v8::script_compiler::Source::new_with_cached_data(
+      source,
+      Some(&origin),
+      cached_data,
+    )
+  } else {
+    v8::script_compiler::Source::new(source, Some(&origin))
+  };
+
+  let compile_options = if compile_source.get_cached_data().is_some() {
+    v8::script_compiler::CompileOptions::ConsumeCodeCache
+  } else {
+    v8::script_compiler::CompileOptions::NoCompileOptions
+  };
 
   v8::tc_scope!(scope, scope);
-  let module = v8::script_compiler::compile_module(scope, &mut compile_source);
+  let module = v8::script_compiler::compile_module2(
+    scope,
+    &mut compile_source,
+    compile_options,
+    v8::script_compiler::NoCacheReason::NoReason,
+  );
   if scope.has_caught() {
     scope.rethrow();
     return None;
   }
   let module = module?;
+
+  // When `cachedData` was supplied, V8 sets the rejected flag if the cache did
+  // not match the freshly compiled source; the JS wrapper turns that into
+  // ERR_VM_MODULE_CACHED_DATA_REJECTED.
+  let cached_data_rejected = compile_source
+    .get_cached_data()
+    .map(|c| c.rejected())
+    .unwrap_or(false);
 
   Some(ContextifyModule {
     module: v8::TracedReference::new(scope, module),
@@ -1730,6 +1763,7 @@ pub fn op_vm_module_create_source_text_module<'a>(
     identifier,
     resolutions: RefCell::new(HashMap::new()),
     is_linked: Cell::new(false),
+    cached_data_rejected: Cell::new(cached_data_rejected),
     synthetic_identity_hash: None,
   })
 }
@@ -1802,6 +1836,7 @@ pub fn op_vm_module_create_synthetic_module<'a>(
     // Synthetic modules have no dependencies; they're considered linked
     // from creation so `op_vm_module_instantiate` doesn't reject them.
     is_linked: Cell::new(true),
+    cached_data_rejected: Cell::new(false),
     synthetic_identity_hash: Some(hash),
   })
 }
@@ -2190,6 +2225,37 @@ pub fn op_vm_module_is_graph_async(
 ) -> bool {
   let module = this.module.get(scope).unwrap();
   module.is_graph_async()
+}
+
+// Backs `vm.SourceTextModule.prototype.createCachedData()`. V8 exposes the
+// compiled module's code cache through its unbound module script. The JS
+// wrapper rejects the call after evaluation
+// (ERR_VM_MODULE_CANNOT_CREATE_CACHED_DATA), so reaching here means the module
+// is still compilable; an empty buffer is returned if V8 produces no cache.
+#[op2]
+pub fn op_vm_module_create_cached_data<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  #[cppgc] this: &ContextifyModule,
+) -> v8::Local<'a, v8::Value> {
+  let module = this.module.get(scope).unwrap();
+  let unbound = module.get_unbound_module_script(scope);
+  let data = match unbound.create_code_cache() {
+    Some(c) => c.to_vec(),
+    None => vec![],
+  };
+  let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(data);
+  v8::ArrayBuffer::with_backing_store(scope, &backing_store.make_shared())
+    .into()
+}
+
+// Reports whether a `cachedData` option supplied at construction was rejected
+// by V8 (the cache did not match the source). The JS wrapper turns a `true`
+// here into ERR_VM_MODULE_CACHED_DATA_REJECTED.
+#[op2(fast)]
+pub fn op_vm_module_cached_data_rejected(
+  #[cppgc] this: &ContextifyModule,
+) -> bool {
+  this.cached_data_rejected.get()
 }
 
 #[op2]

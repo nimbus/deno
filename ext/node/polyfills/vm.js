@@ -19,6 +19,8 @@ const {
   op_vm_module_get_identifier,
   op_vm_module_get_module_requests,
   op_vm_module_get_namespace,
+  op_vm_module_cached_data_rejected,
+  op_vm_module_create_cached_data,
   op_vm_module_get_status,
   op_vm_module_instantiate,
   op_vm_module_is_graph_async,
@@ -45,6 +47,8 @@ const {
   ERR_INVALID_THIS,
   ERR_MODULE_LINK_MISMATCH,
   ERR_VM_MODULE_ALREADY_LINKED,
+  ERR_VM_MODULE_CACHED_DATA_REJECTED,
+  ERR_VM_MODULE_CANNOT_CREATE_CACHED_DATA,
   ERR_VM_MODULE_DIFFERENT_CONTEXT,
   ERR_VM_MODULE_NOT_MODULE,
   ERR_VM_MODULE_STATUS,
@@ -757,6 +761,7 @@ class SourceTextModule extends Module {
       lineOffset = 0,
       columnOffset = 0,
       importModuleDynamically,
+      cachedData,
     } = options;
     if (context !== undefined) {
       validateContext(context);
@@ -764,6 +769,9 @@ class SourceTextModule extends Module {
     validateString(identifier, "options.identifier");
     validateInt32(lineOffset, "options.lineOffset");
     validateInt32(columnOffset, "options.columnOffset");
+    if (cachedData !== undefined) {
+      validateBuffer(cachedData, "options.cachedData");
+    }
 
     const referrer = { value: undefined };
     const effectiveImportModuleDynamically =
@@ -784,7 +792,14 @@ class SourceTextModule extends Module {
       columnOffset,
       context,
       importModuleDynamicallyId,
+      cachedData,
     );
+    if (
+      cachedData !== undefined &&
+      op_vm_module_cached_data_rejected(this[kWrap])
+    ) {
+      throw new ERR_VM_MODULE_CACHED_DATA_REJECTED();
+    }
     referrer.value = this;
     this[kModuleRequests] = buildModuleRequests(this[kWrap]);
     this[kDependencySpecifiers] = undefined;
@@ -860,6 +875,15 @@ class SourceTextModule extends Module {
       throw new ERR_VM_MODULE_STATUS("must not be unlinked or linking");
     }
     return op_vm_module_is_graph_async(this[kWrap]);
+  }
+
+  createCachedData() {
+    // Node forbids cache creation once evaluation has begun: statuses >= 3 are
+    // "evaluating"/"evaluated"/"errored".
+    if (op_vm_module_get_status(this[kWrap]) >= 3) {
+      throw new ERR_VM_MODULE_CANNOT_CREATE_CACHED_DATA();
+    }
+    return Buffer.from(op_vm_module_create_cached_data(this[kWrap]));
   }
 }
 
