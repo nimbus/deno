@@ -1,18 +1,15 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// deno-lint-ignore-file prefer-primordials
 // translated primarily from: https://github.com/nodejs/node/blob/2acc8bc6a9a830b38d101ac70390b8c5c9a14bf3/lib/internal/fs/glob.js#L258
 // with glob() and globSync() from: https://github.com/nodejs/node/blob/2acc8bc6a9a830b38d101ac70390b8c5c9a14bf3/lib/fs.js#L3167
 import { core, primordials } from "ext:core/mod.js";
 
 const {
-  validateBoolean,
   validateObject,
   validateString,
   validateStringArray,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const { isMacOS, isWindows } = core.loadExtScript("ext:deno_node/_util/os.ts");
 const { kEmptyObject } = core.loadExtScript("ext:deno_node/internal/util.mjs");
-const lazyFs = core.createLazyLoader("node:fs");
 const lazyProcess = core.createLazyLoader("node:process");
 const lazyReaddir = core.createLazyLoader(
   "ext:deno_node/_fs/_fs_readdir.ts",
@@ -21,6 +18,7 @@ const {
   lstatPromise: lstat,
   lstatSync,
 } = core.loadExtScript("ext:deno_node/_fs/_fs_lstat.ts");
+
 const {
   basename,
   dirname,
@@ -58,11 +56,6 @@ interface GlobOptionsBase {
    */
   withFileTypes?: boolean | undefined;
   /**
-   * `true` if the glob should follow symbolic links while traversing.
-   * @default false
-   */
-  followSymlinks?: boolean | undefined;
-  /**
    * Function to filter out files/directories. Return true to exclude the item, false to include it.
    */
   // deno-lint-ignore no-explicit-any
@@ -94,16 +87,21 @@ const nop = () => {};
 
 const {
   ArrayFrom,
+  ArrayFromAsync,
   ArrayIsArray,
   ArrayPrototypeAt,
+  ArrayPrototypeFlatMap,
   ArrayPrototypeMap,
   ArrayPrototypePop,
   ArrayPrototypePush,
   ArrayPrototypeSome,
+  MapPrototypeForEach,
   PromisePrototype,
   PromisePrototypeThen,
   SafeMap,
   SafeSet,
+  SafeSetIterator,
+  SetPrototypeForEach,
   StringPrototypeEndsWith,
   ReflectApply,
   ObjectPrototypeIsPrototypeOf,
@@ -183,50 +181,10 @@ function createMatcher(pattern, options = kEmptyObject) {
   return new (lazyMinimatch().default.Minimatch)(pattern, opts);
 }
 
-function cloneSet(values) {
-  const cloned = new SafeSet();
-  for (const value of values) {
-    cloned.add(value);
-  }
-  return cloned;
-}
-
-async function getFollowStats(path) {
-  return await new Promise((resolve) => {
-    lazyFs().stat(path, (err, stats) => resolve(err ? null : stats));
-  });
-}
-
-function getFollowStatsSync(path) {
-  try {
-    return lazyFs().statSync(path, { throwIfNoEntry: false }) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-async function getRealpath(path) {
-  return await new Promise((resolve) => {
-    lazyFs().realpath(path, (err, realPath) => {
-      resolve(err ? null : realPath);
-    });
-  });
-}
-
-function getRealpathSync(path) {
-  try {
-    return lazyFs().realpathSync(path);
-  } catch {
-    return null;
-  }
-}
-
 class Cache {
   #cache = new SafeMap();
   #statsCache = new SafeMap();
-  #followStatsCache = new SafeMap();
   #readdirCache = new SafeMap();
-  #realpathCache = new SafeMap();
 
   stat(path) {
     const cached = this.#statsCache.get(path);
@@ -245,42 +203,6 @@ class Cache {
     }
     const val = getDirentSync(path);
     this.#statsCache.set(path, val);
-    return val;
-  }
-  followStat(path) {
-    const cached = this.#followStatsCache.get(path);
-    if (cached) {
-      return cached;
-    }
-    const promise = getFollowStats(path);
-    this.#followStatsCache.set(path, promise);
-    return promise;
-  }
-  followStatSync(path) {
-    const cached = this.#followStatsCache.get(path);
-    if (cached && !ObjectPrototypeIsPrototypeOf(PromisePrototype, cached)) {
-      return cached;
-    }
-    const val = getFollowStatsSync(path);
-    this.#followStatsCache.set(path, val);
-    return val;
-  }
-  realpath(path) {
-    const cached = this.#realpathCache.get(path);
-    if (cached) {
-      return cached;
-    }
-    const promise = getRealpath(path);
-    this.#realpathCache.set(path, promise);
-    return promise;
-  }
-  realpathSync(path) {
-    const cached = this.#realpathCache.get(path);
-    if (cached && !ObjectPrototypeIsPrototypeOf(PromisePrototype, cached)) {
-      return cached;
-    }
-    const val = getRealpathSync(path);
-    this.#realpathCache.set(path, val);
     return val;
   }
   addToStatCache(path, val) {
@@ -326,7 +248,10 @@ class Cache {
       this.#cache.set(path, cache);
     }
     const originalSize = cache.size;
-    pattern.indexes.forEach((index) => cache.add(pattern.cacheKey(index)));
+    SetPrototypeForEach(
+      pattern.indexes,
+      (index) => cache.add(pattern.cacheKey(index)),
+    );
     return cache.size !== originalSize + pattern.indexes.size;
   }
   seen(path, pattern, index) {
@@ -339,28 +264,21 @@ class Pattern {
   #globStrings;
   indexes;
   symlinks;
-  realpaths;
   last;
 
-  constructor(
-    pattern,
-    globStrings,
-    indexes,
-    symlinks,
-    realpaths = new SafeSet(),
-  ) {
+  constructor(pattern, globStrings, indexes, symlinks) {
     this.#pattern = pattern;
     this.#globStrings = globStrings;
     this.indexes = indexes;
     this.symlinks = symlinks;
-    this.realpaths = realpaths;
     this.last = pattern.length - 1;
   }
 
   isLast(isDirectory) {
     return this.indexes.has(this.last) ||
-      (this.at(-1) === "" && isDirectory && this.indexes.has(this.last - 1) &&
-        this.at(-2) === lazyMinimatch().default.GLOBSTAR);
+      (this.partAt(-1) === "" && isDirectory &&
+        this.indexes.has(this.last - 1) &&
+        this.partAt(-2) === lazyMinimatch().default.GLOBSTAR);
   }
   isFirst() {
     return this.indexes.has(0);
@@ -371,17 +289,11 @@ class Pattern {
       (i) => !this.symlinks.has(i),
     );
   }
-  at(index) {
+  partAt(index) {
     return ArrayPrototypeAt(this.#pattern, index);
   }
-  child(indexes, symlinks = new SafeSet(), realpaths = this.realpaths) {
-    return new Pattern(
-      this.#pattern,
-      this.#globStrings,
-      indexes,
-      symlinks,
-      realpaths,
-    );
+  child(indexes, symlinks = new SafeSet()) {
+    return new Pattern(this.#pattern, this.#globStrings, indexes, symlinks);
   }
   test(index, path) {
     if (index > this.#pattern.length) {
@@ -439,16 +351,11 @@ export class Glob {
   #subpatterns = new SafeMap();
   #patterns;
   #withFileTypes;
-  #followSymlinks = false;
   #isExcluded = () => false;
   constructor(pattern, options = kEmptyObject) {
     validateObject(options, "options");
-    const { exclude, cwd, followSymlinks, withFileTypes } = options;
+    const { exclude, cwd, withFileTypes } = options;
     this.#root = toPathIfFileURL(cwd) ?? ".";
-    if (followSymlinks != null) {
-      validateBoolean(followSymlinks, "options.followSymlinks");
-      this.#followSymlinks = followSymlinks;
-    }
     this.#withFileTypes = !!withFileTypes;
     if (exclude != null) {
       validateStringArrayOrFunction(exclude, "options.exclude");
@@ -456,10 +363,16 @@ export class Glob {
         assert(typeof this.#root === "string");
         // Convert the path part of exclude patterns to absolute paths for
         // consistent comparison before instantiating matchers.
-        const matchers = exclude.map((pattern) => resolve(this.#root, pattern))
-          .map((pattern) => createMatcher(pattern));
+        const matchers = ArrayPrototypeMap(
+          ArrayPrototypeMap(exclude, (pattern) => resolve(this.#root, pattern)),
+          (pattern) => createMatcher(pattern),
+        );
         this.#isExcluded = (value) =>
-          matchers.some((matcher) => matcher.match(value));
+          ArrayPrototypeSome(matchers, (matcher) => {
+            // No primordial exists for Minimatch.prototype.match.
+            // deno-lint-ignore prefer-primordials
+            return matcher.match(value);
+          });
         this.#results.setup(this.#root, this.#isExcluded);
       } else {
         this.#exclude = exclude;
@@ -477,86 +390,20 @@ export class Glob {
       patterns,
       (pattern) => createMatcher(pattern),
     );
-    this.#patterns = this.matchers.flatMap((matcher) =>
-      ArrayPrototypeMap(
-        matcher.set,
-        (pattern, i) =>
-          new Pattern(
-            pattern,
-            matcher.globParts[i],
-            new SafeSet().add(0),
-            new SafeSet(),
-          ),
-      )
+    this.#patterns = ArrayPrototypeFlatMap(
+      this.matchers,
+      (matcher) =>
+        ArrayPrototypeMap(
+          matcher.set,
+          (pattern, i) =>
+            new Pattern(
+              pattern,
+              matcher.globParts[i],
+              new SafeSet().add(0),
+              new SafeSet(),
+            ),
+        ),
     );
-  }
-
-  #isDirectorySync(path, stat, pattern) {
-    if (stat?.isDirectory()) {
-      return true;
-    }
-    if (!stat?.isSymbolicLink()) {
-      return false;
-    }
-    if (this.#followSymlinks) {
-      return !!this.#cache.followStatSync(path)?.isDirectory();
-    }
-    return pattern.hasSeenSymlinks;
-  }
-
-  async #isDirectory(path, stat, pattern) {
-    if (stat?.isDirectory()) {
-      return true;
-    }
-    if (!stat?.isSymbolicLink()) {
-      return false;
-    }
-    if (this.#followSymlinks) {
-      return !!(await this.#cache.followStat(path))?.isDirectory();
-    }
-    return pattern.hasSeenSymlinks;
-  }
-
-  #nextRealpathsSync(path, isDirectory, pattern) {
-    if (!this.#followSymlinks || !isDirectory) {
-      return pattern.realpaths;
-    }
-    const real = this.#cache.realpathSync(path);
-    if (real === null) {
-      return pattern.realpaths;
-    }
-    const realpaths = cloneSet(pattern.realpaths);
-    realpaths.add(real);
-    return realpaths;
-  }
-
-  async #nextRealpaths(path, isDirectory, pattern) {
-    if (!this.#followSymlinks || !isDirectory) {
-      return pattern.realpaths;
-    }
-    const real = await this.#cache.realpath(path);
-    if (real === null) {
-      return pattern.realpaths;
-    }
-    const realpaths = cloneSet(pattern.realpaths);
-    realpaths.add(real);
-    return realpaths;
-  }
-
-  #isCyclicSync(path, isDirectory, pattern) {
-    if (!this.#followSymlinks || !isDirectory) {
-      return false;
-    }
-    const real = this.#cache.realpathSync(path);
-    return real !== null && pattern.realpaths.has(real);
-  }
-
-  async #isCyclic(path, isDirectory, pattern) {
-    if (!this.#followSymlinks || !isDirectory) {
-      return false;
-    }
-    const real = await this.#cache.realpath(path);
-    return real !== null && pattern.realpaths.has(real);
   }
 
   globSync() {
@@ -570,8 +417,10 @@ export class Glob {
       for (let i = 0; i < item.patterns.length; i++) {
         this.#addSubpatterns(item.path, item.patterns[i]);
       }
-      this.#subpatterns.forEach((patterns, path) =>
-        ArrayPrototypePush(this.#queue, { __proto__: null, path, patterns })
+      MapPrototypeForEach(
+        this.#subpatterns,
+        (patterns, path) =>
+          ArrayPrototypePush(this.#queue, { __proto__: null, path, patterns }),
       );
       this.#subpatterns.clear();
     }
@@ -620,60 +469,47 @@ export class Glob {
     if (seen) {
       return;
     }
-    const last = pattern.last;
-    const isFirst = pattern.isFirst();
-    if (isFirst && pattern.at(0) === "") {
-      let index = 1;
-      let absolutePrefix = "/";
-      while (
-        index < last &&
-        typeof pattern.at(index) === "string" &&
-        pattern.at(index) !== "" &&
-        pattern.at(index) !== "." &&
-        pattern.at(index) !== ".."
-      ) {
-        absolutePrefix = join(absolutePrefix, pattern.at(index));
-        index++;
-      }
-      this.#addSubpattern(
-        absolutePrefix,
-        pattern.child(new SafeSet().add(index)),
-      );
-      return;
-    }
     const fullpath = resolve(this.#root, path);
     const stat = this.#cache.statSync(fullpath);
-    const isDirectory = this.#isDirectorySync(fullpath, stat, pattern);
+    const last = pattern.last;
+    const isDirectory = stat?.isDirectory() ||
+      (stat?.isSymbolicLink() && pattern.hasSeenSymlinks);
     const isLast = pattern.isLast(isDirectory);
+    const isFirst = pattern.isFirst();
 
     if (this.#isExcluded(fullpath)) {
       return;
     }
     if (
-      isFirst && isWindows && typeof pattern.at(0) === "string" &&
-      StringPrototypeEndsWith(pattern.at(0), ":")
+      isFirst && isWindows && typeof pattern.partAt(0) === "string" &&
+      StringPrototypeEndsWith(pattern.partAt(0), ":")
     ) {
       // Absolute path, go to root
       this.#addSubpattern(
-        `${pattern.at(0)}\\`,
+        `${pattern.partAt(0)}\\`,
         pattern.child(new SafeSet().add(1)),
       );
       return;
     }
-    if (isFirst && pattern.at(0) === "..") {
+    if (isFirst && pattern.partAt(0) === "") {
+      // Absolute path, go to root
+      this.#addSubpattern("/", pattern.child(new SafeSet().add(1)));
+      return;
+    }
+    if (isFirst && pattern.partAt(0) === "..") {
       // Start with .., go to parent
       this.#addSubpattern("../", pattern.child(new SafeSet().add(1)));
       return;
     }
-    if (isFirst && pattern.at(0) === ".") {
+    if (isFirst && pattern.partAt(0) === ".") {
       // Start with ., proceed
       this.#addSubpattern(".", pattern.child(new SafeSet().add(1)));
       return;
     }
 
-    if (isLast && typeof pattern.at(-1) === "string") {
+    if (isLast && typeof pattern.partAt(-1) === "string") {
       // Add result if it exists
-      const p = pattern.at(-1);
+      const p = pattern.partAt(-1);
       const stat = this.#cache.statSync(join(fullpath, p));
       if (stat && (p || isDirectory)) {
         this.#results.add(join(path, p));
@@ -682,27 +518,21 @@ export class Glob {
         return;
       }
     } else if (
-      isLast && pattern.at(-1) === lazyMinimatch().default.GLOBSTAR &&
-      (path !== "." || pattern.at(0) === "." || (last === 0 && stat))
+      isLast && pattern.partAt(-1) === lazyMinimatch().default.GLOBSTAR &&
+      (path !== "." || pattern.partAt(0) === "." || (last === 0 && stat))
     ) {
       // If pattern ends with **, add to results
       // if path is ".", add it only if pattern starts with "." or pattern is exactly "**"
       this.#results.add(path);
     }
 
-    if (!isDirectory || this.#isCyclicSync(fullpath, isDirectory, pattern)) {
+    if (!isDirectory) {
       return;
     }
 
-    const nextRealpaths = this.#nextRealpathsSync(
-      fullpath,
-      isDirectory,
-      pattern,
-    );
-
     let children;
     const firstPattern = pattern.indexes.size === 1 &&
-      pattern.at(pattern.indexes.values().next().value);
+      pattern.partAt(ArrayFrom(pattern.indexes)[0]);
     if (typeof firstPattern === "string") {
       const stat = this.#cache.statSync(join(fullpath, firstPattern));
       if (stat) {
@@ -718,21 +548,15 @@ export class Glob {
     for (let i = 0; i < children.length; i++) {
       const entry = children[i];
       const entryPath = join(path, entry.name);
-      const entryFullpath = join(fullpath, entry.name);
-      this.#cache.addToStatCache(entryFullpath, entry);
-      const entryIsDirectory = entry.isDirectory() ||
-        (this.#followSymlinks &&
-          entry.isSymbolicLink() &&
-          !!this.#cache.followStatSync(entryFullpath)?.isDirectory());
+      this.#cache.addToStatCache(join(fullpath, entry.name), entry);
 
       const subPatterns = new SafeSet();
       const nSymlinks = new SafeSet();
-      for (const index of pattern.indexes) {
-        const current = pattern.at(index);
+      for (const index of new SafeSetIterator(pattern.indexes)) {
+        const current = pattern.partAt(index);
         const nextIndex = index + 1;
-        const next = pattern.at(nextIndex);
-        const fromSymlink = !this.#followSymlinks &&
-          pattern.symlinks.has(index);
+        const next = pattern.partAt(nextIndex);
+        const fromSymlink = pattern.symlinks.has(index);
 
         if (current === lazyMinimatch().default.GLOBSTAR) {
           const isDot = entry.name[0] === ".";
@@ -741,7 +565,8 @@ export class Glob {
 
           let nextNonGlobIndex = nextIndex;
           while (
-            pattern.at(nextNonGlobIndex) === lazyMinimatch().default.GLOBSTAR
+            pattern.partAt(nextNonGlobIndex) ===
+              lazyMinimatch().default.GLOBSTAR
           ) {
             nextNonGlobIndex++;
           }
@@ -756,7 +581,7 @@ export class Glob {
           ) {
             continue;
           }
-          if (!fromSymlink && entryIsDirectory) {
+          if (!fromSymlink && entry.isDirectory()) {
             // If directory, add ** to its potential patterns
             subPatterns.add(index);
           } else if (!fromSymlink && index === last) {
@@ -769,26 +594,26 @@ export class Glob {
           if (nextMatches && nextIndex === last && !isLast) {
             // If next pattern is the last one, add to results
             this.#results.add(entryPath);
-          } else if (nextMatches && entryIsDirectory) {
+          } else if (nextMatches && entry.isDirectory()) {
             // Pattern matched, meaning two patterns forward
             // are also potential patterns
             // e.g **/b/c when entry is a/b - add c to potential patterns
             subPatterns.add(index + 2);
           }
           if (
-            (nextMatches || pattern.at(0) === ".") &&
-            (entryIsDirectory || entry.isSymbolicLink()) && !fromSymlink
+            (nextMatches || pattern.partAt(0) === ".") &&
+            (entry.isDirectory() || entry.isSymbolicLink()) && !fromSymlink
           ) {
             // If pattern after ** matches, or pattern starts with "."
             // and entry is a directory or symlink, add to potential patterns
             subPatterns.add(nextIndex);
           }
 
-          if (!this.#followSymlinks && entry.isSymbolicLink()) {
+          if (entry.isSymbolicLink()) {
             nSymlinks.add(index);
           }
 
-          if (next === ".." && entryIsDirectory) {
+          if (next === ".." && entry.isDirectory()) {
             // In case pattern is "**/..",
             // both parent and current directory should be added to the queue
             // if this is the last pattern, add to results instead
@@ -850,17 +675,14 @@ export class Glob {
           // add next pattern to potential patterns, or to results if it's the last pattern
           if (index === last) {
             this.#results.add(entryPath);
-          } else if (entryIsDirectory) {
+          } else if (entry.isDirectory()) {
             subPatterns.add(nextIndex);
           }
         }
       }
       if (subPatterns.size > 0) {
         // If there are potential patterns, add to queue
-        this.#addSubpattern(
-          entryPath,
-          pattern.child(subPatterns, nSymlinks, nextRealpaths),
-        );
+        this.#addSubpattern(entryPath, pattern.child(subPatterns, nSymlinks));
       }
     }
   }
@@ -874,10 +696,18 @@ export class Glob {
     while (this.#queue.length > 0) {
       const item = ArrayPrototypePop(this.#queue);
       for (let i = 0; i < item.patterns.length; i++) {
-        yield* this.#iterateSubpatterns(item.path, item.patterns[i]);
+        const iter = this.#iterateSubpatterns(item.path, item.patterns[i]);
+        while (true) {
+          // deno-lint-ignore prefer-primordials
+          const { done, value } = await iter.next();
+          if (done) break;
+          yield value;
+        }
       }
-      this.#subpatterns.forEach((patterns, path) =>
-        ArrayPrototypePush(this.#queue, { __proto__: null, path, patterns })
+      MapPrototypeForEach(
+        this.#subpatterns,
+        (patterns, path) =>
+          ArrayPrototypePush(this.#queue, { __proto__: null, path, patterns }),
       );
       this.#subpatterns.clear();
     }
@@ -887,61 +717,48 @@ export class Glob {
     if (seen) {
       return;
     }
-    const last = pattern.last;
-    const isFirst = pattern.isFirst();
-    if (isFirst && pattern.at(0) === "") {
-      let index = 1;
-      let absolutePrefix = "/";
-      while (
-        index < last &&
-        typeof pattern.at(index) === "string" &&
-        pattern.at(index) !== "" &&
-        pattern.at(index) !== "." &&
-        pattern.at(index) !== ".."
-      ) {
-        absolutePrefix = join(absolutePrefix, pattern.at(index));
-        index++;
-      }
-      this.#addSubpattern(
-        absolutePrefix,
-        pattern.child(new SafeSet().add(index)),
-      );
-      return;
-    }
     const fullpath = resolve(this.#root, path);
     const stat = await this.#cache.stat(fullpath);
-    const isDirectory = await this.#isDirectory(fullpath, stat, pattern);
+    const last = pattern.last;
+    const isDirectory = stat?.isDirectory() ||
+      (stat?.isSymbolicLink() && pattern.hasSeenSymlinks);
     const isLast = pattern.isLast(isDirectory);
+    const isFirst = pattern.isFirst();
 
     if (this.#isExcluded(fullpath)) {
       return;
     }
     if (
-      isFirst && isWindows && typeof pattern.at(0) === "string" &&
-      StringPrototypeEndsWith(pattern.at(0), ":")
+      isFirst && isWindows && typeof pattern.partAt(0) === "string" &&
+      StringPrototypeEndsWith(pattern.partAt(0), ":")
     ) {
       // Absolute path, go to root
       this.#addSubpattern(
-        `${pattern.at(0)}\\`,
+        `${pattern.partAt(0)}\\`,
         pattern.child(new SafeSet().add(1)),
       );
       return;
     }
 
-    if (isFirst && pattern.at(0) === "..") {
+    if (isFirst && pattern.partAt(0) === "") {
+      // Absolute path, go to root
+      this.#addSubpattern("/", pattern.child(new SafeSet().add(1)));
+      return;
+    }
+    if (isFirst && pattern.partAt(0) === "..") {
       // Start with .., go to parent
       this.#addSubpattern("../", pattern.child(new SafeSet().add(1)));
       return;
     }
-    if (isFirst && pattern.at(0) === ".") {
+    if (isFirst && pattern.partAt(0) === ".") {
       // Start with ., proceed
       this.#addSubpattern(".", pattern.child(new SafeSet().add(1)));
       return;
     }
 
-    if (isLast && typeof pattern.at(-1) === "string") {
+    if (isLast && typeof pattern.partAt(-1) === "string") {
       // Add result if it exists
-      const p = pattern.at(-1);
+      const p = pattern.partAt(-1);
       const stat = await this.#cache.stat(join(fullpath, p));
       if (stat && (p || isDirectory)) {
         const result = join(path, p);
@@ -955,8 +772,8 @@ export class Glob {
         return;
       }
     } else if (
-      isLast && pattern.at(-1) === lazyMinimatch().default.GLOBSTAR &&
-      (path !== "." || pattern.at(0) === "." || (last === 0 && stat))
+      isLast && pattern.partAt(-1) === lazyMinimatch().default.GLOBSTAR &&
+      (path !== "." || pattern.partAt(0) === "." || (last === 0 && stat))
     ) {
       // If pattern ends with **, add to results
       // if path is ".", add it only if pattern starts with "." or pattern is exactly "**"
@@ -967,19 +784,13 @@ export class Glob {
       }
     }
 
-    if (!isDirectory || await this.#isCyclic(fullpath, isDirectory, pattern)) {
+    if (!isDirectory) {
       return;
     }
 
-    const nextRealpaths = await this.#nextRealpaths(
-      fullpath,
-      isDirectory,
-      pattern,
-    );
-
     let children;
     const firstPattern = pattern.indexes.size === 1 &&
-      pattern.at(pattern.indexes.values().next().value);
+      pattern.partAt(ArrayFrom(pattern.indexes)[0]);
     if (typeof firstPattern === "string") {
       const stat = await this.#cache.stat(join(fullpath, firstPattern));
       if (stat) {
@@ -995,21 +806,15 @@ export class Glob {
     for (let i = 0; i < children.length; i++) {
       const entry = children[i];
       const entryPath = join(path, entry.name);
-      const entryFullpath = join(fullpath, entry.name);
-      this.#cache.addToStatCache(entryFullpath, entry);
-      const entryIsDirectory = entry.isDirectory() ||
-        (this.#followSymlinks &&
-          entry.isSymbolicLink() &&
-          !!(await this.#cache.followStat(entryFullpath))?.isDirectory());
+      this.#cache.addToStatCache(join(fullpath, entry.name), entry);
 
       const subPatterns = new SafeSet();
       const nSymlinks = new SafeSet();
-      for (const index of pattern.indexes) {
-        const current = pattern.at(index);
+      for (const index of new SafeSetIterator(pattern.indexes)) {
+        const current = pattern.partAt(index);
         const nextIndex = index + 1;
-        const next = pattern.at(nextIndex);
-        const fromSymlink = !this.#followSymlinks &&
-          pattern.symlinks.has(index);
+        const next = pattern.partAt(nextIndex);
+        const fromSymlink = pattern.symlinks.has(index);
 
         if (current === lazyMinimatch().default.GLOBSTAR) {
           const isDot = entry.name[0] === ".";
@@ -1018,7 +823,8 @@ export class Glob {
 
           let nextNonGlobIndex = nextIndex;
           while (
-            pattern.at(nextNonGlobIndex) === lazyMinimatch().default.GLOBSTAR
+            pattern.partAt(nextNonGlobIndex) ===
+              lazyMinimatch().default.GLOBSTAR
           ) {
             nextNonGlobIndex++;
           }
@@ -1033,7 +839,7 @@ export class Glob {
           ) {
             continue;
           }
-          if (!fromSymlink && entryIsDirectory) {
+          if (!fromSymlink && entry.isDirectory()) {
             // If directory, add ** to its potential patterns
             subPatterns.add(index);
           } else if (!fromSymlink && index === last) {
@@ -1050,26 +856,26 @@ export class Glob {
             if (!this.#results.has(entryPath) && this.#results.add(entryPath)) {
               yield this.#withFileTypes ? entry : entryPath;
             }
-          } else if (nextMatches && entryIsDirectory) {
+          } else if (nextMatches && entry.isDirectory()) {
             // Pattern matched, meaning two patterns forward
             // are also potential patterns
             // e.g **/b/c when entry is a/b - add c to potential patterns
             subPatterns.add(index + 2);
           }
           if (
-            (nextMatches || pattern.at(0) === ".") &&
-            (entryIsDirectory || entry.isSymbolicLink()) && !fromSymlink
+            (nextMatches || pattern.partAt(0) === ".") &&
+            (entry.isDirectory() || entry.isSymbolicLink()) && !fromSymlink
           ) {
             // If pattern after ** matches, or pattern starts with "."
             // and entry is a directory or symlink, add to potential patterns
             subPatterns.add(nextIndex);
           }
 
-          if (!this.#followSymlinks && entry.isSymbolicLink()) {
+          if (entry.isSymbolicLink()) {
             nSymlinks.add(index);
           }
 
-          if (next === ".." && entryIsDirectory) {
+          if (next === ".." && entry.isDirectory()) {
             // In case pattern is "**/..",
             // both parent and current directory should be added to the queue
             // if this is the last pattern, add to results instead
@@ -1151,17 +957,14 @@ export class Glob {
                 yield this.#withFileTypes ? entry : entryPath;
               }
             }
-          } else if (entryIsDirectory) {
+          } else if (entry.isDirectory()) {
             subPatterns.add(nextIndex);
           }
         }
       }
       if (subPatterns.size > 0) {
         // If there are potential patterns, add to queue
-        this.#addSubpattern(
-          entryPath,
-          pattern.child(subPatterns, nSymlinks, nextRealpaths),
-        );
+        this.#addSubpattern(entryPath, pattern.child(subPatterns, nSymlinks));
       }
     }
   }
@@ -1221,7 +1024,7 @@ export function globSync(
 ): Dirent[] | string[];
 export function globSync(
   pattern: string | string[],
-  options: GlobOptionsU = {},
+  options: GlobOptionsU = kEmptyObject,
 ): Dirent[] | string[] {
   return new Glob(pattern, options).globSync();
 }
@@ -1261,7 +1064,8 @@ export function glob(
 
   // Mirror Node's lib/fs.js glob(): dispatch via Promise.then so a callback
   // that throws is not retried via the rejection branch.
-  Array.fromAsync(new Glob(pattern, options).glob()).then(
+  PromisePrototypeThen(
+    ArrayFromAsync(new Glob(pattern, options).glob()),
     (res) => callback(null, res),
     callback,
   );

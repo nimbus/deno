@@ -1,10 +1,38 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
-// TODO(petamoriken): enable prefer-primordials for node polyfills
-// deno-lint-ignore-file prefer-primordials no-explicit-any
+// deno-lint-ignore-file no-explicit-any
 
-import { core } from "ext:core/mod.js";
+import { core, primordials } from "ext:core/mod.js";
+const {
+  Array,
+  ArrayIsArray,
+  ArrayPrototypeJoin,
+  ArrayPrototypePush,
+  ArrayPrototypePushApply,
+  ArrayPrototypeShift,
+  ArrayPrototypeUnshift,
+  Error,
+  FunctionPrototypeBind,
+  FunctionPrototypeCall,
+  MathFloor,
+  NumberPrototypeToString,
+  ObjectCreate,
+  ObjectDefineProperties,
+  ObjectDefineProperty,
+  ObjectGetOwnPropertyDescriptors,
+  ObjectKeys,
+  ObjectSetPrototypeOf,
+  ObjectValues,
+  SafeRegExp,
+  SafeSet,
+  String,
+  StringPrototypeToLowerCase,
+  StringPrototypeToString,
+  Symbol,
+  SymbolIterator,
+  TypedArrayPrototypeGetByteLength,
+} = primordials;
 const { getDefaultHighWaterMark } = core.loadExtScript(
   "ext:deno_node/internal/streams/state.js",
 );
@@ -37,7 +65,6 @@ const {
   ERR_HTTP_HEADERS_SENT,
   ERR_HTTP_INVALID_HEADER_VALUE,
   ERR_HTTP_TRAILER_INVALID,
-  ERR_INVALID_ARG_VALUE,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_CHAR,
   ERR_INVALID_HTTP_TOKEN,
@@ -82,14 +109,14 @@ export const kRejectNonStandardBodyWrites = Symbol(
 
 const nop = () => {};
 
-const RE_CONN_CLOSE = /(?:^|\W)close(?:$|\W)/i;
+const RE_CONN_CLOSE = new SafeRegExp(/(?:^|\W)close(?:$|\W)/i);
 
 function isCookieField(s: string) {
-  return s.length === 6 && s.toLowerCase() === "cookie";
+  return s.length === 6 && StringPrototypeToLowerCase(s) === "cookie";
 }
 
 export function OutgoingMessage(options?: any) {
-  Stream.call(this);
+  FunctionPrototypeCall(Stream, this);
 
   this[kHighWaterMark] = options?.highWaterMark ?? getDefaultHighWaterMark();
   this[kRejectNonStandardBodyWrites] = options?.rejectNonStandardBodyWrites ??
@@ -145,12 +172,12 @@ export function OutgoingMessage(options?: any) {
   this._bodyWriter = null;
 }
 
-Object.setPrototypeOf(OutgoingMessage.prototype, Stream.prototype);
-Object.setPrototypeOf(OutgoingMessage, Stream);
+ObjectSetPrototypeOf(OutgoingMessage.prototype, Stream.prototype);
+ObjectSetPrototypeOf(OutgoingMessage, Stream);
 
-Object.defineProperties(
+ObjectDefineProperties(
   OutgoingMessage.prototype,
-  Object.getOwnPropertyDescriptors({
+  ObjectGetOwnPropertyDescriptors({
     get writableFinished() {
       return (
         this.finished &&
@@ -255,11 +282,11 @@ Object.defineProperties(
 
       let headers = this[kOutHeaders];
       if (headers === null) {
-        this[kOutHeaders] = headers = Object.create(null);
+        this[kOutHeaders] = headers = ObjectCreate(null);
       }
 
-      name = name.toString();
-      headers[name.toLowerCase()] = [name, value];
+      name = StringPrototypeToString(name);
+      headers[StringPrototypeToLowerCase(name)] = [name, value];
       return this;
     },
 
@@ -270,26 +297,26 @@ Object.defineProperties(
       validateHeaderName(name);
       validateHeaderValue(name, value);
 
-      name = name.toString();
+      name = StringPrototypeToString(name);
 
-      const field = name.toLowerCase();
+      const field = StringPrototypeToLowerCase(name);
       const headers = this[kOutHeaders];
       if (headers === null || !headers[field]) {
         return this.setHeader(name, value);
       }
 
       // Prepare the field for appending, if required
-      if (!Array.isArray(headers[field][1])) {
+      if (!ArrayIsArray(headers[field][1])) {
         headers[field][1] = [headers[field][1]];
       }
 
       const existingValues = headers[field][1];
-      if (Array.isArray(value)) {
+      if (ArrayIsArray(value)) {
         for (let i = 0, length = value.length; i < length; i++) {
-          existingValues.push(value[i].toString());
+          ArrayPrototypePush(existingValues, StringPrototypeToString(value[i]));
         }
       } else {
-        existingValues.push(value.toString());
+        ArrayPrototypePush(existingValues, StringPrototypeToString(value));
       }
 
       return this;
@@ -298,9 +325,9 @@ Object.defineProperties(
     // Returns a shallow copy of the current outgoing headers.
     getHeaders() {
       const headers = this[kOutHeaders];
-      const ret = Object.create(null);
+      const ret = ObjectCreate(null);
       if (headers) {
-        const keys = Object.keys(headers);
+        const keys = ObjectKeys(headers);
         // Retain for(;;) loop for performance reasons
         // Refs: https://github.com/nodejs/node/pull/30958
         for (let i = 0; i < keys.length; ++i) {
@@ -315,7 +342,7 @@ Object.defineProperties(
     hasHeader(name: string) {
       validateString(name, "name");
       return this[kOutHeaders] !== null &&
-        !!this[kOutHeaders][name.toLowerCase()];
+        !!this[kOutHeaders][StringPrototypeToLowerCase(name)];
     },
 
     removeHeader(name: string) {
@@ -325,7 +352,7 @@ Object.defineProperties(
         throw new ERR_HTTP_HEADERS_SENT("remove");
       }
 
-      const key = name.toLowerCase();
+      const key = StringPrototypeToLowerCase(name);
 
       switch (key) {
         case "connection":
@@ -355,13 +382,13 @@ Object.defineProperties(
         return;
       }
 
-      const entry = headers[name.toLowerCase()];
+      const entry = headers[StringPrototypeToLowerCase(name)];
       return entry && entry[1];
     },
 
     // Returns an array of the names of the current outgoing headers.
     getHeaderNames() {
-      return this[kOutHeaders] !== null ? Object.keys(this[kOutHeaders]) : [];
+      return this[kOutHeaders] !== null ? ObjectKeys(this[kOutHeaders]) : [];
     },
 
     // Returns an array of the names of the current outgoing raw headers.
@@ -369,8 +396,8 @@ Object.defineProperties(
       const headersMap = this[kOutHeaders];
       if (headersMap === null) return [];
 
-      const values = Object.values(headersMap);
-      const headers = Array(values.length);
+      const values = ObjectValues(headersMap);
+      const headers = new Array(values.length);
       // Retain for(;;) loop for performance reasons
       // Refs: https://github.com/nodejs/node/pull/30958
       for (let i = 0, l = values.length; i < l; i++) {
@@ -402,8 +429,8 @@ Object.defineProperties(
 
     addTrailers(headers: any) {
       this._trailer = "";
-      const keys = Object.keys(headers);
-      const isArray = Array.isArray(headers);
+      const keys = ObjectKeys(headers);
+      const isArray = ArrayIsArray(headers);
       let field, value;
       for (let i = 0, l = keys.length; i < l; i++) {
         if (isArray) {
@@ -487,7 +514,7 @@ Object.defineProperties(
         );
       }
 
-      const finish = onFinish.bind(undefined, this);
+      const finish = FunctionPrototypeBind(onFinish, undefined, this);
 
       if (this._hasBody && this.chunkedEncoding) {
         this._send("0\r\n" + this._trailer + "\r\n", "latin1", finish);
@@ -630,7 +657,7 @@ Object.defineProperties(
           data = this._header + data;
         } else {
           const header = this._header;
-          this.outputData.unshift({
+          ArrayPrototypeUnshift(this.outputData, {
             data: header,
             encoding: "latin1",
             callback: null,
@@ -653,7 +680,9 @@ Object.defineProperties(
         return undefined;
       }
 
-      const { data, encoding, callback } = this.outputData.shift();
+      const { data, encoding, callback } = ArrayPrototypeShift(
+        this.outputData,
+      );
       this._flushingBuffer = true;
       let ret;
       try {
@@ -688,11 +717,12 @@ Object.defineProperties(
         if (this.outputData.length) {
           this._flushOutput(conn);
         }
+        this._recordRetryData?.(data, encoding, callback);
         // Directly write to socket.
         return conn.write(data, encoding, callback);
       }
       // Buffer, as long as we're not destroyed.
-      this.outputData.push({ data, encoding, callback });
+      ArrayPrototypePush(this.outputData, { data, encoding, callback });
       this.outputSize += data.length;
       this._onPendingData(data.length);
       return this.outputSize < HIGH_WATER_MARK;
@@ -708,7 +738,7 @@ Object.defineProperties(
       const headers: any = {};
 
       if (headersMap !== null) {
-        const keys = Object.keys(headersMap);
+        const keys = ObjectKeys(headersMap);
         // Retain for(;;) loop for performance reasons
         // Refs: https://github.com/nodejs/node/pull/30958
         for (let i = 0, l = keys.length; i < l; i++) {
@@ -738,30 +768,27 @@ Object.defineProperties(
           // deno-lint-ignore guard-for-in
           for (const key in headers) {
             const entry = headers[key];
-            this._processHeader(state, entry[0], entry[1], false);
+            this._storeHeaderEntry(state, entry[0], entry[1]);
           }
-        } else if (Array.isArray(headers)) {
-          if (headers.length && Array.isArray(headers[0])) {
+        } else if (ArrayIsArray(headers)) {
+          if (headers.length && ArrayIsArray(headers[0])) {
             // Array of arrays: [[name, value], ...]
             for (let i = 0; i < headers.length; i++) {
               const entry = headers[i];
-              this._processHeader(state, entry[0], entry[1], true);
+              this._storeHeaderEntry(state, entry[0], entry[1]);
             }
           } else {
             // Flat array: [name, value, name, value, ...]
-            if (headers.length % 2 !== 0) {
-              throw new ERR_INVALID_ARG_VALUE("headers", headers);
-            }
             for (let n = 0; n < headers.length; n += 2) {
-              this._processHeader(state, headers[n], headers[n + 1], true);
+              this._storeHeaderEntry(state, headers[n], headers[n + 1]);
             }
           }
         } else {
           // Plain object: { name: value }
-          const keys = Object.keys(headers);
+          const keys = ObjectKeys(headers);
           for (let i = 0; i < keys.length; i++) {
             const k = keys[i];
-            this._processHeader(state, k, headers[k], true);
+            this._storeHeaderEntry(state, k, headers[k]);
           }
         }
       }
@@ -804,7 +831,7 @@ Object.defineProperties(
         } else if (shouldSendKeepAlive) {
           state.header += "Connection: keep-alive\r\n";
           if (this._keepAliveTimeout && this._defaultKeepAlive) {
-            const timeoutSeconds = Math.floor(this._keepAliveTimeout / 1000);
+            const timeoutSeconds = MathFloor(this._keepAliveTimeout / 1000);
             let max = "";
             if (~~this._maxRequestsPerSocket > 0) {
               max = `, max=${this._maxRequestsPerSocket}`;
@@ -860,44 +887,20 @@ Object.defineProperties(
       if (state.expect) this._send("");
     },
 
-    _processHeader(
-      state: any,
-      field: string,
-      value: any,
-      validate: boolean,
-    ) {
-      if (validate) {
-        validateHeaderName(field);
-      }
-
-      if (
-        Array.isArray(value) &&
-        (value.length < 2 || !isCookieField(field)) &&
-        (!this[kUniqueHeaders] ||
-          !this[kUniqueHeaders].has(field.toLowerCase()))
-      ) {
-        for (let i = 0; i < value.length; i++) {
-          this._storeHeaderEntry(state, field, value[i], validate);
+    _storeHeaderEntry(state: any, field: string, value: any) {
+      if (ArrayIsArray(value)) {
+        // RFC 6265: join multiple Cookie values with '; '
+        if (isCookieField(field)) {
+          state.header += field + ": " + ArrayPrototypeJoin(value, "; ") +
+            "\r\n";
+        } else {
+          for (let j = 0; j < value.length; j++) {
+            state.header += field + ": " + value[j] + "\r\n";
+          }
         }
-        return;
+      } else {
+        state.header += field + ": " + value + "\r\n";
       }
-
-      if (Array.isArray(value)) {
-        value = value.join("; ");
-      }
-      this._storeHeaderEntry(state, field, value, validate);
-    },
-
-    _storeHeaderEntry(
-      state: any,
-      field: string,
-      value: any,
-      validate: boolean,
-    ) {
-      if (validate) {
-        validateHeaderValue(field, value);
-      }
-      state.header += field + ": " + value + "\r\n";
       this._matchHeader(state, field, value);
     },
 
@@ -912,7 +915,7 @@ Object.defineProperties(
       if (field.length < 4 || field.length > 17) {
         return;
       }
-      field = field.toLowerCase();
+      field = StringPrototypeToLowerCase(field);
       switch (field) {
         case "connection":
           state.connection = true;
@@ -957,7 +960,7 @@ Object.defineProperties(
 
       if (
         !headers ||
-        Array.isArray(headers) ||
+        ArrayIsArray(headers) ||
         typeof headers.keys !== "function" ||
         typeof headers.get !== "function"
       ) {
@@ -969,14 +972,22 @@ Object.defineProperties(
       }
 
       let cookies = null;
-      for (const [key, value] of headers) {
+      const iterator = headers[SymbolIterator]();
+      while (true) {
+        // deno-lint-ignore prefer-primordials
+        const { done, value: entry } = iterator.next();
+        if (done) {
+          break;
+        }
+        const key = entry[0];
+        const value = entry[1];
         if (key === "set-cookie") {
-          if (Array.isArray(value)) {
+          if (ArrayIsArray(value)) {
             cookies ??= [];
-            cookies.push(...value);
+            ArrayPrototypePushApply(cookies, value);
           } else {
             cookies ??= [];
-            cookies.push(value);
+            ArrayPrototypePush(cookies, value);
           }
           continue;
         }
@@ -991,7 +1002,7 @@ Object.defineProperties(
   }),
 );
 
-Object.defineProperty(OutgoingMessage.prototype, "socket", {
+ObjectDefineProperty(OutgoingMessage.prototype, "socket", {
   __proto__: null,
   get: function (this: any) {
     return this[kSocket];
@@ -1005,7 +1016,8 @@ Object.defineProperty(OutgoingMessage.prototype, "socket", {
   },
 });
 
-Object.defineProperty(OutgoingMessage.prototype, "_headers", {
+ObjectDefineProperty(OutgoingMessage.prototype, "_headers", {
+  __proto__: null,
   get: deprecate(
     function (this: any) {
       return this.getHeaders();
@@ -1018,13 +1030,13 @@ Object.defineProperty(OutgoingMessage.prototype, "_headers", {
       if (val == null) {
         this[kOutHeaders] = null;
       } else if (typeof val === "object") {
-        const headers = this[kOutHeaders] = Object.create(null);
-        const keys = Object.keys(val);
+        const headers = this[kOutHeaders] = ObjectCreate(null);
+        const keys = ObjectKeys(val);
         // Retain for(;;) loop for performance reasons
         // Refs: https://github.com/nodejs/node/pull/30958
         for (let i = 0; i < keys.length; ++i) {
           const name = keys[i];
-          headers[name.toLowerCase()] = [name, val[name]];
+          headers[StringPrototypeToLowerCase(name)] = [name, val[name]];
         }
       }
     },
@@ -1033,13 +1045,14 @@ Object.defineProperty(OutgoingMessage.prototype, "_headers", {
   ),
 });
 
-Object.defineProperty(OutgoingMessage.prototype, "_headerNames", {
+ObjectDefineProperty(OutgoingMessage.prototype, "_headerNames", {
+  __proto__: null,
   get: deprecate(
     function (this: any) {
       const headers = this[kOutHeaders];
       if (headers !== null) {
-        const out = Object.create(null);
-        const keys = Object.keys(headers);
+        const out = ObjectCreate(null);
+        const keys = ObjectKeys(headers);
         // Retain for(;;) loop for performance reasons
         // Refs: https://github.com/nodejs/node/pull/30958
         for (let i = 0; i < keys.length; ++i) {
@@ -1061,7 +1074,7 @@ Object.defineProperty(OutgoingMessage.prototype, "_headerNames", {
         if (!headers) {
           return;
         }
-        const keys = Object.keys(val);
+        const keys = ObjectKeys(val);
         // Retain for(;;) loop for performance reasons
         // Refs: https://github.com/nodejs/node/pull/30958
         for (let i = 0; i < keys.length; ++i) {
@@ -1098,20 +1111,21 @@ export const validateHeaderValue = hideStackFrames(
 );
 
 export function parseUniqueHeadersOption(headers) {
-  if (!Array.isArray(headers)) {
+  if (!ArrayIsArray(headers)) {
     return null;
   }
 
-  const unique = new Set();
+  const unique = new SafeSet();
   const l = headers.length;
   for (let i = 0; i < l; i++) {
-    unique.add(headers[i].toLowerCase());
+    unique.add(StringPrototypeToLowerCase(headers[i]));
   }
 
   return unique;
 }
 
-Object.defineProperty(OutgoingMessage.prototype, "headersSent", {
+ObjectDefineProperty(OutgoingMessage.prototype, "headersSent", {
+  __proto__: null,
   configurable: true,
   enumerable: true,
   get: function () {
@@ -1175,7 +1189,7 @@ function write_(
   if (msg.strictContentLength) {
     len ??= typeof chunk === "string"
       ? Buffer.byteLength(chunk, encoding)
-      : chunk.byteLength;
+      : TypedArrayPrototypeGetByteLength(chunk);
 
     if (
       _checkStrictContentLength(msg) &&
@@ -1196,7 +1210,7 @@ function write_(
     if (fromEnd) {
       len ??= typeof chunk === "string"
         ? Buffer.byteLength(chunk, encoding)
-        : chunk.byteLength;
+        : TypedArrayPrototypeGetByteLength(chunk);
       msg._contentLength = len;
     }
     msg._implicitHeader();
@@ -1224,8 +1238,8 @@ function write_(
   if (msg.chunkedEncoding && chunk.length !== 0) {
     len ??= typeof chunk === "string"
       ? Buffer.byteLength(chunk, encoding)
-      : chunk.byteLength;
-    msg._send(len.toString(16), "latin1", null);
+      : TypedArrayPrototypeGetByteLength(chunk);
+    msg._send(NumberPrototypeToString(len, 16), "latin1", null);
     msg._send(crlf_buf, null, null);
     msg._send(chunk, encoding, null);
     ret = msg._send(crlf_buf, null, callback);
@@ -1314,7 +1328,7 @@ function tryDirectEnd(
   }
 
   const data = msg._header + chunk;
-  const finish = onFinish.bind(undefined, msg);
+  const finish = FunctionPrototypeBind(onFinish, undefined, msg);
   const result = writeDirectString(socket, data, normalizedEncoding, finish);
 
   msg._headerSent = true;
@@ -1398,7 +1412,7 @@ function tryDirectEmptyEnd(
     msg.once("finish", callback);
   }
 
-  const finish = onFinish.bind(undefined, msg);
+  const finish = FunctionPrototypeBind(onFinish, undefined, msg);
   const result = writeDirectString(socket, msg._header, "latin1", finish);
 
   msg._headerSent = true;
@@ -1425,7 +1439,7 @@ function normalizeDirectStringEncoding(encoding: string | null) {
     return "utf8";
   }
 
-  switch (String(encoding).toLowerCase()) {
+  switch (StringPrototypeToLowerCase(String(encoding))) {
     case "utf8":
     case "utf-8":
       return "utf8";

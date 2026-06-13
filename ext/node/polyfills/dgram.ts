@@ -20,16 +20,25 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// TODO(petamoriken): enable prefer-primordials for node polyfills
-// deno-lint-ignore-file prefer-primordials
-
 (function () {
-const { core } = __bootstrap;
+const { core, primordials } = __bootstrap;
+const {
+  Array,
+  ArrayIsArray,
+  ArrayPrototypePush,
+  FunctionPrototypeBind,
+  FunctionPrototypeCall,
+  ObjectDefineProperty,
+  Promise,
+  PromiseResolve,
+  ReflectApply,
+  SafeArrayIterator,
+  SymbolAsyncDispose,
+} = primordials;
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
 const {
   ERR_BUFFER_OUT_OF_BOUNDS,
-  ERR_IP_BLOCKED,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_FD_TYPE,
   ERR_MISSING_ARGS,
@@ -69,8 +78,9 @@ const { os } = core.loadExtScript(
 );
 const { nextTick } = core.loadExtScript("ext:deno_node/_next_tick.ts");
 const { deprecate } = core.loadExtScript("ext:deno_node/util.ts");
-const { channel } = core.loadExtScript("ext:deno_node/diagnostics_channel.js");
-const { isIP } = core.loadExtScript("ext:deno_node/internal/net.ts");
+const { channel } = core.loadExtScript(
+  "ext:deno_node/diagnostics_channel.js",
+);
 const { isArrayBufferView } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
 );
@@ -122,12 +132,6 @@ interface SocketOptions extends Abortable {
   recvBufferSize?: number;
   sendBufferSize?: number;
   lookup?: typeof defaultLookup;
-  receiveBlockList?: {
-    check(address: string, type?: string): boolean;
-  };
-  sendBlockList?: {
-    check(address: string, type?: string): boolean;
-  };
 }
 
 interface SocketInternalState {
@@ -146,12 +150,6 @@ interface SocketInternalState {
   ipv6Only?: boolean;
   recvBufferSize?: number;
   sendBufferSize?: number;
-  receiveBlockList?: {
-    check(address: string, type?: string): boolean;
-  };
-  sendBlockList?: {
-    check(address: string, type?: string): boolean;
-  };
 }
 
 const isSocketOptions = (
@@ -166,15 +164,6 @@ const isUdpHandle = (handle: unknown): handle is UDP =>
 
 const isBindOptions = (options: unknown): options is BindOptions =>
   options !== null && typeof options === "object";
-
-const isBlockListLike = (
-  value: unknown,
-): value is {
-  check(address: string, type?: string): boolean;
-} =>
-  value !== null &&
-  typeof value === "object" &&
-  typeof (value as { check?: unknown }).check === "function";
 
 /**
  * Encapsulates the datagram functionality.
@@ -197,8 +186,6 @@ class Socket extends EventEmitter {
     let lookup;
     let recvBufferSize;
     let sendBufferSize;
-    let receiveBlockList;
-    let sendBlockList;
 
     let options: SocketOptions | undefined;
 
@@ -217,26 +204,6 @@ class Socket extends EventEmitter {
       }
       recvBufferSize = options.recvBufferSize;
       sendBufferSize = options.sendBufferSize;
-      if (options.receiveBlockList !== undefined) {
-        if (!isBlockListLike(options.receiveBlockList)) {
-          throw new ERR_INVALID_ARG_TYPE(
-            "options.receiveBlockList",
-            "net.BlockList",
-            options.receiveBlockList,
-          );
-        }
-        receiveBlockList = options.receiveBlockList;
-      }
-      if (options.sendBlockList !== undefined) {
-        if (!isBlockListLike(options.sendBlockList)) {
-          throw new ERR_INVALID_ARG_TYPE(
-            "options.sendBlockList",
-            "net.BlockList",
-            options.sendBlockList,
-          );
-        }
-        sendBlockList = options.sendBlockList;
-      }
     }
 
     const handle = newHandle(type, lookup);
@@ -259,8 +226,6 @@ class Socket extends EventEmitter {
       ipv6Only: options && options.ipv6Only,
       recvBufferSize,
       sendBufferSize,
-      receiveBlockList,
-      sendBlockList,
     };
 
     if (options?.signal !== undefined) {
@@ -461,8 +426,8 @@ class Socket extends EventEmitter {
 
       // deno-lint-ignore no-inner-declarations
       function onListening(this: Socket) {
-        removeListeners.call(this);
-        cb.call(this);
+        FunctionPrototypeCall(removeListeners, this);
+        FunctionPrototypeCall(cb, this);
       }
 
       this.on("error", removeListeners);
@@ -526,10 +491,6 @@ class Socket extends EventEmitter {
 
     // Resolve address first
     state.handle!.lookup(address, (lookupError, ip) => {
-      if (!state.handle) {
-        return;
-      }
-
       if (lookupError) {
         state.bindState = BIND_STATE_UNBOUND;
         this.emit("error", lookupError);
@@ -554,6 +515,11 @@ class Socket extends EventEmitter {
       // Though Deno has has a Worker capability from which we could simulate this,
       // for now we assert that we are _always_ on the primary process.
 
+      if (!state.handle) {
+        return; // Handle has been closed in the mean time
+      }
+
+      // deno-lint-ignore prefer-primordials -- UDP handle's bind method, not Function.prototype.bind
       const err = state.handle.bind(ip, port as number || 0, flags);
 
       if (err) {
@@ -586,7 +552,7 @@ class Socket extends EventEmitter {
     }
 
     if (queue !== undefined) {
-      queue.push(this.close.bind(this));
+      ArrayPrototypePush(queue, FunctionPrototypeBind(this.close, this));
 
       return this;
     }
@@ -651,13 +617,15 @@ class Socket extends EventEmitter {
     state.connectState = CONNECT_STATE_CONNECTING;
 
     if (state.bindState === BIND_STATE_UNBOUND) {
+      // deno-lint-ignore prefer-primordials -- Socket's own bind method, not Function.prototype.bind
       this.bind({ port: 0, exclusive: true });
     }
 
     if (state.bindState !== BIND_STATE_BOUND) {
       enqueue(
         this,
-        _connect.bind(
+        FunctionPrototypeBind(
+          _connect,
           this,
           port,
           address as string,
@@ -668,7 +636,7 @@ class Socket extends EventEmitter {
       return;
     }
 
-    Reflect.apply(_connect, this, [port, address, callback]);
+    ReflectApply(_connect, this, [port, address, callback]);
   }
 
   /**
@@ -768,14 +736,6 @@ class Socket extends EventEmitter {
    */
   getSendBufferSize(): number {
     return bufferSize(this, 0, SEND_BUFFER);
-  }
-
-  getSendQueueSize(): number {
-    return this[kStateSymbol].handle!.getSendQueueSize();
-  }
-
-  getSendQueueCount(): number {
-    return this[kStateSymbol].handle!.getSendQueueCount();
   }
 
   /**
@@ -1001,7 +961,7 @@ class Socket extends EventEmitter {
       }
     }
 
-    if (!Array.isArray(buffer)) {
+    if (!ArrayIsArray(buffer)) {
       if (typeof buffer === "string") {
         list = [Buffer.from(buffer)];
       } else if (!isArrayBufferView(buffer)) {
@@ -1041,18 +1001,22 @@ class Socket extends EventEmitter {
     healthCheck(this);
 
     if (state.bindState === BIND_STATE_UNBOUND) {
+      // deno-lint-ignore prefer-primordials -- Socket's own bind method, not Function.prototype.bind
       this.bind({ port: 0, exclusive: true });
     }
 
     if (list.length === 0) {
-      list.push(Buffer.alloc(0));
+      ArrayPrototypePush(list, Buffer.alloc(0));
     }
 
     // If the socket hasn't been bound yet, push the outbound packet onto the
     // send queue and send after binding is complete.
     if (state.bindState !== BIND_STATE_BOUND) {
       // @ts-ignore mapping unknowns back onto themselves doesn't type nicely
-      enqueue(this, this.send.bind(this, list, port, address, callback));
+      enqueue(
+        this,
+        FunctionPrototypeBind(this.send, this, list, port, address, callback),
+      );
 
       return;
     }
@@ -1289,10 +1253,10 @@ class Socket extends EventEmitter {
     return this;
   }
 
-  [Symbol.asyncDispose](): Promise<void> {
+  [SymbolAsyncDispose](): Promise<void> {
     const state = this[kStateSymbol];
     if (!state.handle) {
-      return Promise.resolve();
+      return PromiseResolve();
     }
 
     return new Promise((resolve) => {
@@ -1317,11 +1281,14 @@ const stateKeys: Record<string, string> = {
   _reuseAddr: "reuseAddr",
 };
 
-for (const prop of deprecatedProps) {
-  Object.defineProperty(Socket.prototype, prop, {
+for (const prop of new SafeArrayIterator(deprecatedProps)) {
+  ObjectDefineProperty(Socket.prototype, prop, {
+    __proto__: null,
     get: deprecate(
       function (this: Socket) {
-        return this[kStateSymbol][stateKeys[prop] as keyof SocketInternalState];
+        return this[kStateSymbol][
+          stateKeys[prop] as keyof SocketInternalState
+        ];
       },
       `Socket.prototype.${prop} is deprecated`,
       "DEP0112",
@@ -1482,15 +1449,6 @@ function onMessage(
     return;
   }
 
-  if (
-    self[kStateSymbol]?.receiveBlockList?.check(
-      rinfo!.address,
-      rinfo!.family?.toLowerCase(),
-    )
-  ) {
-    return;
-  }
-
   rinfo!.size = buf!.length; // compatibility
 
   self.emit("message", buf, rinfo);
@@ -1510,14 +1468,17 @@ function sliceBuffer(buffer: MessageType, offset: number, length: number) {
   offset = offset >>> 0;
   length = length >>> 0;
 
+  // deno-lint-ignore prefer-primordials -- buffer may be a Buffer or DataView, not a plain TypedArray
   if (offset > buffer.byteLength) {
     throw new ERR_BUFFER_OUT_OF_BOUNDS("offset");
   }
 
+  // deno-lint-ignore prefer-primordials -- buffer may be a Buffer or DataView, not a plain TypedArray
   if (offset + length > buffer.byteLength) {
     throw new ERR_BUFFER_OUT_OF_BOUNDS("length");
   }
 
+  // deno-lint-ignore prefer-primordials -- Buffer is the Node Buffer class; .buffer/.byteOffset on a Buffer or DataView
   return Buffer.from(buffer.buffer, buffer.byteOffset + offset, length);
 }
 
@@ -1534,6 +1495,7 @@ function fixBufferList(
     } else if (!isArrayBufferView(buf)) {
       return null;
     } else {
+      // deno-lint-ignore prefer-primordials -- Buffer is the Node Buffer class; .buffer/.byteOffset/.byteLength on a Buffer or DataView
       newList[i] = Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
     }
   }
@@ -1553,12 +1515,12 @@ function enqueue(self: Socket, toEnqueue: () => void) {
     self.once("listening", onListenSuccess);
   }
 
-  state.queue.push(toEnqueue);
+  ArrayPrototypePush(state.queue, toEnqueue);
 }
 
 function onListenSuccess(this: Socket) {
   this.removeListener(EventEmitter.errorMonitor, onListenError);
-  clearQueue.call(this);
+  FunctionPrototypeCall(clearQueue, this);
 }
 
 function onListenError(this: Socket) {
@@ -1572,7 +1534,7 @@ function clearQueue(this: Socket) {
   state.queue = undefined;
 
   // Flush the send queue.
-  for (const queueEntry of queue!) {
+  for (const queueEntry of new SafeArrayIterator(queue!)) {
     queueEntry();
   }
 }
@@ -1617,12 +1579,6 @@ function doConnect(
 
   if (!state.handle) {
     return;
-  }
-
-  if (!ex) {
-    if (ip && state.sendBlockList?.check(ip, `ipv${isIP(ip)}`)) {
-      ex = new ERR_IP_BLOCKED(ip);
-    }
   }
 
   if (!ex) {
@@ -1674,13 +1630,6 @@ function doSend(
 
     return;
   } else if (!state.handle) {
-    return;
-  }
-
-  if (ip && state.sendBlockList?.check(ip, `ipv${isIP(ip)}`)) {
-    if (callback) {
-      nextTick(callback, new ERR_IP_BLOCKED(ip));
-    }
     return;
   }
 

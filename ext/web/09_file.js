@@ -61,7 +61,6 @@ const {
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
-const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
 // Defer loading the 208 KB `06_streams.js` polyfill: ReadableStream is
 // only constructed inside `Blob.stream()` (see usage below), so we don't
 // need to pay the parse cost at module body time.
@@ -231,7 +230,6 @@ const _type = Symbol("Type");
 const _size = Symbol("Size");
 const _parts = Symbol("Parts");
 const _fileBacked = Symbol("FileBacked");
-const _fileBackedCheck = Symbol("FileBackedCheck");
 
 /** @param {(BlobReference | Blob)[]} parts */
 function hasFileBackedPart(parts) {
@@ -251,7 +249,6 @@ class Blob {
   [_size] = 0;
   [_parts];
   [_fileBacked] = false;
-  [_fileBackedCheck] = undefined;
 
   /**
    * @param {BlobPart[]} blobParts
@@ -399,13 +396,11 @@ class Blob {
    */
   stream() {
     webidl.assertBranded(this, BlobPrototype);
-    const blob = this;
     const partIterator = toIterator(this[_parts]);
     const stream = new ReadableStream({
       type: "bytes",
       /** @param {ReadableByteStreamController} controller */
       async pull(controller) {
-        await checkFileBackedBlob(blob);
         while (true) {
           const { value, done } = await AsyncGeneratorPrototypeNext(
             partIterator,
@@ -433,7 +428,6 @@ class Blob {
     const partIterator = toIterator(this[_parts]);
     let offset = 0;
     while (true) {
-      await checkFileBackedBlob(this);
       const { value, done } = await AsyncGeneratorPrototypeNext(
         partIterator,
       );
@@ -680,27 +674,16 @@ class BlobReference {
    * @returns {AsyncGenerator<Uint8Array>}
    */
   async *stream() {
-    let position = 0;
-    const end = this.size;
-    while (position !== end) {
-      const size = MathMin(end - position, 65536);
-      const chunk = this.slice(position, position + size);
-      position += chunk.size;
-      yield op_blob_read_part(chunk._id);
-    }
-  }
-}
+    yield op_blob_read_part(this._id);
 
-/** @param {Blob} blob */
-async function checkFileBackedBlob(blob) {
-  const check = blob[_fileBackedCheck];
-  if (check === undefined) {
-    return;
-  }
-  try {
-    await check();
-  } catch {
-    throw new DOMException("The blob could not be read", "NotReadableError");
+    // let position = 0;
+    // const end = this.size;
+    // while (position !== end) {
+    //   const size = MathMin(end - position, 65536);
+    //   const chunk = this.slice(position, position + size);
+    //   position += chunk.size;
+    //   yield op_blob_read_part( chunk._id);
+    // }
   }
 }
 
@@ -730,11 +713,7 @@ function getPartRefs(blob, bag = []) {
  */
 function cloneBlobParts(blob) {
   if (blob[_fileBacked]) {
-    const error = new TypeError(
-      "Invalid state: File-backed Blobs are not cloneable",
-    );
-    error.code = "ERR_INVALID_STATE";
-    throw error;
+    throw new TypeError("Invalid state: File-backed Blobs are not cloneable");
   }
   const refs = getPartRefs(blob);
   const cloned = [];
@@ -776,13 +755,11 @@ core.registerCloneableResource("Blob", (data) => {
  * Mark a Blob as backed by file storage. File-backed Blobs are intentionally
  * rejected by the structured clone serializer, matching Node's behavior.
  * @param {Blob} blob
- * @param {(() => Promise<void>)=} check
  * @returns {Blob}
  */
-function markFileBackedBlob(blob, check = undefined) {
+function markFileBackedBlob(blob) {
   webidl.assertBranded(blob, BlobPrototype);
   blob[_fileBacked] = true;
-  blob[_fileBackedCheck] = check;
   return blob;
 }
 
@@ -862,14 +839,16 @@ function blobFromObjectUrl(url) {
 function createObjectURL(blob) {
   const prefix = "Failed to execute 'createObjectURL' on 'URL'";
   webidl.requiredArguments(arguments.length, 1, prefix);
-  try {
-    blob = webidl.converters["Blob"](blob, prefix, "Argument 1");
-  } catch (error) {
-    if (error && error.code === undefined) {
-      error.code = "ERR_INVALID_ARG_TYPE";
-    }
-    throw error;
+  if (!isBlob(blob)) {
+    // Node.js throws ERR_INVALID_ARG_TYPE for non-Blob arguments; preserve
+    // that `code` while still throwing a TypeError as the web platform does.
+    const err = new TypeError(
+      `${prefix}: The "blob" argument must be an instance of Blob`,
+    );
+    err.code = "ERR_INVALID_ARG_TYPE";
+    throw err;
   }
+  blob = webidl.converters["Blob"](blob, prefix, "Argument 1");
 
   return op_blob_create_object_url(blob.type, getParts(blob));
 }

@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 import * as v8 from "node:v8";
-import process from "node:process";
+import { Buffer } from "node:buffer";
 import { runInNewContext } from "node:vm";
 import { assertEquals, assertThrows } from "@std/assert";
 
@@ -27,6 +27,7 @@ Deno.test({
       "number_of_detached_contexts",
       "number_of_native_contexts",
       "peak_malloced_memory",
+      "total_allocated_bytes",
       "total_available_size",
       "total_global_handles_size",
       "total_heap_size",
@@ -35,11 +36,6 @@ Deno.test({
       "used_global_handles_size",
       "used_heap_size",
     ];
-    const nodeMajor = Number(process.versions.node.split(".")[0]);
-    if (nodeMajor >= 26) {
-      keys.push("total_allocated_bytes");
-      keys.sort();
-    }
     assertEquals(Object.keys(s).sort(), keys);
     for (const k of keys) {
       assertEquals(
@@ -76,6 +72,63 @@ Deno.test({
   },
 });
 
+// https://github.com/denoland/deno/issues/35113
+Deno.test({
+  name: "serialize emits wire format version 15 for Node.js interop",
+  fn() {
+    const values = [
+      { a: 1 },
+      "string",
+      123n,
+      new Uint8Array([1, 2, 3]),
+      new Map([["a", new ArrayBuffer(16)]]),
+    ];
+    for (const value of values) {
+      const s = v8.serialize(value);
+      assertEquals(s[0], 0xFF);
+      assertEquals(s[1], 0x0F);
+      assertEquals(v8.deserialize(s), value);
+    }
+
+    // A serializer without a header is left untouched.
+    const ser = new v8.Serializer();
+    ser.writeUint32(42);
+    const raw = ser.releaseBuffer();
+    assertEquals(raw[0], 42);
+  },
+});
+
+Deno.test({
+  name: "Deserializer keeps delegate alive across GC",
+  fn() {
+    v8.setFlagsFromString("--expose_gc");
+    const gc = runInNewContext("gc");
+    const serialized = v8.serialize(Buffer.from([1, 2, 3, 4]));
+
+    class HostObjectDeserializer extends v8.DefaultDeserializer {
+      calls = 0;
+
+      _readHostObject() {
+        this.calls++;
+        const defaultDeserializer = v8.DefaultDeserializer.prototype as
+          & v8.DefaultDeserializer
+          & { _readHostObject(): unknown };
+        return defaultDeserializer._readHostObject.call(this);
+      }
+    }
+
+    const deserializer = new HostObjectDeserializer(serialized);
+    assertEquals(deserializer.readHeader(), true);
+    for (let i = 0; i < 10; i++) {
+      gc();
+    }
+
+    const value = deserializer.readValue();
+    assertEquals(value, Buffer.from([1, 2, 3, 4]));
+    assertEquals(deserializer.calls, 1);
+  },
+});
+
 Deno.test({
   name: "writeHeapSnapshot requires write permission",
   permissions: { write: false },
@@ -102,8 +155,6 @@ Deno.test({
       format: "count",
     });
     assertEquals(after - before >= 50, true);
-    const defaultCount = v8.queryObjects(QueryObjectsTestFixture) as number;
-    assertEquals(defaultCount >= after, true);
 
     const summary = v8.queryObjects(QueryObjectsTestFixture, {
       format: "summary",

@@ -1,15 +1,12 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-use std::ffi::OsStr;
-use std::path::Path;
-use std::path::PathBuf;
-
 use deno_maybe_sync::MaybeDashMap;
 use deno_media_type::MediaType;
 use node_resolver::InNpmPackageChecker;
 use node_resolver::PackageJsonResolverRc;
 use node_resolver::ResolutionMode;
 use node_resolver::errors::PackageJsonLoadError;
+use serde_json::Value;
 use sys_traits::FsMetadata;
 use sys_traits::FsRead;
 use url::Url;
@@ -177,34 +174,6 @@ pub enum IsCjsResolutionMode {
   Disabled,
 }
 
-fn find_package_root_from_node_modules(path: &Path) -> Option<PathBuf> {
-  let components: Vec<_> = path.components().collect();
-  let nm_idx = components
-    .iter()
-    .rposition(|c| c.as_os_str() == OsStr::new("node_modules"))?;
-  let package_name_idx = nm_idx + 1;
-  let first = components.get(package_name_idx)?;
-  let mut root = PathBuf::new();
-  for component in &components[..=nm_idx] {
-    root.push(component);
-  }
-  root.push(first);
-  if first.as_os_str().to_string_lossy().starts_with('@') {
-    root.push(components.get(package_name_idx + 1)?);
-  }
-  Some(root)
-}
-
-fn package_json_applies_to_path(path: &Path, package_json_path: &Path) -> bool {
-  let Some(package_json_dir) = package_json_path.parent() else {
-    return false;
-  };
-  let Some(package_root) = find_package_root_from_node_modules(path) else {
-    return true;
-  };
-  package_json_dir.starts_with(package_root)
-}
-
 /// Resolves whether a module is CJS or ESM.
 #[derive(Debug)]
 pub struct IsCjsResolver<
@@ -244,9 +213,21 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       MediaType::Mts | MediaType::Mjs | MediaType::Dmts => ResolutionMode::Import,
       MediaType::Cjs | MediaType::Cts | MediaType::Dcts => ResolutionMode::Require,
       MediaType::Dts => {
-        // dts files are always determined based on the package.json because
-        // they contain imports/exports even when considered CJS
-        self.check_based_on_pkg_json(specifier).unwrap_or(ResolutionMode::Import)
+        // Inside npm packages, the .d.ts content can override the package.json
+        // signal: if it uses TypeScript-only CJS syntax (`export =` etc.) it
+        // is CJS; if it uses ESM-style syntax it may be ESM even when the
+        // package.json has no `"type": "module"` (issue #28071). Outside of
+        // npm packages, keep the previous behavior of trusting the
+        // package.json so local `.d.ts` files (e.g. shimmed via
+        // `@deno-types`) are not affected.
+        if self.in_npm_pkg_checker.in_npm_package(specifier)
+          && is_script == Some(true)
+        {
+          return ResolutionMode::Require;
+        }
+        self
+          .check_dts_based_on_pkg_json(specifier)
+          .unwrap_or(ResolutionMode::Import)
       }
       MediaType::Wasm |
       MediaType::Json => ResolutionMode::Import,
@@ -287,12 +268,20 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       MediaType::Mts | MediaType::Mjs | MediaType::Dmts => Some(ResolutionMode::Import),
       MediaType::Cjs | MediaType::Cts | MediaType::Dcts => Some(ResolutionMode::Require),
       MediaType::Dts => {
-        // dts files are always determined based on the package.json because
-        // they contain imports/exports even when considered CJS
+        // Inside npm packages, the .d.ts content can override the package.json
+        // signal — see `get_lsp_resolution_mode`. Outside npm packages, keep
+        // the previous behavior of trusting the package.json so local .d.ts
+        // files (e.g. shimmed via `@deno-types`) are not affected.
+        if self.in_npm_pkg_checker.in_npm_package(specifier)
+          && is_script == Some(true)
+        {
+          known_cache.insert(specifier.clone(), ResolutionMode::Require);
+          return Some(ResolutionMode::Require);
+        }
         if let Some(value) = known_cache.get(specifier).map(|v| *v) {
           Some(value)
         } else {
-          let value = self.check_based_on_pkg_json(specifier).ok();
+          let value = self.check_dts_based_on_pkg_json(specifier).ok();
           if let Some(value) = value {
             known_cache.insert(specifier.clone(), value);
           }
@@ -337,6 +326,39 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
     }
   }
 
+  /// Like [`check_based_on_pkg_json`] but for `.d.ts` files in npm packages.
+  ///
+  /// In addition to the standard `"type"` field check, this also treats the
+  /// `.d.ts` as ESM when the package opts into ESM via an `"import"`
+  /// condition in its `exports` map. Many packages (e.g. `@rollup/plugin-replace`)
+  /// publish a single `.d.ts` shared between the `import` and `require`
+  /// conditions and rely on consumers using ESM syntax. Treating those `.d.ts`
+  /// files as CJS causes `import x from "pkg"` to be typed as the namespace
+  /// rather than the default export. See issue #28071.
+  fn check_dts_based_on_pkg_json(
+    &self,
+    specifier: &Url,
+  ) -> Result<ResolutionMode, PackageJsonLoadError> {
+    if self.in_npm_pkg_checker.in_npm_package(specifier) {
+      let Ok(path) = deno_path_util::url_to_file_path(specifier) else {
+        return Ok(ResolutionMode::Require);
+      };
+      if let Some(pkg_json) =
+        self.pkg_json_resolver.get_closest_package_json(&path)?
+      {
+        if pkg_json.typ == "module" {
+          return Ok(ResolutionMode::Import);
+        }
+        if let Some(exports) = pkg_json.exports.as_ref()
+          && exports_has_import_condition(exports)
+        {
+          return Ok(ResolutionMode::Import);
+        }
+      }
+    }
+    self.check_based_on_pkg_json(specifier)
+  }
+
   fn check_based_on_pkg_json(
     &self,
     specifier: &Url,
@@ -348,16 +370,12 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       if let Some(pkg_json) =
         self.pkg_json_resolver.get_closest_package_json(&path)?
       {
-        if package_json_applies_to_path(&path, &pkg_json.path) {
-          let is_file_location_cjs = pkg_json.typ != "module";
-          Ok(if is_file_location_cjs || path.extension().is_none() {
-            ResolutionMode::Require
-          } else {
-            ResolutionMode::Import
-          })
+        let is_file_location_cjs = pkg_json.typ != "module";
+        Ok(if is_file_location_cjs || path.extension().is_none() {
+          ResolutionMode::Require
         } else {
-          Ok(ResolutionMode::Require)
-        }
+          ResolutionMode::Import
+        })
       } else {
         Ok(ResolutionMode::Require)
       }
@@ -368,20 +386,14 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       if let Some(pkg_json) =
         self.pkg_json_resolver.get_closest_package_json(&path)?
       {
-        if package_json_applies_to_path(&path, &pkg_json.path) {
-          let is_cjs_type = pkg_json.typ == "commonjs"
-            || self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs
-              && pkg_json.typ == "none";
-          Ok(if is_cjs_type {
-            ResolutionMode::Require
-          } else {
-            ResolutionMode::Import
-          })
-        } else if self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs {
-          Ok(ResolutionMode::Require)
+        let is_cjs_type = pkg_json.typ == "commonjs"
+          || self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs
+            && pkg_json.typ == "none";
+        Ok(if is_cjs_type {
+          ResolutionMode::Require
         } else {
-          Ok(ResolutionMode::Import)
-        }
+          ResolutionMode::Import
+        })
       } else if self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs {
         Ok(ResolutionMode::Require)
       } else {
@@ -440,40 +452,73 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
   }
 }
 
+/// Returns true if the given package `exports` value contains an `"import"`
+/// condition anywhere in the (possibly nested) condition map. This is used as
+/// a hint that the package supports ESM at runtime, in which case its `.d.ts`
+/// files should be treated as ESM by the type checker.
+///
+/// This signal is package-global: the `.d.ts` being classified might be reached
+/// through a CJS-only subpath while a different subpath carries the `import`
+/// condition. The precise fix would key off the specific export entry that
+/// resolved to this file, but that information isn't available at this layer,
+/// so a `.d.ts` belonging to a CJS-only subpath of a mixed CJS/ESM package may
+/// still be flipped to ESM. The shared-single-`.d.ts` case (issue #28071,
+/// e.g. `@rollup/plugin-replace`) is the motivating shape; the mixed case is
+/// covered by a spec test that pins the chosen behavior.
+fn exports_has_import_condition(
+  exports: &serde_json::Map<String, Value>,
+) -> bool {
+  fn value_has_import_condition(value: &Value) -> bool {
+    match value {
+      Value::Object(map) => map_has_import_condition(map),
+      Value::Array(arr) => arr.iter().any(value_has_import_condition),
+      _ => false,
+    }
+  }
+  fn map_has_import_condition(map: &serde_json::Map<String, Value>) -> bool {
+    for (key, v) in map {
+      if key == "import" {
+        // ignore null targets, which the exports algorithm treats as
+        // "no resolution".
+        if !v.is_null() {
+          return true;
+        }
+      } else if value_has_import_condition(v) {
+        return true;
+      }
+    }
+    false
+  }
+  map_has_import_condition(exports)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
 
-  #[test]
-  fn package_json_scope_does_not_cross_node_modules_root() {
-    let path = Path::new("/app/pkg/node_modules/dep/file.js");
-    let package_json_path = Path::new("/app/pkg/package.json");
-
-    assert!(!package_json_applies_to_path(path, package_json_path));
+  fn parse(json: &str) -> serde_json::Map<String, Value> {
+    serde_json::from_str(json).unwrap()
   }
 
   #[test]
-  fn package_json_scope_applies_within_node_modules_package() {
-    let path = Path::new("/app/pkg/node_modules/dep/file.js");
-    let package_json_path = Path::new("/app/pkg/node_modules/dep/package.json");
-
-    assert!(package_json_applies_to_path(path, package_json_path));
-  }
-
-  #[test]
-  fn package_json_scope_applies_within_scoped_node_modules_package() {
-    let path = Path::new("/app/pkg/node_modules/@scope/dep/file.js");
-    let package_json_path =
-      Path::new("/app/pkg/node_modules/@scope/dep/package.json");
-
-    assert!(package_json_applies_to_path(path, package_json_path));
-  }
-
-  #[test]
-  fn package_json_scope_applies_outside_node_modules() {
-    let path = Path::new("/app/pkg/src/file.js");
-    let package_json_path = Path::new("/app/pkg/package.json");
-
-    assert!(package_json_applies_to_path(path, package_json_path));
+  fn exports_with_import_condition() {
+    assert!(exports_has_import_condition(&parse(
+      r#"{"types": "./types/index.d.ts", "import": "./dist/es/index.js", "default": "./dist/cjs/index.js"}"#
+    )));
+    assert!(exports_has_import_condition(&parse(
+      r#"{".": {"import": "./dist/es/index.js", "require": "./dist/cjs/index.js"}}"#
+    )));
+    assert!(exports_has_import_condition(&parse(
+      r#"{".": {"node": {"import": "./dist/es/index.js"}}}"#
+    )));
+    assert!(!exports_has_import_condition(&parse(
+      r#"{".": {"require": "./dist/cjs/index.js", "default": "./dist/cjs/index.js"}}"#
+    )));
+    assert!(!exports_has_import_condition(&parse(
+      r#"{".": "./dist/cjs/index.js"}"#
+    )));
+    assert!(!exports_has_import_condition(&parse(
+      r#"{".": {"import": null, "require": "./dist/cjs/index.js"}}"#
+    )));
   }
 }

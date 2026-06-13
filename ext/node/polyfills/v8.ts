@@ -3,18 +3,46 @@
 
 /// <reference path="../../core/internal.d.ts" />
 
-// TODO(petamoriken): enable prefer-primordials for node polyfills
-// deno-lint-ignore-file prefer-primordials
-
 (function () {
 const { core, primordials } = __bootstrap;
 const {
+  Array,
   ArrayPrototypePush,
+  BigInt64Array,
+  BigUint64Array,
+  DataView,
+  DataViewPrototypeGetBuffer,
+  DataViewPrototypeGetByteLength,
+  DataViewPrototypeGetByteOffset,
+  Date,
+  DateNow,
+  DatePrototypeGetDate,
+  DatePrototypeGetFullYear,
+  DatePrototypeGetHours,
+  DatePrototypeGetMinutes,
+  DatePrototypeGetMonth,
+  DatePrototypeGetSeconds,
+  Error,
+  Float32Array,
+  Float64Array,
+  Int16Array,
+  Int32Array,
+  Int8Array,
   ObjectFreeze,
   ObjectPrototypeToString,
-  StringPrototypeCharCodeAt,
+  String,
+  StringPrototypePadStart,
+  Symbol,
   SymbolDispose,
   SymbolSpecies,
+  TypeError,
+  TypedArrayPrototypeGetBuffer,
+  TypedArrayPrototypeGetByteLength,
+  TypedArrayPrototypeGetByteOffset,
+  Uint16Array,
+  Uint32Array,
+  Uint8Array,
+  Uint8ClampedArray,
 } = primordials;
 const {
   op_v8_cached_data_version_tag,
@@ -54,11 +82,25 @@ const lazyFs = core.createLazyLoader("node:fs");
 const lazyStream = core.createLazyLoader("node:stream");
 
 const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
-const { isArrayBufferView, isAsyncFunction, isGeneratorFunction } = core
-  .loadExtScript(
-    "ext:deno_node/internal/util/types.ts",
-  );
-const { codes } = core.loadExtScript("ext:deno_node/internal/error_codes.ts");
+const { isArrayBufferView, isDataView } = core.loadExtScript(
+  "ext:deno_node/internal/util/types.ts",
+);
+
+function getViewBuffer(view: ArrayBufferView): ArrayBufferLike {
+  return isDataView(view)
+    ? DataViewPrototypeGetBuffer(view as DataView)
+    : TypedArrayPrototypeGetBuffer(view as Uint8Array);
+}
+function getViewByteOffset(view: ArrayBufferView): number {
+  return isDataView(view)
+    ? DataViewPrototypeGetByteOffset(view as DataView)
+    : TypedArrayPrototypeGetByteOffset(view as Uint8Array);
+}
+function getViewByteLength(view: ArrayBufferView): number {
+  return isDataView(view)
+    ? DataViewPrototypeGetByteLength(view as DataView)
+    : TypedArrayPrototypeGetByteLength(view as Uint8Array);
+}
 const lazyFsUtils = core.createLazyLoader(
   "ext:deno_node/internal/fs/utils.mjs",
 );
@@ -67,30 +109,8 @@ const { validateFunction, validateObject, validateOneOf, validateString } = core
     "ext:deno_node/internal/validators.mjs",
   );
 
-const shadowV8Flags = new Set<string>();
-
-function shadowV8FlagsHash() {
-  let hash = 0;
-  for (const flag of Array.from(shadowV8Flags).sort()) {
-    for (let i = 0; i < flag.length; i++) {
-      hash = ((hash << 5) - hash + flag.charCodeAt(i)) | 0;
-    }
-  }
-  return hash >>> 0;
-}
-
-function normalizeShadowV8Flag(flag: string) {
-  if (flag.startsWith("--no-")) {
-    return { key: `--${flag.slice(5)}`, enabled: false };
-  }
-  if (flag.startsWith("--no")) {
-    return { key: `--${flag.slice(4)}`, enabled: false };
-  }
-  return { key: flag, enabled: true };
-}
-
 function cachedDataVersionTag() {
-  return (op_v8_cached_data_version_tag() ^ shadowV8FlagsHash()) >>> 0;
+  return op_v8_cached_data_version_tag();
 }
 const heapCodeStatisticsBuffer = new Float64Array(4);
 
@@ -108,53 +128,25 @@ function getHeapSnapshot(options?: Record<string, unknown>) {
     validateObject(options, "options");
   }
   const data = op_v8_take_heap_snapshot();
-  // Building the Readable stream creates internal promises (Readable.from and
-  // the subsequent resume). Suppress promise-hook reporting around it so those
-  // infrastructure promises are not surfaced to user async_hooks/promiseHooks
-  // callbacks (precedent: ext/node/polyfills/fs.ts).
-  core.incPromiseHooksSuppressed();
-  try {
-    return lazyStream().Readable.from(Buffer.from(data));
-  } finally {
-    core.decPromiseHooksSuppressed();
-  }
+  return lazyStream().Readable.from(Buffer.from(data));
 }
 const heapSpaceStatisticsBuffer = new Float64Array(4);
 
-function currentNodeMajor() {
-  return Number(globalThis.process?.versions?.node?.split(".")?.[0] ?? 0);
-}
-
-function shouldExposeHeapSpace(spaceName: string) {
-  const nodeMajor = currentNodeMajor();
-  if (nodeMajor < 22) {
-    return !spaceName.startsWith("trusted_") &&
-      !spaceName.startsWith("shared_trusted_");
-  }
-  if (nodeMajor < 24) {
-    return !spaceName.startsWith("shared_trusted_");
-  }
-  return true;
-}
-
 function getHeapSpaceStatistics() {
   const numberOfHeapSpaces = op_v8_number_of_heap_spaces();
-  const heapSpaceStatistics = [];
+  const heapSpaceStatistics = new Array(numberOfHeapSpaces);
   for (let i = 0; i < numberOfHeapSpaces; i++) {
     const spaceName = op_v8_update_heap_space_statistics(
       heapSpaceStatisticsBuffer,
       i,
     );
-    if (!shouldExposeHeapSpace(spaceName)) {
-      continue;
-    }
-    ArrayPrototypePush(heapSpaceStatistics, {
-      "space_name": spaceName,
-      "space_size": heapSpaceStatisticsBuffer[0],
-      "space_used_size": heapSpaceStatisticsBuffer[1],
-      "space_available_size": heapSpaceStatisticsBuffer[2],
-      "physical_space_size": heapSpaceStatisticsBuffer[3],
-    });
+    heapSpaceStatistics[i] = {
+      space_name: spaceName,
+      space_size: heapSpaceStatisticsBuffer[0],
+      space_used_size: heapSpaceStatisticsBuffer[1],
+      space_available_size: heapSpaceStatisticsBuffer[2],
+      physical_space_size: heapSpaceStatisticsBuffer[3],
+    };
   }
   return heapSpaceStatistics;
 }
@@ -164,69 +156,33 @@ const buffer = new Float64Array(15);
 function getHeapStatistics() {
   op_v8_get_heap_statistics(buffer);
 
-  const statistics: Record<string, number> = {
-    "total_heap_size": buffer[0],
-    "total_heap_size_executable": buffer[1],
-    "total_physical_size": buffer[2],
-    "total_available_size": buffer[3],
-    "used_heap_size": buffer[4],
-    "heap_size_limit": buffer[5],
-    "malloced_memory": buffer[6],
-    "peak_malloced_memory": buffer[7],
-    "does_zap_garbage": buffer[8],
-    "number_of_native_contexts": buffer[9],
-    "number_of_detached_contexts": buffer[10],
-    "total_global_handles_size": buffer[11],
-    "used_global_handles_size": buffer[12],
-    "external_memory": buffer[13],
+  return {
+    total_heap_size: buffer[0],
+    total_heap_size_executable: buffer[1],
+    total_physical_size: buffer[2],
+    total_available_size: buffer[3],
+    used_heap_size: buffer[4],
+    heap_size_limit: buffer[5],
+    malloced_memory: buffer[6],
+    peak_malloced_memory: buffer[7],
+    does_zap_garbage: buffer[8],
+    number_of_native_contexts: buffer[9],
+    number_of_detached_contexts: buffer[10],
+    total_global_handles_size: buffer[11],
+    used_global_handles_size: buffer[12],
+    external_memory: buffer[13],
+    total_allocated_bytes: buffer[14],
   };
-
-  if (currentNodeMajor() >= 26) {
-    statistics["total_allocated_bytes"] = buffer[14];
-  }
-
-  return statistics;
 }
 
 function setFlagsFromString(flags: string) {
-  validateString(flags, "flags");
   // NOTE(bartlomieju): From Node.js docs:
   // The v8.setFlagsFromString() method can be used to programmatically set V8
   // command-line flags. This method should be used with care. Changing settings
   // after the VM has started may result in unpredictable behavior, including
   // crashes and data loss; or it may simply do nothing.
-  //
-  // Deno freezes V8 flags before user code runs. Calling the native V8 setter
-  // after that point aborts the process, so the runtime keeps the documented
-  // no-op behavior while updating the cache tag observable that Node uses to
-  // invalidate cached bytecode after flag changes.
+  validateString(flags, "flags");
   op_v8_set_flags_from_string(flags);
-  for (const token of flags.split(/\s+/)) {
-    if (token.length === 0) {
-      continue;
-    }
-    const { key, enabled } = normalizeShadowV8Flag(token);
-    if (enabled) {
-      shadowV8Flags.add(key);
-    } else {
-      shadowV8Flags.delete(key);
-    }
-  }
-}
-function isStringOneByteRepresentation(content: string) {
-  if (typeof content !== "string") {
-    throw new codes.ERR_INVALID_ARG_TYPE("content", "string", content);
-  }
-  // A string has a one-byte (latin1) backing store iff every code unit fits in
-  // a single byte. Node's native fast path inspects V8's internal flat
-  // representation; the code-unit scan is an equivalent observable answer
-  // without requiring a V8 fast-API binding.
-  for (let i = 0; i < content.length; i++) {
-    if (StringPrototypeCharCodeAt(content, i) > 0xff) {
-      return false;
-    }
-  }
-  return true;
 }
 function stopCoverage() {
   notImplemented("v8.stopCoverage");
@@ -245,18 +201,38 @@ function writeHeapSnapshot(
     filename = lazyFsUtils().getValidatedPath(filename) as string;
   } else {
     const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, "0");
-    const day = String(now.getDate()).padStart(2, "0");
-    const hours = String(now.getHours()).padStart(2, "0");
-    const minutes = String(now.getMinutes()).padStart(2, "0");
-    const seconds = String(now.getSeconds()).padStart(2, "0");
+    const year = DatePrototypeGetFullYear(now);
+    const month = StringPrototypePadStart(
+      String(DatePrototypeGetMonth(now) + 1),
+      2,
+      "0",
+    );
+    const day = StringPrototypePadStart(
+      String(DatePrototypeGetDate(now)),
+      2,
+      "0",
+    );
+    const hours = StringPrototypePadStart(
+      String(DatePrototypeGetHours(now)),
+      2,
+      "0",
+    );
+    const minutes = StringPrototypePadStart(
+      String(DatePrototypeGetMinutes(now)),
+      2,
+      "0",
+    );
+    const seconds = StringPrototypePadStart(
+      String(DatePrototypeGetSeconds(now)),
+      2,
+      "0",
+    );
     const pid = globalThis.process?.pid ?? 0;
     const thread = 0;
     const seq = ++heapSnapshotCounter;
     filename =
       `Heap.${year}${month}${day}.${hours}${minutes}${seconds}.${pid}.${thread}.${
-        String(seq).padStart(3, "0")
+        StringPrototypePadStart(String(seq), 3, "0")
       }.heapsnapshot`;
   }
   if (options !== undefined) {
@@ -289,10 +265,10 @@ function queryObjects(
 
   const name = typeof ctor.name === "string" ? ctor.name : "";
   if (name === "") {
-    return format === "summary" ? [] : 0;
+    return format === "count" ? 0 : [];
   }
   const count = op_v8_query_objects_count(name);
-  if (format === undefined || format === "count") {
+  if (format === "count") {
     return count;
   }
   if (format === "summary") {
@@ -324,9 +300,11 @@ function deserialize(buffer: Buffer | ArrayBufferView | DataView) {
 }
 
 const kHandle = Symbol("kHandle");
+const kHeaderWritten = Symbol("kHeaderWritten");
 
-class SerializerImpl {
+class Serializer {
   [kHandle]: object;
+  [kHeaderWritten] = false;
   constructor() {
     this[kHandle] = op_v8_new_serializer(this);
   }
@@ -336,7 +314,22 @@ class SerializerImpl {
   }
 
   releaseBuffer(): Buffer {
-    return Buffer.from(op_v8_release_buffer(this[kHandle]));
+    const buf = Buffer.from(op_v8_release_buffer(this[kHandle]));
+    // V8 14.9 bumped the ValueSerializer wire format version from 15 to
+    // 16 to support ArrayBuffers larger than 4GB. Node.js cannot
+    // deserialize format 16, which breaks consumers that feed
+    // `v8.serialize` output to a Node.js process. For payloads smaller
+    // than 4GB both formats encode identical bytes after the two-byte
+    // header, so relabel the header as version 15 to keep the output
+    // readable by Node.js. See
+    // https://github.com/denoland/deno/issues/35113.
+    if (
+      this[kHeaderWritten] && getViewByteLength(buf) < 0x100000000 &&
+      buf[0] === 0xFF && buf[1] === 0x10
+    ) {
+      buf[1] = 0x0F;
+    }
+    return buf;
   }
 
   transferArrayBuffer(_id: number, _arrayBuffer: ArrayBuffer): void {
@@ -349,6 +342,7 @@ class SerializerImpl {
 
   writeHeader(): void {
     op_v8_write_header(this[kHandle]);
+    this[kHeaderWritten] = true;
   }
 
   writeRawBytes(source: ArrayBufferView): void {
@@ -376,27 +370,7 @@ class SerializerImpl {
   _getDataCloneError = Error;
 }
 
-const Serializer = function Serializer(this: SerializerImpl) {
-  if (!new.target) {
-    const error = new TypeError(
-      "Class constructor Serializer cannot be invoked without 'new'",
-    ) as TypeError & { code?: string };
-    error.code = "ERR_CONSTRUCT_CALL_REQUIRED";
-    throw error;
-  }
-  return Reflect.construct(SerializerImpl, [], new.target);
-} as unknown as typeof SerializerImpl;
-
-Object.setPrototypeOf(Serializer, SerializerImpl);
-Serializer.prototype = SerializerImpl.prototype;
-Object.defineProperty(Serializer.prototype, "constructor", {
-  value: Serializer,
-  configurable: true,
-  enumerable: false,
-  writable: true,
-});
-
-class DeserializerImpl {
+class Deserializer {
   buffer: ArrayBufferView;
   [kHandle]: object;
   constructor(buffer: ArrayBufferView) {
@@ -410,9 +384,12 @@ class DeserializerImpl {
   }
   readRawBytes(length: number): Buffer {
     const offset = this._readRawBytes(length);
+    // `this.buffer` is the Deserializer's own field, not a TypedArray getter.
+    // deno-lint-ignore prefer-primordials
+    const view = this.buffer;
     return Buffer.from(
-      this.buffer.buffer,
-      this.buffer.byteOffset + offset,
+      getViewBuffer(view),
+      getViewByteOffset(view) + offset,
       length,
     );
   }
@@ -445,30 +422,6 @@ class DeserializerImpl {
     return op_v8_transfer_array_buffer_de(this[kHandle], id, arrayBuffer);
   }
 }
-
-const Deserializer = function Deserializer(
-  this: DeserializerImpl,
-  buffer: ArrayBufferView,
-) {
-  if (!new.target) {
-    const error = new TypeError(
-      "Class constructor Deserializer cannot be invoked without 'new'",
-    ) as TypeError & { code?: string };
-    error.code = "ERR_CONSTRUCT_CALL_REQUIRED";
-    throw error;
-  }
-  return Reflect.construct(DeserializerImpl, [buffer], new.target);
-} as unknown as typeof DeserializerImpl;
-
-Object.setPrototypeOf(Deserializer, DeserializerImpl);
-Deserializer.prototype = DeserializerImpl.prototype;
-Object.defineProperty(Deserializer.prototype, "constructor", {
-  value: Deserializer,
-  configurable: true,
-  enumerable: false,
-  writable: true,
-});
-
 function arrayBufferViewTypeToIndex(abView: ArrayBufferView) {
   const type = ObjectPrototypeToString(abView);
   if (type === "[object Int8Array]") return 0;
@@ -512,9 +465,13 @@ class DefaultSerializer extends Serializer {
       }
     }
     this.writeUint32(i);
-    this.writeUint32(abView.byteLength);
+    this.writeUint32(getViewByteLength(abView));
     this.writeRawBytes(
-      new Uint8Array(abView.buffer, abView.byteOffset, abView.byteLength),
+      new Uint8Array(
+        getViewBuffer(abView),
+        getViewByteOffset(abView),
+        getViewByteLength(abView),
+      ),
     );
   }
 }
@@ -548,7 +505,7 @@ class GCProfiler {
   start() {
     if (this[kGCHandle] !== null) return;
     const handle = op_v8_gc_profiler_new();
-    this[kGCStartTime] = Date.now();
+    this[kGCStartTime] = DateNow();
     op_v8_gc_profiler_start(handle);
     this[kGCHandle] = handle;
   }
@@ -557,7 +514,7 @@ class GCProfiler {
     const handle = this[kGCHandle];
     if (handle === null) return undefined;
     this[kGCHandle] = null;
-    const endTime = Date.now();
+    const endTime = DateNow();
     const result = op_v8_gc_profiler_stop(handle);
     if (result === null) return undefined;
     return {
@@ -646,10 +603,13 @@ class DefaultDeserializer extends Deserializer {
     const byteOffset = this._readRawBytes(byteLength);
     const BYTES_PER_ELEMENT = ctor?.BYTES_PER_ELEMENT ?? 1;
 
-    const offset = this.buffer.byteOffset + byteOffset;
+    // `this.buffer` is the Deserializer's own field, not a TypedArray getter.
+    // deno-lint-ignore prefer-primordials
+    const view = this.buffer;
+    const offset = getViewByteOffset(view) + byteOffset;
     if (offset % BYTES_PER_ELEMENT === 0) {
       return new ctor(
-        this.buffer.buffer,
+        getViewBuffer(view),
         offset,
         byteLength / BYTES_PER_ELEMENT,
       );
@@ -657,151 +617,23 @@ class DefaultDeserializer extends Deserializer {
     // Copy to an aligned buffer first.
     const bufferCopy = Buffer.allocUnsafe(byteLength);
     Buffer.from(
-      this.buffer.buffer,
+      getViewBuffer(view),
       byteOffset,
       byteLength,
     ).copy(bufferCopy);
     return new ctor(
-      bufferCopy.buffer,
-      bufferCopy.byteOffset,
+      TypedArrayPrototypeGetBuffer(bufferCopy),
+      TypedArrayPrototypeGetByteOffset(bufferCopy),
       byteLength / BYTES_PER_ELEMENT,
     );
   }
 }
-// node:v8 `promiseHooks`, mirroring upstream lib/internal/promise_hooks.js. The
-// engine machinery (core.setPromiseHooks -> op_set_promise_hooks) is append-only
-// with no unregister and is also consumed by ext/node async_hooks.ts, so this
-// registry installs ONE fixed set of trampolines exactly once (lazily) and keeps
-// its own mutable per-type lists. stop() splices the list, and the installed
-// trampoline naturally stops calling the removed hook. deno_core's 4th "resolve"
-// callback is Node's "settled".
-const promiseHookLists = { init: [], before: [], after: [], settled: [] };
-let promiseHookTrampolinesInstalled = false;
-
-function reportPromiseHookExceptions(exceptions) {
-  // Deferred so a throw in one hook does not stop the others from running,
-  // mirroring upstream's triggerUncaughtException(err, false).
-  for (let i = 0; i < exceptions.length; i++) {
-    core.__reportException(exceptions[i]);
-  }
-}
-
-function runPromiseInitTrampoline(promise, parent) {
-  const snapshot = promiseHookLists.init.slice();
-  const exceptions = [];
-  for (let i = 0; i < snapshot.length; i++) {
-    try {
-      snapshot[i](promise, parent);
-    } catch (err) {
-      exceptions.push(err);
-    }
-  }
-  reportPromiseHookExceptions(exceptions);
-}
-
-function makePromiseHookTrampoline(name) {
-  return (promise) => {
-    const snapshot = promiseHookLists[name].slice();
-    const exceptions = [];
-    for (let i = 0; i < snapshot.length; i++) {
-      try {
-        snapshot[i](promise);
-      } catch (err) {
-        exceptions.push(err);
-      }
-    }
-    reportPromiseHookExceptions(exceptions);
-  };
-}
-
-const runPromiseBeforeTrampoline = makePromiseHookTrampoline("before");
-const runPromiseAfterTrampoline = makePromiseHookTrampoline("after");
-const runPromiseSettledTrampoline = makePromiseHookTrampoline("settled");
-
-function ensurePromiseHookTrampolines() {
-  if (promiseHookTrampolinesInstalled) return;
-  promiseHookTrampolinesInstalled = true;
-  core.setPromiseHooks(
-    runPromiseInitTrampoline,
-    runPromiseBeforeTrampoline,
-    runPromiseAfterTrampoline,
-    runPromiseSettledTrampoline,
-  );
-}
-
-function validatePromiseHookFn(fn, name) {
-  if (
-    typeof fn !== "function" ||
-    isAsyncFunction(fn) ||
-    isGeneratorFunction(fn)
-  ) {
-    throw new codes.ERR_INVALID_ARG_TYPE(`${name}Hook`, "Function", fn);
-  }
-}
-
-function makeUsePromiseHook(name) {
-  const list = promiseHookLists[name];
-  return (hook) => {
-    validatePromiseHookFn(hook, name);
-    ensurePromiseHookTrampolines();
-    list.push(hook);
-    let stopped = false;
-    return function stop() {
-      if (stopped) {
-        return;
-      }
-      const index = list.indexOf(hook);
-      if (index >= 0) {
-        list.splice(index, 1);
-      }
-      stopped = true;
-    };
-  };
-}
-
-const onInit = makeUsePromiseHook("init");
-const onBefore = makeUsePromiseHook("before");
-const onAfter = makeUsePromiseHook("after");
-const onSettled = makeUsePromiseHook("settled");
-
-function createPromiseHook(callbacks) {
-  const { init, before, after, settled } = callbacks ?? {};
-  const stops = [];
-  if (init) {
-    stops.push(onInit(init));
-  }
-  if (before) {
-    stops.push(onBefore(before));
-  }
-  if (after) {
-    stops.push(onAfter(after));
-  }
-  if (settled) {
-    stops.push(onSettled(settled));
-  }
-  return function stop() {
-    for (let i = 0; i < stops.length; i++) {
-      stops[i]();
-    }
-  };
-}
-
-const promiseHooks = ObjectFreeze({
-  createHook: createPromiseHook,
-  onInit,
-  onBefore,
-  onAfter,
-  onSettled,
-});
-
 return {
   cachedDataVersionTag,
   getHeapCodeStatistics,
   getHeapSnapshot,
   getHeapSpaceStatistics,
   getHeapStatistics,
-  isStringOneByteRepresentation,
-  promiseHooks,
   queryObjects,
   setFlagsFromString,
   startupSnapshot,

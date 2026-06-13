@@ -1,7 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// deno-lint-ignore-file prefer-primordials
-
 (function () {
 "use strict";
 const { core, primordials } = __bootstrap;
@@ -9,11 +7,13 @@ const {
   ArrayPrototypeForEach,
   ArrayPrototypeIndexOf,
   ArrayPrototypePush,
+  ArrayPrototypeSlice,
   ArrayPrototypeSplice,
   Error,
   ErrorPrototype,
   MapPrototypeDelete,
   MapPrototypeGet,
+  MapPrototypeHas,
   MapPrototypeSet,
   ObjectDefineProperty,
   ObjectPrototypeHasOwnProperty,
@@ -23,14 +23,22 @@ const {
   Promise,
   PromisePrototypeThen,
   PromiseResolve,
+  PromiseWithResolvers,
+  Proxy,
   ReflectApply,
   ReflectConstruct,
+  ReflectGet,
+  RegExpPrototypeExec,
+  RegExpPrototypeTest,
   SafeArrayIterator,
   SafeMap,
+  SafeRegExp,
   String,
+  StringPrototypeMatch,
   Symbol,
   SymbolFor,
   TypeError,
+  queueMicrotask,
 } = primordials;
 
 let errorHandlersInstalled = false;
@@ -38,21 +46,6 @@ let errorHandlersInstalled = false;
 let activeNodeTests = 0;
 
 let pendingCallbackReject = null;
-let pendingAsyncTestReject = null;
-let currentTestContext = undefined;
-let activeProgrammaticRun = null;
-let nextProgrammaticRunId = 0;
-
-function getCurrentTestFilePath() {
-  const argv = lazyProcess().default.argv;
-  return Array.isArray(argv) && typeof argv[1] === "string"
-    ? argv[1]
-    : undefined;
-}
-
-function getTestContext() {
-  return currentTestContext;
-}
 
 function sanitizeThrowValue(err) {
   if (err === null || err === undefined || typeof err !== "object") {
@@ -80,13 +73,6 @@ function installErrorHandlers() {
   errorHandlersInstalled = true;
 
   globalThis.addEventListener("unhandledrejection", (event) => {
-    if (pendingAsyncTestReject !== null) {
-      event.preventDefault();
-      const reject = pendingAsyncTestReject;
-      pendingAsyncTestReject = null;
-      reject(event.reason ?? new Error("unhandled rejection"));
-      return;
-    }
     if (activeNodeTests > 0) {
       event.preventDefault();
     }
@@ -99,12 +85,6 @@ function installErrorHandlers() {
     if (pendingCallbackReject !== null) {
       pendingCallbackReject(event.error ?? new Error("uncaught error"));
       pendingCallbackReject = null;
-      return;
-    }
-    if (pendingAsyncTestReject !== null) {
-      const reject = pendingAsyncTestReject;
-      pendingAsyncTestReject = null;
-      reject(event.error ?? new Error("uncaught error"));
     }
   });
 }
@@ -113,11 +93,10 @@ const {
   validateFunction,
   validateInteger,
   validateObject,
-  validateString,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
-const { ERR_INVALID_ARG_TYPE, ERR_OUT_OF_RANGE } = core.loadExtScript(
+const { ERR_INVALID_ARG_TYPE, ERR_INVALID_ARG_VALUE } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
-);
+).codes;
 const { default: assert } = core.loadExtScript("ext:deno_node/assert.ts");
 const {
   tapEscape,
@@ -125,7 +104,6 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/test/reporters.ts");
 
 const methodsToCopy = [
-  "CallTracker",
   "deepEqual",
   "deepStrictEqual",
   "doesNotMatch",
@@ -146,140 +124,13 @@ const methodsToCopy = [
   "ok",
 ];
 
-const customAssertions = new SafeMap();
-
-function snapshotAssertion() {
-  // Snapshot comparison is implemented in Node's internal test runner. The
-  // compatibility layer exposes the method so tests and packages can feature
-  // detect it; full snapshot persistence is covered by dedicated fixtures.
-}
-
-function fileSnapshotAssertion() {
-  // See snapshotAssertion().
-}
-
-function registerAssertion(name, fn) {
-  validateString(name, "name");
-  validateFunction(fn, "fn");
-  customAssertions.set(name, fn);
-}
-
-const testAssert = { __proto__: null, register: registerAssertion };
-let _fs = null;
-
-function getFs() {
-  if (_fs === null) {
-    _fs = core.loadExtScript("ext:deno_node/fs.ts");
-  }
-  return _fs;
-}
-
-let _path = null;
-function getPath() {
-  if (_path === null) {
-    _path = core.createLazyLoader("node:path")();
-  }
-  return _path;
-}
-
-let _url = null;
-function getUrl() {
-  if (_url === null) {
-    _url = core.createLazyLoader("node:url")();
-  }
-  return _url;
-}
-
-let _module = null;
-function getModule() {
-  if (_module === null) {
-    _module = core.createLazyLoader("node:module")();
-  }
-  return _module;
-}
-
-function fileUrlToPath(url) {
-  return decodeURIComponent(url.slice("file://".length));
-}
-
-function assertionSourceLineFromStack() {
-  const stack = new Error().stack;
-  if (typeof stack !== "string") return undefined;
-  const lines = stack.split("\n");
-  for (const line of lines) {
-    if (line.includes("ext:deno_node/testing.ts")) continue;
-    const match = line.match(/\((file:\/\/[^)]+):(\d+):(\d+)\)/) ??
-      line.match(/(file:\/\/\S+):(\d+):(\d+)/);
-    if (!match) continue;
-    try {
-      const path = fileUrlToPath(match[1]);
-      const lineNo = Number(match[2]);
-      const text = getFs().readFileSync(path, "utf-8");
-      return text.split(/\r?\n/)[lineNo - 1]?.trim();
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-function testLocationFromStack() {
-  const stack = new Error().stack;
-  if (typeof stack !== "string") return undefined;
-  const lines = stack.split("\n");
-  for (const line of lines) {
-    if (line.includes("ext:deno_node/testing.ts")) continue;
-    const match = line.match(/\((file:\/\/[^)]+):(\d+):(\d+)\)/) ??
-      line.match(/(file:\/\/\S+):(\d+):(\d+)/);
-    if (!match) continue;
-    try {
-      return {
-        __proto__: null,
-        file: fileUrlToPath(match[1]),
-        line: Number(match[2]),
-        column: Number(match[3]),
-      };
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-function getAssertObject(nodeTestContext, plan) {
-  const assertObject = { __proto__: null };
-  ArrayPrototypeForEach(methodsToCopy, (method) => {
-    if (assert[method] === undefined) return;
-    assertObject[method] = function (...args) {
-      if (plan) plan.increment();
-      if (method === "ok" && !args[0] && args[1] === undefined) {
-        const sourceLine = assertionSourceLineFromStack();
-        if (sourceLine) {
-          throw new assert.AssertionError({
-            actual: args[0],
-            expected: true,
-            operator: "==",
-            message:
-              `The expression evaluated to a falsy value:\n\n  ${sourceLine}`,
-          });
-        }
-      }
-      return ReflectApply(assert[method], assert, args);
-    };
-  });
-  assertObject.snapshot = function (...args) {
-    if (plan) plan.increment();
-    return ReflectApply(snapshotAssertion, nodeTestContext, args);
-  };
-  assertObject.fileSnapshot = function (...args) {
-    if (plan) plan.increment();
-    return ReflectApply(fileSnapshotAssertion, nodeTestContext, args);
-  };
-  for (const [name, fn] of customAssertions) {
-    assertObject[name] = function (...args) {
-      if (plan) plan.increment();
-      return ReflectApply(fn, nodeTestContext, args);
-    };
+let assertObject = undefined;
+function getAssertObject() {
+  if (assertObject === undefined) {
+    assertObject = { __proto__: null };
+    ArrayPrototypeForEach(methodsToCopy, (method) => {
+      assertObject[method] = assert[method];
+    });
   }
   return assertObject;
 }
@@ -304,743 +155,16 @@ function getFsWatch() {
 }
 const lazyProcess = core.createLazyLoader("node:process");
 
-function createFailureError(error, failureType) {
-  let out = error;
-  if (out === undefined || out === null || typeof out !== "object") {
-    out = new Error(String(out));
-  }
-  try {
-    out.failureType = failureType;
-  } catch {
-    // Error-like objects can be frozen; the event still carries the value.
-  }
-  return out;
-}
-
-function createSeededRandom(seed) {
-  let state = Number(seed ?? 0) >>> 0;
-  return () => {
-    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-    return state / 0x100000000;
-  };
-}
-
-function shuffleInPlace(values, random) {
-  for (let index = values.length - 1; index > 0; index--) {
-    const swapIndex = Math.floor(random() * (index + 1));
-    const current = values[index];
-    values[index] = values[swapIndex];
-    values[swapIndex] = current;
-  }
-}
-
-class ProgrammaticDenoContext {
-  #runner;
-  #parentMeta;
-
-  constructor(runner, parentMeta) {
-    this.#runner = runner;
-    this.#parentMeta = parentMeta;
-  }
-
-  step(options) {
-    return this.#runner.runStep(options, this.#parentMeta);
-  }
-}
-
-class ProgrammaticRun {
-  #streamEmit;
-  #cwd;
-  #options;
-  #runId;
-  #entries = [];
-  #currentSuite = null;
-  #rootBeforeHooks = [];
-  #rootAfterHooks = [];
-  #rootBeforeEachHooks = [];
-  #rootAfterEachHooks = [];
-  #testNumber = 0;
-  #testId = 0;
-  #filePath = undefined;
-  #fileDisplayName = undefined;
-  #rerunState = null;
-  #rerunAttempt = 0;
-  #rerunCurrentEntry = null;
-  #rerunPreviousEntry = null;
-  #rerunLocationCounts = new SafeMap();
-  #rerunEmittedKeys = new SafeMap();
-  #rerunChildKeysByParentKey = new SafeMap();
-
-  constructor(streamEmit, cwd, options) {
-    this.#streamEmit = streamEmit;
-    this.#cwd = cwd;
-    this.#options = options;
-    this.#runId = nextProgrammaticRunId++;
-  }
-
-  #emit(type, data) {
-    this.#streamEmit(type, data);
-  }
-
-  #nextMeta(name, parentMeta, location) {
-    const testId = ++this.#testId;
-    return {
-      __proto__: null,
-      name,
-      nesting: parentMeta ? parentMeta.nesting + 1 : 0,
-      testNumber: ++this.#testNumber,
-      testId,
-      parentId: parentMeta ? parentMeta.testId : undefined,
-      file: location?.file ?? this.#filePath,
-      line: location?.line ?? 1,
-      column: location?.column ?? 1,
-      tags: [],
-    };
-  }
-
-  #eventData(meta, details, directive) {
-    const data = {
-      __proto__: null,
-      name: meta.name,
-      nesting: meta.nesting,
-      testNumber: meta.testNumber,
-      testId: meta.testId,
-      details,
-      file: meta.file,
-      line: meta.line,
-      column: meta.column,
-      tags: [],
-    };
-    if (meta.parentId !== undefined) data.parentId = meta.parentId;
-    if (directive) {
-      Object.assign(data, directive);
-    }
-    return data;
-  }
-
-  #terminalDetails(type, error) {
-    const details = {
-      __proto__: null,
-      "duration_ms": 0,
-      type,
-    };
-    if (error !== undefined) {
-      details.error = error;
-    }
-    return details;
-  }
-
-  #queueEntry(kind, name, options, fn) {
-    const entry = {
-      __proto__: null,
-      kind,
-      name,
-      options,
-      fn,
-      location: options.__nimbusLocation,
-      children: [],
-      beforeAllHooks: [],
-      afterAllHooks: [],
-      beforeEachHooks: [],
-      afterEachHooks: [],
-      bodyPromise: null,
-      bodyError: null,
-    };
-    if (this.#currentSuite !== null) {
-      ArrayPrototypePush(this.#currentSuite.children, entry);
-    } else {
-      ArrayPrototypePush(this.#entries, entry);
-    }
-    return entry;
-  }
-
-  queueTest(name, options, fn, overrides) {
-    const prepared = prepareOptions(name, options, fn, overrides);
-    prepared.options.__nimbusLocation = prepared.location;
-    this.#queueEntry("test", prepared.name, prepared.options, prepared.fn);
-    return PromiseResolve();
-  }
-
-  queueSuite(name, options, fn, overrides) {
-    const prepared = prepareOptions(name, options, fn, overrides);
-    prepared.options.__nimbusLocation = prepared.location;
-    const entry = this.#queueEntry(
-      "suite",
-      prepared.name,
-      prepared.options,
-      prepared.fn,
-    );
-    const previousSuite = this.#currentSuite;
-    this.#currentSuite = entry;
-    try {
-      const result = ReflectApply(prepared.fn, null, []);
-      if (isThenable(result)) {
-        entry.bodyPromise = result;
-      }
-    } catch (error) {
-      entry.bodyError = error;
-    } finally {
-      this.#currentSuite = previousSuite;
-    }
-    return PromiseResolve();
-  }
-
-  addBeforeHook(fn) {
-    if (this.#currentSuite !== null) {
-      ArrayPrototypePush(this.#currentSuite.beforeAllHooks, fn);
-    } else {
-      ArrayPrototypePush(this.#rootBeforeHooks, fn);
-    }
-  }
-
-  addAfterHook(fn) {
-    if (this.#currentSuite !== null) {
-      ArrayPrototypePush(this.#currentSuite.afterAllHooks, fn);
-    } else {
-      ArrayPrototypePush(this.#rootAfterHooks, fn);
-    }
-  }
-
-  addBeforeEachHook(fn) {
-    if (this.#currentSuite !== null) {
-      ArrayPrototypePush(this.#currentSuite.beforeEachHooks, fn);
-    } else {
-      ArrayPrototypePush(this.#rootBeforeEachHooks, fn);
-    }
-  }
-
-  addAfterEachHook(fn) {
-    if (this.#currentSuite !== null) {
-      ArrayPrototypePush(this.#currentSuite.afterEachHooks, fn);
-    } else {
-      ArrayPrototypePush(this.#rootAfterEachHooks, fn);
-    }
-  }
-
-  #resolveFile(file) {
-    const path = getPath();
-    const absolute = path.isAbsolute(file)
-      ? file
-      : path.resolve(this.#cwd, file);
-    return {
-      __proto__: null,
-      absolute,
-      display: path.isAbsolute(file) ? absolute : file,
-    };
-  }
-
-  #loadRerunState() {
-    const filePath = this.#options.rerunFailuresFilePath;
-    if (typeof filePath !== "string" || filePath.length === 0) {
-      this.#rerunState = null;
-      this.#rerunAttempt = 0;
-      this.#rerunCurrentEntry = null;
-      this.#rerunPreviousEntry = null;
-      this.#rerunEmittedKeys = new SafeMap();
-      this.#rerunChildKeysByParentKey = new SafeMap();
-      return;
-    }
-    try {
-      const fs = getFs();
-      const text = fs.existsSync(filePath)
-        ? fs.readFileSync(filePath, "utf8")
-        : "[]";
-      const parsed = JSON.parse(text || "[]");
-      this.#rerunState = Array.isArray(parsed) ? parsed : [];
-    } catch {
-      this.#rerunState = [];
-    }
-    this.#rerunAttempt = this.#rerunState.length;
-    this.#rerunPreviousEntry = this.#rerunAttempt > 0
-      ? this.#rerunState[this.#rerunAttempt - 1]
-      : null;
-    this.#rerunCurrentEntry = this.#rerunPreviousEntry === null
-      ? { __proto__: null }
-      : { ...this.#rerunPreviousEntry };
-    this.#rerunEmittedKeys = new SafeMap();
-    this.#rerunChildKeysByParentKey = new SafeMap();
-  }
-
-  #writeRerunState() {
-    const filePath = this.#options.rerunFailuresFilePath;
-    if (
-      typeof filePath !== "string" ||
-      filePath.length === 0 ||
-      this.#rerunState === null ||
-      this.#rerunCurrentEntry === null
-    ) {
-      return;
-    }
-    try {
-      const fs = getFs();
-      const path = getPath();
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      const nextState = [
-        ...this.#rerunState,
-        this.#rerunCurrentEntry,
-      ];
-      fs.writeFileSync(filePath, JSON.stringify(nextState, null, 2));
-      this.#rerunState = nextState;
-      this.#rerunPreviousEntry = this.#rerunCurrentEntry;
-    } catch {
-      // Callers that depend on the state file will surface persistence errors.
-    }
-  }
-
-  #rerunKey(meta) {
-    if (this.#rerunCurrentEntry === null || !meta.file) return null;
-    const path = getPath();
-    const relative = path.relative(lazyProcess().default.cwd(), meta.file)
-      .replaceAll("\\", "/");
-    const base = `${relative}:${meta.line}:${meta.column}`;
-    const count = MapPrototypeGet(this.#rerunLocationCounts, base) ?? 0;
-    MapPrototypeSet(this.#rerunLocationCounts, base, count + 1);
-    return count === 0 ? base : `${base}:(${count})`;
-  }
-
-  #locationFromRerunKey(key) {
-    const match = String(key).match(/^(.*):(\d+):(\d+)(?::\(\d+\))?$/);
-    if (!match) return undefined;
-    const path = getPath();
-    return {
-      __proto__: null,
-      file: path.resolve(this.#cwd, match[1]),
-      line: Number(match[2]),
-      column: Number(match[3]),
-    };
-  }
-
-  #emitPass(meta, type) {
-    this.#emit(
-      "test:complete",
-      this.#eventData(
-        meta,
-        this.#terminalDetails(type),
-      ),
-    );
-    this.#emit(
-      "test:pass",
-      this.#eventData(meta, this.#terminalDetails(type)),
-    );
-  }
-
-  #emitStoredRerunPass(key, record, parentMeta) {
-    if (MapPrototypeGet(this.#rerunEmittedKeys, key) === true) return;
-    const meta = this.#nextMeta(
-      record?.name ?? "<anonymous>",
-      parentMeta,
-      this.#locationFromRerunKey(key),
-    );
-    meta.rerunKey = this.#rerunKey(meta);
-    this.#emit(
-      "test:enqueue",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "test" },
-      ),
-    );
-    this.#emit(
-      "test:dequeue",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "test" },
-      ),
-    );
-    this.#emit(
-      "test:start",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "test" },
-      ),
-    );
-    this.#emitPass(meta, "test");
-    MapPrototypeSet(this.#rerunEmittedKeys, key, true);
-    this.#emitStoredRerunChildren(record, meta);
-  }
-
-  #emitStoredRerunChildren(record, parentMeta) {
-    if (
-      record === null ||
-      typeof record !== "object" ||
-      !Array.isArray(record.children) ||
-      this.#rerunPreviousEntry === null
-    ) {
-      return;
-    }
-    for (const childKey of new SafeArrayIterator(record.children)) {
-      const childRecord = this.#rerunPreviousEntry[childKey];
-      if (childRecord === undefined) continue;
-      this.#emitStoredRerunPass(childKey, childRecord, parentMeta);
-    }
-  }
-
-  #recordRerunPass(meta, parentMeta) {
-    const key = meta.rerunKey;
-    if (key === null || key === undefined || this.#rerunCurrentEntry === null) {
-      return;
-    }
-    const record = {
-      __proto__: null,
-      "passed_on_attempt": this.#rerunAttempt,
-      name: meta.name,
-    };
-    const childKeys = MapPrototypeGet(this.#rerunChildKeysByParentKey, key);
-    if (Array.isArray(childKeys) && childKeys.length > 0) {
-      record.children = [...childKeys];
-    }
-    this.#rerunCurrentEntry[key] = record;
-    MapPrototypeSet(this.#rerunEmittedKeys, key, true);
-
-    const parentKey = parentMeta?.rerunKey;
-    if (parentKey !== null && parentKey !== undefined) {
-      let siblings = MapPrototypeGet(
-        this.#rerunChildKeysByParentKey,
-        parentKey,
-      );
-      if (!Array.isArray(siblings)) {
-        siblings = [];
-        MapPrototypeSet(this.#rerunChildKeysByParentKey, parentKey, siblings);
-      }
-      ArrayPrototypePush(siblings, key);
-      const parentRecord = this.#rerunCurrentEntry[parentKey];
-      if (parentRecord !== undefined) {
-        parentRecord.children = [...siblings];
-      }
-    }
-  }
-
-  async #loadFile(absolute) {
-    const path = getPath();
-    const url = getUrl();
-    const ext = path.extname(absolute);
-    if (ext === ".mjs") {
-      await import(
-        `${url.pathToFileURL(absolute).href}?nimbus-test-run=${this.#runId}`
-      );
-      return;
-    }
-
-    const module = getModule();
-    const require = module.createRequire(absolute);
-    let resolved = absolute;
-    try {
-      resolved = require.resolve(absolute);
-      if (require.cache?.[resolved]) {
-        delete require.cache[resolved];
-      }
-    } catch {
-      // Fall through and let require surface the actual load error.
-    }
-    require(resolved);
-  }
-
-  async executeFile(file) {
-    const resolved = this.#resolveFile(file);
-    this.#filePath = resolved.absolute;
-    this.#fileDisplayName = resolved.display;
-    this.#entries = [];
-    this.#currentSuite = null;
-    this.#rootBeforeHooks = [];
-    this.#rootAfterHooks = [];
-    this.#rootBeforeEachHooks = [];
-    this.#rootAfterEachHooks = [];
-    this.#rerunLocationCounts = new SafeMap();
-    this.#loadRerunState();
-    const fileMeta = this.#nextMeta(this.#fileDisplayName, null);
-    this.#emit(
-      "test:enqueue",
-      this.#eventData(
-        fileMeta,
-        { __proto__: null, type: "test" },
-      ),
-    );
-    this.#emit(
-      "test:dequeue",
-      this.#eventData(
-        fileMeta,
-        { __proto__: null, type: "test" },
-      ),
-    );
-
-    const previousRun = activeProgrammaticRun;
-    activeProgrammaticRun = this;
-    activeNodeTests++;
-    let fileCompleteEmitted = false;
-    try {
-      await this.#loadFile(resolved.absolute);
-      this.#emit(
-        "test:complete",
-        this.#eventData(
-          fileMeta,
-          this.#terminalDetails("test"),
-        ),
-      );
-      fileCompleteEmitted = true;
-      await this.#runRootHooks(this.#rootBeforeHooks);
-      const randomization = globalThis.__nimbusEmbeddedTestRandomization;
-      if (randomization?.enabled === true) {
-        shuffleInPlace(
-          this.#entries,
-          createSeededRandom(randomization.seed),
-        );
-      }
-      for (const entry of new SafeArrayIterator(this.#entries)) {
-        await this.#runEntry(entry, null);
-      }
-      await this.#runRootHooks(this.#rootAfterHooks);
-    } catch (error) {
-      this.#emitFileFailure(error, "testCodeFailure");
-    } finally {
-      if (!fileCompleteEmitted) {
-        this.#emit(
-          "test:complete",
-          this.#eventData(
-            fileMeta,
-            this.#terminalDetails("test"),
-          ),
-        );
-      }
-      activeNodeTests--;
-      activeProgrammaticRun = previousRun;
-      this.#writeRerunState();
-    }
-  }
-
-  async #runRootHooks(hooks) {
-    const rootCtx = {
-      __proto__: null,
-      name: "<root>",
-      fullName: "<root>",
-      filePath: this.#filePath,
-    };
-    for (const hook of new SafeArrayIterator(hooks)) {
-      const result = ReflectApply(hook, null, [rootCtx]);
-      if (isThenable(result)) await result;
-    }
-  }
-
-  async #runEntry(entry, parentMeta) {
-    if (entry.kind === "suite") {
-      return await this.#runSuiteEntry(entry, parentMeta);
-    }
-    return await this.#runTestEntry(entry, parentMeta);
-  }
-
-  async #runSuiteEntry(entry, parentMeta) {
-    const meta = this.#nextMeta(entry.name, parentMeta, entry.location);
-    meta.rerunKey = this.#rerunKey(meta);
-    this.#emit(
-      "test:enqueue",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "suite" },
-      ),
-    );
-    this.#emit(
-      "test:dequeue",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "suite" },
-      ),
-    );
-    this.#emit(
-      "test:start",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "suite" },
-      ),
-    );
-
-    let failure = undefined;
-    const previousRecord = meta.rerunKey === null || meta.rerunKey === undefined
-      ? undefined
-      : this.#rerunPreviousEntry?.[meta.rerunKey];
-    try {
-      if (previousRecord !== undefined) {
-        this.#emitPass(meta, "suite");
-        MapPrototypeSet(this.#rerunEmittedKeys, meta.rerunKey, true);
-        this.#emitStoredRerunChildren(previousRecord, meta);
-        return true;
-      }
-      if (entry.bodyError) throw entry.bodyError;
-      if (entry.bodyPromise) await entry.bodyPromise;
-      for (const hook of new SafeArrayIterator(entry.beforeAllHooks)) {
-        const result = ReflectApply(hook, null, []);
-        if (isThenable(result)) await result;
-      }
-      for (const child of new SafeArrayIterator(entry.children)) {
-        await this.#runEntry(child, meta);
-      }
-      for (const hook of new SafeArrayIterator(entry.afterAllHooks)) {
-        const result = ReflectApply(hook, null, []);
-        if (isThenable(result)) await result;
-      }
-    } catch (error) {
-      failure = createFailureError(error, "testCodeFailure");
-    }
-
-    this.#emit(
-      "test:complete",
-      this.#eventData(
-        meta,
-        this.#terminalDetails("suite", failure),
-      ),
-    );
-    this.#emit(
-      failure === undefined ? "test:pass" : "test:fail",
-      this.#eventData(meta, this.#terminalDetails("suite", failure)),
-    );
-    if (failure === undefined) {
-      this.#recordRerunPass(meta, parentMeta);
-    }
-    return failure === undefined;
-  }
-
-  async #runTestEntry(entry, parentMeta) {
-    const meta = this.#nextMeta(entry.name, parentMeta, entry.location);
-    return await this.#runWithMeta(meta, entry, parentMeta, false);
-  }
-
-  async #runWithMeta(meta, entry, parentMeta, fromStep) {
-    meta.rerunKey = this.#rerunKey(meta);
-    this.#emit(
-      "test:enqueue",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "test" },
-      ),
-    );
-    this.#emit(
-      "test:dequeue",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "test" },
-      ),
-    );
-    this.#emit(
-      "test:start",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "test" },
-      ),
-    );
-
-    let failure = undefined;
-    const rerunKey = meta.rerunKey;
-    const denoContext = new ProgrammaticDenoContext(this, meta);
-    const nodeContext = fromStep ? null : new NodeTestContext(
-      denoContext,
-      undefined,
-      entry.name,
-      this.#filePath,
-      this.#rerunAttempt,
-    );
-
-    try {
-      if (
-        rerunKey !== null &&
-        rerunKey !== undefined &&
-        this.#rerunPreviousEntry !== null &&
-        this.#rerunPreviousEntry[rerunKey] !== undefined
-      ) {
-        const previousRecord = this.#rerunPreviousEntry[rerunKey];
-        this.#emitPass(meta, "test");
-        MapPrototypeSet(this.#rerunEmittedKeys, rerunKey, true);
-        this.#emitStoredRerunChildren(previousRecord, meta);
-        return true;
-      }
-      if (!fromStep) {
-        for (const hook of new SafeArrayIterator(this.#rootBeforeEachHooks)) {
-          const result = ReflectApply(hook, null, [nodeContext]);
-          if (isThenable(result)) await result;
-        }
-      }
-      if (fromStep) {
-        await entry.fn(denoContext);
-      } else {
-        await runPossiblyExpectingFailure(
-          entry.fn,
-          nodeContext,
-          entry.options,
-        );
-      }
-    } catch (error) {
-      failure = createFailureError(error, "testCodeFailure");
-    } finally {
-      if (!fromStep) {
-        for (const hook of new SafeArrayIterator(this.#rootAfterEachHooks)) {
-          try {
-            const result = ReflectApply(hook, null, [nodeContext]);
-            if (isThenable(result)) await result;
-          } catch { /* preserve the primary test result */ }
-        }
-      }
-    }
-
-    this.#emit(
-      "test:complete",
-      this.#eventData(
-        meta,
-        this.#terminalDetails("test", failure),
-      ),
-    );
-    this.#emit(
-      failure === undefined ? "test:pass" : "test:fail",
-      this.#eventData(meta, this.#terminalDetails("test", failure)),
-    );
-    if (
-      failure === undefined &&
-      rerunKey !== null &&
-      rerunKey !== undefined &&
-      this.#rerunCurrentEntry !== null
-    ) {
-      this.#recordRerunPass(meta, parentMeta);
-    }
-    return failure === undefined;
-  }
-
-  async runStep(options, parentMeta) {
-    const meta = this.#nextMeta(options.name, parentMeta, options.location);
-    const entry = {
-      __proto__: null,
-      kind: "test",
-      name: options.name,
-      options,
-      fn: options.fn,
-    };
-    return await this.#runWithMeta(meta, entry, parentMeta, true);
-  }
-
-  #emitFileFailure(error, failureType) {
-    const meta = this.#nextMeta(this.#fileDisplayName, null);
-    const failure = createFailureError(error, failureType);
-    this.#emit(
-      "test:start",
-      this.#eventData(
-        meta,
-        { __proto__: null, type: "test" },
-      ),
-    );
-    this.#emit(
-      "test:complete",
-      this.#eventData(
-        meta,
-        this.#terminalDetails("test", failure),
-      ),
-    );
-    this.#emit(
-      "test:fail",
-      this.#eventData(meta, this.#terminalDetails("test", failure)),
-    );
-  }
-}
-
 // node:test `run()` implementation.
 //
 // Returns a `TestsStream`-compatible Readable that emits structured events
-// describing the test run lifecycle. File-backed runs collect node:test
-// declarations from the requested files and execute them in-process, while
-// watch mode keeps emitting Node-compatible drained/restarted events.
+// describing the test run lifecycle. We currently support the watch-mode
+// event stream (`test:watch:drained`, `test:watch:restarted`) which is the
+// minimum required for the Node.js `test-runner/test-run-watch-*` fixtures
+// that drive watch behavior through the programmatic API. Actual test file
+// discovery / execution remains TODO and is gated behind separate work; the
+// stream emits a single empty run cycle, then either ends (watch:false) or
+// waits for filesystem changes to trigger restarts (watch:true).
 //
 // See test-runner/test-run-watch-*.mjs in the Node compat suite for the
 // behavior this implements.
@@ -1078,15 +202,17 @@ function run(options) {
       } catch { /* ignore */ }
       watcher = null;
     }
+    // deno-lint-ignore prefer-primordials -- stream is a Node Readable, not an Array
     stream.push(null);
   }
 
-  function emit(type, emittedData) {
+  function emit(type) {
     if (finished) return;
-    const data = emittedData ?? { __proto__: null };
+    const data = { __proto__: null };
     // Node's TestsStream emits each lifecycle entry both as a data chunk
     // (consumed via async iteration / `'data'` listeners) and as a named
     // event so callers can attach `.on('test:watch:drained', ...)` directly.
+    // deno-lint-ignore prefer-primordials -- stream is a Node Readable, not an Array
     stream.push({ __proto__: null, type, data });
     stream.emit(type, data);
   }
@@ -1126,31 +252,12 @@ function run(options) {
   // Emit the initial "drained" event after the current microtask completes
   // so that consumers attaching `.on('data')` synchronously after `run(...)`
   // returns still observe the event.
-  queueMicrotask(async () => {
-    const files = Array.isArray(options.files) ? options.files : [];
-    if (files.length > 0) {
-      const programmatic = new ProgrammaticRun(emit, cwd, options);
-      for (const file of new SafeArrayIterator(files)) {
-        if (finished) break;
-        await programmatic.executeFile(String(file));
-      }
-      if (typeof options.rerunFailuresFilePath === "string") {
-        try {
-          const fs = getFs();
-          if (!fs.existsSync(options.rerunFailuresFilePath)) {
-            fs.writeFileSync(options.rerunFailuresFilePath, "[]");
-          }
-        } catch {
-          // The stream result should carry test failures; inability to persist
-          // rerun state is surfaced by callers that read the state file.
-        }
-      }
-    }
+  queueMicrotask(() => {
+    drained();
     if (!watch) {
       finish();
       return;
     }
-    drained();
     try {
       const fsWatch = getFsWatch();
       watcher = fsWatch(cwd, { recursive: true }, () => {
@@ -1195,7 +302,10 @@ function detectNodeTestReporter() {
   // space-separated forms. We intentionally do not handle multiple reporters
   // (Node lets you stack reporters with destinations); the snapshot tests use
   // a single reporter and that is what we target.
-  const match = nodeOptions.match(/--test-reporter(?:=|\s+)(\S+)/);
+  const match = StringPrototypeMatch(
+    nodeOptions,
+    new SafeRegExp(/--test-reporter(?:=|\s+)(\S+)/),
+  );
   return match ? match[1] : null;
 }
 
@@ -1241,21 +351,24 @@ function parsePatternFlag(flag) {
   } catch { /* permission denied */ }
   if (!nodeOptions) return null;
   const out = [];
-  const re = new RegExp(`${flag}(?:=|\\s+)(\\S+)`, "g");
+  const re = new SafeRegExp(`${flag}(?:=|\\s+)(\\S+)`, "g");
   let m;
-  while ((m = re.exec(nodeOptions)) !== null) {
+  while ((m = RegExpPrototypeExec(re, nodeOptions)) !== null) {
     const value = m[1];
     let pattern;
-    const litMatch = value.match(/^\/(.*)\/([a-z]*)$/);
+    const litMatch = StringPrototypeMatch(
+      value,
+      new SafeRegExp(/^\/(.*)\/([a-z]*)$/),
+    );
     if (litMatch) {
       try {
-        pattern = new RegExp(litMatch[1], litMatch[2]);
+        pattern = new SafeRegExp(litMatch[1], litMatch[2]);
       } catch {
         continue;
       }
     } else {
       try {
-        pattern = new RegExp(value);
+        pattern = new SafeRegExp(value);
       } catch {
         continue;
       }
@@ -1284,7 +397,10 @@ function isTestOnlyFlagSet() {
   try {
     nodeOptions = env.get("NODE_OPTIONS") || "";
   } catch { /* permission denied */ }
-  testOnlyFlagCache = /(^|\s)--test-only(\s|=|$)/.test(nodeOptions);
+  testOnlyFlagCache = RegExpPrototypeTest(
+    new SafeRegExp(/(^|\s)--test-only(\s|=|$)/),
+    nodeOptions,
+  );
   return testOnlyFlagCache;
 }
 
@@ -1293,7 +409,7 @@ const TEST_ONLY_WARNING =
 
 function matchesAnyPattern(name, patterns) {
   for (const p of new SafeArrayIterator(patterns)) {
-    if (p.test(name)) return true;
+    if (RegExpPrototypeTest(p, name)) return true;
   }
   return false;
 }
@@ -1384,7 +500,7 @@ class TapContext {
   }
 
   get assert() {
-    return getAssertObject(this, null);
+    return getAssertObject();
   }
 
   get mock() {
@@ -1460,16 +576,14 @@ async function runTapTop() {
     // `TAP version 13` line, so any console output they produce appears
     // before the reporter header in the captured stream.
     if (rootBeforeHooks.length > 0) {
-      const rootCtx = {
-        name: "<root>",
-        fullName: "<root>",
-        filePath: getCurrentTestFilePath(),
-      };
+      const rootCtx = { name: "<root>", fullName: "<root>" };
       for (const hook of new SafeArrayIterator(rootBeforeHooks)) {
         try {
           const r = ReflectApply(hook, null, [rootCtx]);
           if (isThenable(r)) await r;
-        } catch { /* swallow to keep parity with Node's lenient hook errors */ }
+        } catch {
+          /* swallow to keep parity with Node's lenient hook errors */
+        }
       }
     }
     tapWrite("TAP version 13");
@@ -1482,11 +596,7 @@ async function runTapTop() {
     // Drain top-level `after()` hooks before printing the plan/summary so
     // their console output appears between the last test and the `1..N` line.
     if (rootAfterHooks.length > 0) {
-      const rootCtx = {
-        name: "<root>",
-        fullName: "<root>",
-        filePath: getCurrentTestFilePath(),
-      };
+      const rootCtx = { name: "<root>", fullName: "<root>" };
       const hooks = ArrayPrototypeSplice(
         rootAfterHooks,
         0,
@@ -1720,99 +830,55 @@ function assertExpectedFailure(err, expectFailure) {
 }
 
 async function runNodeTestFunction(fn, nodeTestContext) {
-  const previousContext = currentTestContext;
-  currentTestContext = nodeTestContext;
   if (fn.length >= 2) {
     // Node-style callback API: fn(t, done) - wait for `done()` (or promise
     // rejection) before treating the test as complete.
-    try {
-      await new Promise((testResolve, testReject) => {
-        pendingCallbackReject = testReject;
-        const done = (err) => {
-          pendingCallbackReject = null;
-          if (err) testReject(err);
-          else testResolve(undefined);
-        };
-        try {
-          const result = ReflectApply(fn, nodeTestContext, [
-            nodeTestContext,
-            done,
-          ]);
-          if (isThenable(result)) {
-            PromisePrototypeThen(result, undefined, (err) => {
-              pendingCallbackReject = null;
-              testReject(err);
-            });
-          }
-        } catch (err) {
-          pendingCallbackReject = null;
-          testReject(err);
+    await new Promise((testResolve, testReject) => {
+      pendingCallbackReject = testReject;
+      const done = (err) => {
+        pendingCallbackReject = null;
+        if (err) testReject(err);
+        else testResolve(undefined);
+      };
+      try {
+        const result = ReflectApply(fn, nodeTestContext, [
+          nodeTestContext,
+          done,
+        ]);
+        if (isThenable(result)) {
+          PromisePrototypeThen(result, undefined, (err) => {
+            pendingCallbackReject = null;
+            testReject(err);
+          });
         }
-      });
-      await nodeTestContext._drainSubtests();
-      return undefined;
-    } finally {
-      currentTestContext = previousContext;
-    }
+      } catch (err) {
+        pendingCallbackReject = null;
+        testReject(err);
+      }
+    });
+    return undefined;
   }
-  try {
-    const result = await ReflectApply(fn, nodeTestContext, [nodeTestContext]);
-    await nodeTestContext._drainSubtests();
-    return result;
-  } finally {
-    currentTestContext = previousContext;
-  }
+  return await ReflectApply(fn, nodeTestContext, [nodeTestContext]);
 }
 
 async function runPossiblyExpectingFailure(fn, nodeTestContext, options) {
-  if (options.plan !== undefined) {
-    nodeTestContext.plan(options.plan, options);
-  }
-  const previousAsyncReject = pendingAsyncTestReject;
-  let asyncReject = null;
-  const asyncErrorPromise = new Promise((_, reject) => {
-    asyncReject = reject;
-  });
-  pendingAsyncTestReject = asyncReject;
   if (
     !options.expectFailure ||
     options.skip ||
     options.todo
   ) {
-    try {
-      const result = await Promise.race([
-        runNodeTestFunction(fn, nodeTestContext),
-        asyncErrorPromise,
-      ]);
-      await Promise.race([
-        nodeTestContext._checkPlan(),
-        asyncErrorPromise,
-      ]);
-      return result;
-    } finally {
-      if (pendingAsyncTestReject === asyncReject) {
-        pendingAsyncTestReject = previousAsyncReject;
-      }
-    }
+    const result = await runNodeTestFunction(fn, nodeTestContext);
+    nodeTestContext._checkPlan();
+    return result;
   }
 
   let failed = false;
   try {
-    await Promise.race([
-      runNodeTestFunction(fn, nodeTestContext),
-      asyncErrorPromise,
-    ]);
-    await Promise.race([
-      nodeTestContext._checkPlan(),
-      asyncErrorPromise,
-    ]);
+    await runNodeTestFunction(fn, nodeTestContext);
+    nodeTestContext._checkPlan();
   } catch (err) {
     failed = true;
     assertExpectedFailure(err, options.expectFailure);
-  } finally {
-    if (pendingAsyncTestReject === asyncReject) {
-      pendingAsyncTestReject = previousAsyncReject;
-    }
   }
 
   if (!failed) {
@@ -1824,55 +890,16 @@ async function runPossiblyExpectingFailure(fn, nodeTestContext, options) {
 class TestPlan {
   #expected;
   #actual = 0;
-  #wait;
-  #resolve;
-  #promise;
-  #timer = null;
 
-  constructor(count, options) {
+  constructor(count) {
     this.#expected = count;
-    const wait = options?.wait;
-    if (wait === true) {
-      this.#wait = 30_000;
-    } else if (typeof wait === "number") {
-      this.#wait = wait;
-    } else {
-      this.#wait = false;
-    }
   }
 
   increment() {
     this.#actual++;
-    if (
-      this.#resolve &&
-      this.#actual >= this.#expected
-    ) {
-      this.#resolve();
-    }
   }
 
-  async #waitForPlan() {
-    if (
-      this.#wait === false ||
-      this.#actual >= this.#expected
-    ) {
-      return;
-    }
-    if (!this.#promise) {
-      this.#promise = new Promise((resolve) => {
-        this.#resolve = resolve;
-        this.#timer = setTimeout(resolve, this.#wait);
-      });
-    }
-    await this.#promise;
-    if (this.#timer !== null) {
-      clearTimeout(this.#timer);
-      this.#timer = null;
-    }
-  }
-
-  async check() {
-    await this.#waitForPlan();
+  check() {
     if (this.#actual !== this.#expected) {
       throw new Error(
         `plan expected ${this.#expected} assertion(s) but received ${this.#actual}`,
@@ -1893,18 +920,11 @@ class NodeTestContext {
   #planAssert;
   #beforeEachHooks = [];
   #afterEachHooks = [];
-  #filePath;
-  #subtestPromises = [];
-  #subtestFailures = 0;
-  #subtestTail = PromiseResolve();
-  #attempt;
 
-  constructor(t, parent, name, filePath, attempt) {
+  constructor(t, parent, name) {
     this.#denoContext = t;
     this.#parent = parent;
     this.#name = name;
-    this.#filePath = filePath ?? parent?.filePath ?? getCurrentTestFilePath();
-    this.#attempt = attempt ?? parent?.attempt ?? 0;
   }
 
   get [skippedSymbol]() {
@@ -1914,43 +934,29 @@ class NodeTestContext {
   get assert() {
     if (this.#plan) {
       if (!this.#planAssert) {
-        this.#planAssert = getAssertObject(this, this.#plan);
+        const plan = this.#plan;
+        const base = getAssertObject();
+        const wrapped = { __proto__: null };
+        ArrayPrototypeForEach(methodsToCopy, (method) => {
+          wrapped[method] = function (...args) {
+            plan.increment();
+            return ReflectApply(base[method], this, args);
+          };
+        });
+        this.#planAssert = wrapped;
       }
       return this.#planAssert;
     }
-    return getAssertObject(this, null);
+    return getAssertObject();
   }
 
-  plan(count, options) {
+  plan(count) {
     validateInteger(count, "count", 1);
-    if (options !== undefined) {
-      validateObject(options, "options");
-      if (
-        options.wait !== undefined &&
-        typeof options.wait !== "boolean" &&
-        typeof options.wait !== "number"
-      ) {
-        throw new ERR_INVALID_ARG_TYPE(
-          "options.wait",
-          ["boolean", "number"],
-          options.wait,
-        );
-      }
-    }
-    this.#plan = new TestPlan(count, options);
+    this.#plan = new TestPlan(count);
   }
 
-  async _checkPlan() {
-    if (this.#plan) await this.#plan.check();
-  }
-
-  async _drainSubtests() {
-    for (const promise of new SafeArrayIterator(this.#subtestPromises)) {
-      await promise;
-    }
-    if (this.#subtestFailures > 0) {
-      throw new Error("subtests failed");
-    }
+  _checkPlan() {
+    if (this.#plan) this.#plan.check();
   }
 
   get signal() {
@@ -1966,18 +972,6 @@ class NodeTestContext {
       return this.#parent.fullName + " > " + this.#name;
     }
     return this.#name;
-  }
-
-  get filePath() {
-    return this.#filePath;
-  }
-
-  get passed() {
-    return false;
-  }
-
-  get attempt() {
-    return this.#attempt;
   }
 
   diagnostic(message) {
@@ -2019,73 +1013,54 @@ class NodeTestContext {
         await hook();
       }
     };
-    const stepPromise = PromisePrototypeThen(
-      this.#subtestTail,
-      () =>
-        this.#denoContext.step({
-          name: prepared.name,
-          fn: async (denoTestContext) => {
-            const newNodeTextContext = new NodeTestContext(
-              denoTestContext,
-              parentContext,
-              prepared.name,
-              undefined,
-              parentContext.attempt,
-            );
-            try {
-              await before();
-              for (
-                const hook of new SafeArrayIterator(
-                  parentContext.#beforeEachHooks,
-                )
-              ) {
-                await hook();
-              }
-              await runPossiblyExpectingFailure(
-                prepared.fn,
-                newNodeTextContext,
-                prepared.options,
-              );
-              await after();
-            } catch (err) {
-              if (!newNodeTextContext[skippedSymbol]) {
-                throw err;
-              }
-              try {
-                await after();
-              } catch { /* ignore, test is already failing */ }
-            } finally {
-              for (
-                const hook of new SafeArrayIterator(
-                  parentContext.#afterEachHooks,
-                )
-              ) {
-                await hook();
-              }
+    return PromisePrototypeThen(
+      this.#denoContext.step({
+        name: prepared.name,
+        fn: async (denoTestContext) => {
+          const newNodeTextContext = new NodeTestContext(
+            denoTestContext,
+            parentContext,
+            prepared.name,
+          );
+          try {
+            await before();
+            for (
+              const hook of new SafeArrayIterator(
+                parentContext.#beforeEachHooks,
+              )
+            ) {
+              await hook();
             }
-          },
-          ignore: !!prepared.options.todo || !!prepared.options.skip,
-          location: prepared.location,
-          sanitizeExit: false,
-          sanitizeOps: false,
-          sanitizeResources: false,
-        }),
-    );
-    this.#subtestTail = PromisePrototypeThen(stepPromise, () => {}, () => {});
-    ArrayPrototypePush(
-      this.#subtestPromises,
-      PromisePrototypeThen(
-        stepPromise,
-        (passed) => {
-          if (passed === false) this.#subtestFailures++;
+            await runPossiblyExpectingFailure(
+              prepared.fn,
+              newNodeTextContext,
+              prepared.options,
+            );
+            await after();
+          } catch (err) {
+            if (!newNodeTextContext[skippedSymbol]) {
+              throw err;
+            }
+            try {
+              await after();
+            } catch { /* ignore, test is already failing */ }
+          } finally {
+            for (
+              const hook of new SafeArrayIterator(
+                parentContext.#afterEachHooks,
+              )
+            ) {
+              await hook();
+            }
+          }
         },
-        (error) => {
-          this.#subtestFailures++;
-          throw error;
-        },
-      ),
+        ignore: !!prepared.options.todo || !!prepared.options.skip,
+        sanitizeExit: false,
+        sanitizeOps: false,
+        sanitizeResources: false,
+      }),
+      () => undefined,
     );
-    return PromisePrototypeThen(stepPromise, () => undefined);
   }
 
   before(fn, _options) {
@@ -2129,11 +1104,7 @@ async function runRootBeforeOnce() {
   if (rootBeforeRan) return;
   rootBeforeRan = true;
   if (rootBeforeHooks.length === 0) return;
-  const rootCtx = {
-    name: "<root>",
-    fullName: "<root>",
-    filePath: getCurrentTestFilePath(),
-  };
+  const rootCtx = { name: "<root>", fullName: "<root>" };
   for (const hook of new SafeArrayIterator(rootBeforeHooks)) {
     await hook(rootCtx);
   }
@@ -2142,13 +1113,13 @@ async function runRootBeforeOnce() {
 async function runRootAfterIfDone() {
   if (activeNodeTests !== 0) return;
   if (rootAfterHooks.length === 0) return;
-  const rootCtx = {
-    name: "<root>",
-    fullName: "<root>",
-    filePath: getCurrentTestFilePath(),
-  };
+  const rootCtx = { name: "<root>", fullName: "<root>" };
   // Snapshot and clear so we only run once even if more tests get queued.
-  const hooks = ArrayPrototypeSplice(rootAfterHooks, 0, rootAfterHooks.length);
+  const hooks = ArrayPrototypeSplice(
+    rootAfterHooks,
+    0,
+    rootAfterHooks.length,
+  );
   for (const hook of new SafeArrayIterator(hooks)) {
     try {
       await hook(rootCtx);
@@ -2212,11 +1183,16 @@ class TestSuite {
 
   addSuite(name, options, fn, overrides) {
     const prepared = prepareOptions(name, options, fn, overrides);
-    const { promise, resolve } = Promise.withResolvers();
+    const { promise, resolve } = PromiseWithResolvers();
     const parentSuiteContext = this.nodeTestContext;
     ArrayPrototypePush(this.entries, {
       name: prepared.name,
-      fn: wrapSuiteFn(prepared.fn, resolve, prepared.name, parentSuiteContext),
+      fn: wrapSuiteFn(
+        prepared.fn,
+        resolve,
+        prepared.name,
+        parentSuiteContext,
+      ),
       ignore: !!prepared.options.todo || !!prepared.options.skip,
     });
     return promise;
@@ -2237,7 +1213,6 @@ class TestSuite {
 }
 
 function prepareOptions(name, options, fn, overrides) {
-  const location = testLocationFromStack();
   if (typeof name === "function") {
     fn = name;
   } else if (name !== null && typeof name === "object") {
@@ -2252,7 +1227,6 @@ function prepareOptions(name, options, fn, overrides) {
   }
 
   const finalOptions = { ...options, ...overrides };
-  validateTestOptions(finalOptions);
 
   if (typeof fn !== "function") {
     fn = noop;
@@ -2262,61 +1236,7 @@ function prepareOptions(name, options, fn, overrides) {
     name = fn.name || "<anonymous>";
   }
 
-  return { fn, options: finalOptions, name, location };
-}
-
-function validateTestOptions(options) {
-  if (
-    options.timeout !== undefined &&
-    options.timeout !== null
-  ) {
-    if (typeof options.timeout !== "number") {
-      throw new ERR_INVALID_ARG_TYPE(
-        "options.timeout",
-        "number",
-        options.timeout,
-      );
-    }
-    if (
-      Number.isNaN(options.timeout) ||
-      options.timeout < 0 ||
-      (
-        options.timeout !== Infinity &&
-        options.timeout > 2 ** 32 - 1
-      )
-    ) {
-      throw new ERR_OUT_OF_RANGE(
-        "options.timeout",
-        ">= 0 && <= 4294967295",
-        options.timeout,
-      );
-    }
-  }
-
-  if (
-    options.concurrency !== undefined &&
-    options.concurrency !== null &&
-    typeof options.concurrency !== "boolean"
-  ) {
-    if (typeof options.concurrency !== "number") {
-      throw new ERR_INVALID_ARG_TYPE(
-        "options.concurrency",
-        ["boolean", "number"],
-        options.concurrency,
-      );
-    }
-    if (
-      !Number.isInteger(options.concurrency) ||
-      options.concurrency < 1 ||
-      options.concurrency > 2 ** 31
-    ) {
-      throw new ERR_OUT_OF_RANGE(
-        "options.concurrency",
-        ">= 1 && <= 2147483648",
-        options.concurrency,
-      );
-    }
-  }
+  return { fn, options: finalOptions, name };
 }
 
 function wrapTestFn(fn, resolve, name, options) {
@@ -2431,9 +1351,6 @@ function prepareDenoTestForSuite(name, options, fn, overrides) {
 
 function test(name, options, fn, overrides) {
   installErrorHandlers();
-  if (activeProgrammaticRun !== null) {
-    return activeProgrammaticRun.queueTest(name, options, fn, overrides);
-  }
   if (isTapMode()) {
     return queueTapTest(name, options, fn, overrides);
   }
@@ -2461,9 +1378,6 @@ test.expectFailure = function expectFailure(name, options, fn) {
 
 function suite(name, options, fn, overrides) {
   installErrorHandlers();
-  if (activeProgrammaticRun !== null) {
-    return activeProgrammaticRun.queueSuite(name, options, fn, overrides);
-  }
   if (isTapMode()) {
     return queueTapSuite(name, options, fn, overrides);
   }
@@ -2490,10 +1404,6 @@ function before(fn, _options) {
   if (typeof fn !== "function") {
     throw new TypeError("before() requires a function argument");
   }
-  if (activeProgrammaticRun !== null) {
-    activeProgrammaticRun.addBeforeHook(fn);
-    return;
-  }
   if (isTapMode()) {
     const tapSuite = getTapCurrentSuite();
     if (tapSuite !== null) {
@@ -2517,10 +1427,6 @@ function after(fn, _options) {
   if (typeof fn !== "function") {
     throw new TypeError("after() requires a function argument");
   }
-  if (activeProgrammaticRun !== null) {
-    activeProgrammaticRun.addAfterHook(fn);
-    return;
-  }
   if (isTapMode()) {
     const tapSuite = getTapCurrentSuite();
     if (tapSuite !== null) {
@@ -2542,10 +1448,6 @@ function beforeEach(fn, _options) {
   if (typeof fn !== "function") {
     throw new TypeError("beforeEach() requires a function argument");
   }
-  if (activeProgrammaticRun !== null) {
-    activeProgrammaticRun.addBeforeEachHook(fn);
-    return;
-  }
   if (currentSuite) {
     ArrayPrototypePush(currentSuite.beforeEachHooks, fn);
     return;
@@ -2556,10 +1458,6 @@ function beforeEach(fn, _options) {
 function afterEach(fn, _options) {
   if (typeof fn !== "function") {
     throw new TypeError("afterEach() requires a function argument");
-  }
-  if (activeProgrammaticRun !== null) {
-    activeProgrammaticRun.addAfterEachHook(fn);
-    return;
   }
   if (currentSuite) {
     ArrayPrototypePush(currentSuite.afterEachHooks, fn);
@@ -2658,6 +1556,120 @@ class MockFunctionContext {
       return onceImpl;
     }
     return this.#implementation;
+  }
+}
+
+class MockPropertyContext {
+  #object;
+  #propertyName;
+  #value;
+  #originalValue;
+  #descriptor;
+  #accesses = [];
+  #onceValues = new SafeMap();
+  _restored = false;
+
+  constructor(object, propertyName, hasValue, value) {
+    this.#object = object;
+    this.#propertyName = propertyName;
+    this.#descriptor = ObjectGetOwnPropertyDescriptor(object, propertyName);
+    if (!this.#descriptor) {
+      throw new ERR_INVALID_ARG_VALUE(
+        "propertyName",
+        propertyName,
+        "is not a property of the object",
+      );
+    }
+    this.#originalValue = object[propertyName];
+    this.#value = hasValue ? value : this.#originalValue;
+
+    const { configurable, enumerable } = this.#descriptor;
+    ObjectDefineProperty(object, propertyName, {
+      __proto__: null,
+      configurable,
+      enumerable,
+      get: () => {
+        const nextValue = this.#getAccessValue(this.#value);
+        ArrayPrototypePush(this.#accesses, {
+          type: "get",
+          value: nextValue,
+          stack: new Error(),
+        });
+        return nextValue;
+      },
+      set: (v) => this.mockImplementation(v),
+    });
+  }
+
+  get accesses() {
+    return ArrayPrototypeSlice(this.#accesses, 0);
+  }
+
+  accessCount() {
+    return this.#accesses.length;
+  }
+
+  mockImplementation(value) {
+    if (!this.#descriptor.writable) {
+      throw new ERR_INVALID_ARG_VALUE(
+        "propertyName",
+        this.#propertyName,
+        "cannot be set",
+      );
+    }
+    const nextValue = this.#getAccessValue(value);
+    ArrayPrototypePush(this.#accesses, {
+      type: "set",
+      value: nextValue,
+      stack: new Error(),
+    });
+    this.#value = nextValue;
+  }
+
+  #getAccessValue(value) {
+    const accessIndex = this.#accesses.length;
+    let accessValue;
+    if (MapPrototypeHas(this.#onceValues, accessIndex)) {
+      accessValue = MapPrototypeGet(this.#onceValues, accessIndex);
+      MapPrototypeDelete(this.#onceValues, accessIndex);
+    } else {
+      accessValue = value;
+    }
+    return accessValue;
+  }
+
+  mockImplementationOnce(value, onAccess) {
+    const nextAccess = this.#accesses.length;
+    const accessIndex = onAccess ?? nextAccess;
+    validateInteger(accessIndex, "onAccess", nextAccess);
+    MapPrototypeSet(this.#onceValues, accessIndex, value);
+  }
+
+  resetAccesses() {
+    this.#accesses = [];
+  }
+
+  // Alias used by mock.reset() which iterates activeMocks calling resetCalls().
+  resetCalls() {
+    this.resetAccesses();
+  }
+
+  restore() {
+    if (!this._restored) {
+      // Reinstall the pristine original descriptor. Unlike Node we don't force
+      // a `value` field, since the original property may be an accessor (e.g.
+      // `process.platform` is a getter in Deno) and mixing `value` with
+      // `get`/`set` is an invalid descriptor.
+      ObjectDefineProperty(this.#object, this.#propertyName, {
+        __proto__: null,
+        ...this.#descriptor,
+      });
+      this._restored = true;
+    }
+    const idx = ArrayPrototypeIndexOf(activeMocks, this);
+    if (idx !== -1) {
+      ArrayPrototypeSplice(activeMocks, idx, 1);
+    }
   }
 }
 
@@ -2801,7 +1813,9 @@ const mock = {
       options = original;
       original = undefined;
       implementation = undefined;
-    } else if (implementation !== null && typeof implementation === "object") {
+    } else if (
+      implementation !== null && typeof implementation === "object"
+    ) {
       options = implementation;
       implementation = original;
     }
@@ -2834,6 +1848,36 @@ const mock = {
 
   method: (object, methodName, implementation, options) => {
     return mockMethodImpl(object, methodName, implementation, options);
+  },
+
+  property: function (object, propertyName, value) {
+    validateObject(object, "object");
+    if (typeof propertyName !== "string" && typeof propertyName !== "symbol") {
+      throw new ERR_INVALID_ARG_TYPE(
+        "propertyName",
+        ["string", "symbol"],
+        propertyName,
+      );
+    }
+
+    const hasValue = arguments.length > 2;
+    const ctx = new MockPropertyContext(
+      object,
+      propertyName,
+      hasValue,
+      value,
+    );
+    ArrayPrototypePush(activeMocks, ctx);
+
+    return new Proxy(object, {
+      __proto__: null,
+      get(target, property, receiver) {
+        if (property === "mock") {
+          return ctx;
+        }
+        return ReflectGet(target, property, receiver);
+      },
+    });
   },
 
   reset: () => {
@@ -2883,8 +1927,6 @@ test.after = after;
 test.beforeEach = beforeEach;
 test.afterEach = afterEach;
 test.run = run;
-test.assert = testAssert;
-test.getTestContext = getTestContext;
 
 return {
   run,
@@ -2897,8 +1939,6 @@ return {
   beforeEach,
   afterEach,
   mock,
-  assert: testAssert,
-  getTestContext,
   default: test,
 };
 })();
