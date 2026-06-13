@@ -58,6 +58,12 @@ const {
 const { getOptionValue } = core.loadExtScript(
   "ext:deno_node/internal/options.ts",
 );
+const { customInspectSymbol } = core.loadExtScript(
+  "ext:deno_node/internal/util.mjs",
+);
+const { inspect } = core.loadExtScript(
+  "ext:deno_node/internal/util/inspect.mjs",
+);
 
 const {
   ArrayIsArray,
@@ -69,8 +75,11 @@ const {
   JSONStringify,
   ObjectAssign,
   ObjectCreate,
+  ObjectDefineProperty,
   ObjectFreeze,
+  ObjectGetPrototypeOf,
   ObjectPrototypeHasOwnProperty,
+  ObjectSetPrototypeOf,
   PromisePrototypeThen,
   PromiseReject,
   PromiseResolve,
@@ -79,6 +88,7 @@ const {
   SafeSet,
   SafeWeakMap,
   Symbol,
+  SymbolToStringTag,
   WeakMapPrototypeGet,
   WeakMapPrototypeSet,
 } = primordials;
@@ -584,7 +594,17 @@ const kLinkGraph = Symbol("kLinkGraph");
 const kLinkingStatus = Symbol("kLinkingStatus");
 const kModuleRequests = Symbol("kModuleRequests");
 const kDependencySpecifiers = Symbol("kDependencySpecifiers");
-let defaultModuleIdIndex = 0;
+let defaultMainContextModuleIdIndex = 0;
+const defaultContextModuleIdIndexes = new SafeWeakMap();
+
+function getDefaultModuleIdentifier(context) {
+  if (context === undefined) {
+    return `vm:module(${defaultMainContextModuleIdIndex++})`;
+  }
+  const index = defaultContextModuleIdIndexes.get(context) ?? 0;
+  defaultContextModuleIdIndexes.set(context, index + 1);
+  return `vm:module(${index})`;
+}
 
 function isModule(object) {
   return typeof object === "object" && object !== null &&
@@ -625,11 +645,7 @@ function buildModuleRequests(wrap) {
 class Module {
   constructor() {
     if (new.target === Module) {
-      throw new ERR_INVALID_ARG_TYPE(
-        "this",
-        "vm.SourceTextModule | vm.SyntheticModule",
-        this,
-      );
+      throw new TypeError("Module is not a constructor");
     }
     this[kLinkingStatus] = null;
   }
@@ -667,6 +683,28 @@ class Module {
       throw new ERR_VM_MODULE_STATUS("must be errored");
     }
     return op_vm_module_get_exception(this[kWrap]);
+  }
+
+  [customInspectSymbol](depth, options) {
+    validateModuleThis(this, "Module");
+    if (typeof depth === "number" && depth < 0) {
+      return this;
+    }
+
+    const constructor = this.constructor || Module;
+    const object = { __proto__: { constructor } };
+    object.status = this.status;
+    object.identifier = this.identifier;
+    object.context = this.context;
+
+    ObjectSetPrototypeOf(object, ObjectGetPrototypeOf(this));
+    ObjectDefineProperty(object, SymbolToStringTag, {
+      __proto__: null,
+      value: constructor.name,
+      configurable: true,
+    });
+
+    return inspect(object, { ...options, customInspect: false });
   }
 
   link(linker) {
@@ -774,6 +812,12 @@ class Module {
       // surfaces ERR_INVALID_ARG_TYPE rather than ERR_VM_MODULE_STATUS. The
       // isolate does not honor SIGINT interruption, so the value is validated
       // but otherwise unused.
+      let timeout = options.timeout;
+      if (timeout === undefined) {
+        timeout = -1;
+      } else {
+        validateUint32(timeout, "options.timeout", true);
+      }
       const { breakOnSigint = false } = options;
       validateBoolean(breakOnSigint, "options.breakOnSigint");
       const status = op_vm_module_get_status(this[kWrap]);
@@ -788,7 +832,7 @@ class Module {
       // Return the V8 Promise directly so that synthetic modules with sync
       // evaluation steps produce a synchronously-resolved Promise (matching
       // Node's behavior).
-      return op_vm_module_evaluate(this[kWrap]);
+      return op_vm_module_evaluate(this[kWrap], timeout);
     } catch (e) {
       return PromiseReject(e);
     }
@@ -803,7 +847,6 @@ class SourceTextModule extends Module {
     }
     validateObject(options, "options");
     const {
-      identifier = `vm:module(${defaultModuleIdIndex++})`,
       context,
       lineOffset = 0,
       columnOffset = 0,
@@ -813,6 +856,8 @@ class SourceTextModule extends Module {
     if (context !== undefined) {
       validateContext(context);
     }
+    const identifier = options.identifier ??
+      getDefaultModuleIdentifier(context);
     validateString(identifier, "options.identifier");
     validateInt32(lineOffset, "options.lineOffset");
     validateInt32(columnOffset, "options.columnOffset");
@@ -967,12 +1012,13 @@ class SyntheticModule extends Module {
     }
     validateObject(options, "options");
     const {
-      identifier = `vm:module(${defaultModuleIdIndex++})`,
       context,
     } = options;
     if (context !== undefined) {
       validateContext(context);
     }
+    const identifier = options.identifier ??
+      getDefaultModuleIdentifier(context);
     validateString(identifier, "options.identifier");
 
     this[kContext] = context;

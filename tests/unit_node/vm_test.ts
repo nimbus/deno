@@ -1,5 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import vm, {
   compileFunction,
   createContext,
@@ -11,6 +11,7 @@ import vm, {
   SourceTextModule,
   SyntheticModule,
 } from "node:vm";
+import { inspect } from "node:util";
 
 Deno.test({
   name: "vm runInNewContext",
@@ -317,6 +318,74 @@ Deno.test({
     await module.evaluate();
 
     assertEquals((module.namespace as { answer: number }).answer, 42);
+  },
+});
+
+Deno.test({
+  name: "vm SourceTextModule evaluate supports timeout",
+  async fn() {
+    const module = new SourceTextModule("while (true) {}");
+    await module.link(() => {
+      throw new Error("unexpected static import");
+    });
+
+    const evaluateWithTimeout = module.evaluate as (
+      options: { timeout: number },
+    ) => Promise<unknown>;
+    await assertRejects(
+      () => evaluateWithTimeout.call(module, { timeout: 10 }),
+      Error,
+      "Script execution timed out after 10ms",
+    );
+  },
+});
+
+Deno.test({
+  name: "vm module default identifiers are scoped per context",
+  fn() {
+    const context1 = createContext({});
+    const context2 = createContext({});
+
+    assertEquals(
+      new SourceTextModule("1", { context: context1 }).identifier,
+      "vm:module(0)",
+    );
+    assertEquals(
+      new SourceTextModule("2", { context: context1 }).identifier,
+      "vm:module(1)",
+    );
+    assertEquals(
+      new SourceTextModule("3", { context: context2 }).identifier,
+      "vm:module(0)",
+    );
+  },
+});
+
+Deno.test({
+  name: "vm module inspect exposes public fields",
+  fn() {
+    const context = createContext({ foo: "bar" });
+    const module = new SourceTextModule("1", { context });
+
+    assertEquals(
+      inspect(module),
+      `SourceTextModule {
+  status: 'unlinked',
+  identifier: 'vm:module(0)',
+  context: { foo: 'bar' }
+}`,
+    );
+  },
+});
+
+Deno.test({
+  name: "vm Module cannot be directly constructed",
+  fn() {
+    assertThrows(
+      () => new (vm.Module as unknown as new () => unknown)(),
+      TypeError,
+      "Module is not a constructor",
+    );
   },
 });
 

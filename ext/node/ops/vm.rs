@@ -2215,6 +2215,7 @@ fn module_resolve_callback<'s>(
 pub fn op_vm_module_evaluate<'a>(
   scope: &mut v8::PinScope<'a, '_>,
   #[cppgc] this: &ContextifyModule,
+  #[serde] timeout: i64,
 ) -> Option<v8::Local<'a, v8::Value>> {
   let inner_context = this.context.get(scope).unwrap();
   let module = this.module.get(scope).unwrap();
@@ -2224,9 +2225,60 @@ pub fn op_vm_module_evaluate<'a>(
   let inner_result = {
     let scope = &mut v8::ContextScope::new(scope, inner_context);
     v8::tc_scope!(scope, scope);
-    let r = module.evaluate(scope);
+
+    let handle = scope.thread_safe_handle();
+    #[allow(
+      clippy::disallowed_types,
+      reason = "isolated here and sending to separate thread"
+    )]
+    let timed_out = std::sync::Arc::new(AtomicBool::new(false));
+    let mut evaluate = || module.evaluate(scope);
+    let r = if timeout != -1 {
+      let timed_out = timed_out.clone();
+      let (tx, rx) = std::sync::mpsc::channel();
+      deno_core::unsync::spawn_blocking(move || {
+        if rx
+          .recv_timeout(Duration::from_millis(timeout as _))
+          .is_err()
+        {
+          timed_out.store(true, Ordering::Relaxed);
+          handle.terminate_execution();
+        }
+      });
+      let r = evaluate();
+      let _ = tx.send(());
+      r
+    } else {
+      evaluate()
+    };
+
+    if timed_out.load(Ordering::Relaxed) {
+      if scope.has_terminated() {
+        scope.cancel_terminate_execution();
+      }
+      let message = v8::String::new(
+        scope,
+        &format!("Script execution timed out after {timeout}ms"),
+      )
+      .unwrap();
+      let exception = v8::Exception::error(scope, message);
+      let code_str =
+        v8::String::new_external_onebyte_static(scope, b"code").unwrap();
+      let code = v8::String::new_external_onebyte_static(
+        scope,
+        b"ERR_SCRIPT_EXECUTION_TIMEOUT",
+      )
+      .unwrap();
+      exception
+        .cast::<v8::Object>()
+        .set(scope, code_str.into(), code.into());
+      scope.throw_exception(exception);
+    }
+
     if scope.has_caught() {
-      scope.rethrow();
+      if !scope.has_terminated() {
+        scope.rethrow();
+      }
       return None;
     }
     r
