@@ -68,6 +68,7 @@ const {
   ArrayPrototypeSome,
   JSONStringify,
   ObjectAssign,
+  ObjectCreate,
   ObjectFreeze,
   ObjectPrototypeHasOwnProperty,
   PromisePrototypeThen,
@@ -222,7 +223,7 @@ function finishDynamicImportResult(result) {
   if (isModule(result)) {
     return PromisePrototypeThen(result.evaluate(), () => result.namespace);
   }
-  return result;
+  throw new ERR_VM_MODULE_NOT_MODULE();
 }
 
 function validateImportModuleDynamically(value, name) {
@@ -258,8 +259,9 @@ function getImportModuleDynamicallyId(value, name, getReferrer) {
   }
   return op_vm_dynamic_import_callback_register(
     (specifier, importAttributes) => {
+      const attributes = ObjectAssign(ObjectCreate(null), importAttributes);
       return PromisePrototypeThen(
-        PromiseResolve(value(specifier, getReferrer(), importAttributes)),
+        PromiseResolve(value(specifier, getReferrer(), attributes, "evaluation")),
         finishDynamicImportResult,
       );
     },

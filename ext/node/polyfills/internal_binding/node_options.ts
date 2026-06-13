@@ -77,6 +77,7 @@ function createDefaultOptions() {
     ["--pending-deprecation", { value: false }],
     ["--expose-internals", { value: false }],
     ["--experimental-require-module", { value: true }],
+    ["--experimental-vm-modules", { value: false }],
     ["--preserve-symlinks", { value: false }],
     ["--preserve-symlinks-main", { value: false }],
     ["--title", { value: "" }],
@@ -125,6 +126,12 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     case "--no-experimental-require-module":
     case "--no-require-module":
       options.set("--experimental-require-module", { value: false });
+      break;
+    case "--experimental-vm-modules":
+      options.set("--experimental-vm-modules", { value: true });
+      break;
+    case "--no-experimental-vm-modules":
+      options.set("--experimental-vm-modules", { value: false });
       break;
     case "--preserve-symlinks":
       options.set("--preserve-symlinks", { value: true });
