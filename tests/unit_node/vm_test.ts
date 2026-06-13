@@ -365,7 +365,7 @@ Deno.test({
 
 // https://github.com/denoland/deno/issues/32921
 Deno.test({
-  name: "vm in operator walks prototype chain of sandbox",
+  name: "vm in operator does not walk outer sandbox prototype chain",
   fn() {
     class EventTarget {
       addEventListener() {}
@@ -392,8 +392,17 @@ Deno.test({
     const window =
       new (Window as unknown as new () => Record<string, unknown>)();
 
-    // Proto-chain hit: addEventListener lives on EventTarget.prototype
-    assertEquals(runInContext(`"addEventListener" in window`, window), true);
+    // The outer sandbox prototype is still readable through the contextified
+    // global proxy, but it is not part of the inner global object's prototype
+    // chain for query/own-property operations.
+    assertEquals(
+      runInContext(
+        `window.addEventListener === EventTarget.prototype.addEventListener`,
+        window,
+      ),
+      true,
+    );
+    assertEquals(runInContext(`"addEventListener" in window`, window), false);
     // Own property: "window" is defined directly on the sandbox
     assertEquals(runInContext(`"window" in window`, window), true);
     // Negative case: property not on the chain
