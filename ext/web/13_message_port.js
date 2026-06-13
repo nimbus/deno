@@ -370,10 +370,7 @@ class MessagePort extends _MessagePortBase {
           this[_dataPromise] = op_message_port_recv_message(
             rid,
           );
-          if (
-            typeof this[nodeWorkerThreadCloseCb] === "function" &&
-            !this[_refed]
-          ) {
+          if (!this[_refed]) {
             core.unrefOpPromise(this[_dataPromise]);
           }
           data = await this[_dataPromise];
@@ -701,6 +698,12 @@ function serializeJsMessageData(data, transferables) {
       j++;
       ArrayPrototypePush(transferredArrayBuffers, t);
     } else if (t[core.hostObjectBrand]) {
+      const transferableResource = core.getTransferableResource(
+        t[core.hostObjectBrand],
+      );
+      if (transferableResource === undefined) {
+        throw new DOMException("Value not transferable", "DataCloneError");
+      }
       ArrayPrototypePush(hostObjects, t);
     }
   }
@@ -720,7 +723,11 @@ function serializeJsMessageData(data, transferables) {
     const transferable = transferables[i];
     if (transferable[core.hostObjectBrand]) {
       const type = transferable[core.hostObjectBrand];
-      const rid = core.getTransferableResource(type).send(transferable);
+      const transferableResource = core.getTransferableResource(type);
+      if (transferableResource === undefined) {
+        throw new DOMException("Value not transferable", "DataCloneError");
+      }
+      const rid = transferableResource.send(transferable);
       if (typeof rid === "number") {
         ArrayPrototypePush(serializedTransferables, {
           kind: "resource",
@@ -847,6 +854,36 @@ function isOwnPrototypeObject(value, sym) {
 // Fetch types (Headers / Request / Response) call `markNotSerializable`
 // themselves at the bottom of their respective modules.
 
+function createStructuredCloneInvalidArgType(message) {
+  const err = new TypeError(message);
+  err.code = "ERR_INVALID_ARG_TYPE";
+  return err;
+}
+
+function toNodeStructuredCloneOptionsError(err, prefix) {
+  if (!ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, err)) {
+    throw err;
+  }
+
+  const dictError =
+    `${prefix}: Argument 2 can not be converted to a dictionary`;
+  if (err.message === dictError) {
+    throw createStructuredCloneInvalidArgType(
+      `${prefix}: Options cannot be converted to a dictionary`,
+    );
+  }
+
+  const transferSequenceError =
+    `${prefix}: 'transfer' of 'StructuredSerializeOptions' (Argument 2) can not be converted to sequence.`;
+  if (err.message === transferSequenceError) {
+    throw createStructuredCloneInvalidArgType(
+      `${prefix}: transfer in Options can not be converted to sequence.`,
+    );
+  }
+
+  throw err;
+}
+
 function structuredClone(value, options) {
   // Fast path for primitives that StructuredSerialize returns by reference:
   // null, undefined, boolean, number, string, bigint. These don't need the
@@ -867,11 +904,15 @@ function structuredClone(value, options) {
 
   const prefix = "Failed to execute 'structuredClone'";
   webidl.requiredArguments(arguments.length, 1, prefix, ["value"]);
-  options = webidl.converters.StructuredSerializeOptions(
-    options,
-    prefix,
-    "Argument 2",
-  );
+  try {
+    options = webidl.converters.StructuredSerializeOptions(
+      options,
+      prefix,
+      "Argument 2",
+    );
+  } catch (err) {
+    toNodeStructuredCloneOptionsError(err, prefix);
+  }
 
   // NOTE: This only catches non-serializable types at the top level.
   // Nested non-serializable objects (e.g. { x: new Response() }) will
