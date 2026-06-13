@@ -51,6 +51,7 @@ const {
 const {
   denoErrorToNodeError,
   ERR_ASSERTION,
+  ERR_DOMAIN_CANNOT_SET_UNCAUGHT_EXCEPTION_CAPTURE,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE_RANGE,
   ERR_OUT_OF_RANGE,
@@ -193,6 +194,7 @@ const {
   SafeWeakMap,
   SafeWeakSet,
   String,
+  StringPrototypeSplit,
   StringPrototypeStartsWith,
   SymbolToStringTag,
 } = primordials;
@@ -1258,6 +1260,22 @@ process.setUncaughtExceptionCaptureCallback = function (fn: any) {
   }
   if (typeof fn !== "function") {
     throw new ERR_INVALID_ARG_TYPE("fn", ["function", "null"], fn);
+  }
+  const nodeVersion = process.versions?.node;
+  const nodeMajor = typeof nodeVersion === "string"
+    ? Number(StringPrototypeSplit(nodeVersion, ".", 1)[0])
+    : 24;
+  if (
+    nodeMajor <= 24 &&
+    (process as any)._nimbusDomainModuleLoaded === true &&
+    (process as any)._nimbusDomainInternalCaptureUpdate !== true
+  ) {
+    const err = new ERR_DOMAIN_CANNOT_SET_UNCAUGHT_EXCEPTION_CAPTURE();
+    const domainLoadStack = (process as any)._nimbusDomainModuleLoadStack;
+    if (typeof domainLoadStack === "string" && typeof err.stack === "string") {
+      err.stack += `\n----------------------------------------\n${domainLoadStack}`;
+    }
+    throw err;
   }
   if (_uncaughtExceptionCaptureFn !== null) {
     throw new ERR_UNCAUGHT_EXCEPTION_CAPTURE_ALREADY_SET();

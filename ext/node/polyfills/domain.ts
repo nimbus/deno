@@ -276,9 +276,14 @@ let exceptionCaptureActive = false;
 function updateExceptionCapture() {
   if (stack.length > 0 && !exceptionCaptureActive) {
     exceptionCaptureActive = true;
-    process.setUncaughtExceptionCaptureCallback(
-      domainUncaughtExceptionHandler,
-    );
+    process._nimbusDomainInternalCaptureUpdate = true;
+    try {
+      process.setUncaughtExceptionCaptureCallback(
+        domainUncaughtExceptionHandler,
+      );
+    } finally {
+      process._nimbusDomainInternalCaptureUpdate = false;
+    }
   } else if (stack.length === 0 && exceptionCaptureActive) {
     exceptionCaptureActive = false;
     process.setUncaughtExceptionCaptureCallback(null);

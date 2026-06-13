@@ -1991,6 +1991,23 @@ Module._load = function (request, parent, isMain) {
       ) {
         throw new internalErrors.ERR_DOMAIN_CALLBACK_NOT_AVAILABLE();
       }
+      if (globalThis.process) {
+        const domainLoadStack = new Error().stack;
+        ObjectDefineProperty(globalThis.process, "_nimbusDomainModuleLoaded", {
+          __proto__: null,
+          configurable: true,
+          enumerable: false,
+          value: true,
+          writable: true,
+        });
+        ObjectDefineProperty(globalThis.process, "_nimbusDomainModuleLoadStack", {
+          __proto__: null,
+          configurable: true,
+          enumerable: false,
+          value: domainLoadStack,
+          writable: true,
+        });
+      }
     }
 
     // Run load hooks for builtins if registered. Node invokes the load hook
