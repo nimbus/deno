@@ -48,6 +48,7 @@ const timerId = Symbol("[[timerId]]");
 const activeDependents = Symbol("[[activeDependents]]");
 
 const illegalConstructorKey = Symbol("illegalConstructorKey");
+const activeTimeoutSignals = new SafeSet();
 
 // When a dependent signal created by AbortSignal.any() is GC'd, clean up
 // its WeakRef from each source signal's dependentSignals set.
@@ -99,10 +100,16 @@ class AbortSignal extends EventTarget {
     );
 
     const signal = new AbortSignal(illegalConstructorKey);
+    const weakSignal = new SafeWeakRef(signal);
     signal[timerId] = core.createSystemTimer(
       () => {
+        const signal = WeakRefPrototypeDeref(weakSignal);
+        if (signal === undefined) {
+          return;
+        }
         core.cancelTimer(signal[timerId]);
         signal[timerId] = null;
+        SetPrototypeDelete(activeTimeoutSignals, signal);
         signal[signalAbort](
           new DOMException(
             "The operation was aborted due to timeout",
@@ -220,6 +227,7 @@ class AbortSignal extends EventTarget {
     FunctionPrototypeApply(super.addEventListener, this, arguments);
     if (listenerCount(this, "abort") > 0) {
       if (this[timerId] !== null) {
+        SetPrototypeAdd(activeTimeoutSignals, this);
         core.refTimer(this[timerId]);
       } else if (this[sourceSignals] !== null) {
         // While this dependent signal has 'abort' listeners, keep it strongly
@@ -246,6 +254,7 @@ class AbortSignal extends EventTarget {
     FunctionPrototypeApply(super.removeEventListener, this, arguments);
     if (listenerCount(this, "abort") === 0) {
       if (this[timerId] !== null) {
+        SetPrototypeDelete(activeTimeoutSignals, this);
         core.unrefTimer(this[timerId]);
       } else if (this[sourceSignals] !== null) {
         for (const weakRef of new SafeSetIterator(this[sourceSignals])) {
@@ -292,8 +301,6 @@ class AbortSignal extends EventTarget {
         evaluate: ObjectPrototypeIsPrototypeOf(AbortSignalPrototype, this),
         keys: [
           "aborted",
-          "reason",
-          "onabort",
         ],
       }),
       inspectOptions,
@@ -323,16 +330,17 @@ class AbortController {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
-    return inspect(
-      createFilteredInspectProxy({
-        object: this,
-        evaluate: ObjectPrototypeIsPrototypeOf(AbortControllerPrototype, this),
-        keys: [
-          "signal",
-        ],
-      }),
-      inspectOptions,
-    );
+    const depth = inspectOptions.depth;
+    if (depth !== null && depth < 0) return "AbortController {}";
+    if (depth === 0) return "AbortController [Object]";
+    const signalInspect = depth === 1
+      ? "[AbortSignal]"
+      : inspect(this[signal], {
+        __proto__: null,
+        ...inspectOptions,
+        depth: depth === null ? null : depth - 1,
+      });
+    return `AbortController { signal: ${signalInspect} }`;
   }
 }
 
