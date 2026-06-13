@@ -6,6 +6,10 @@ import { op_get_env_no_permission_check } from "ext:core/ops";
 import * as net from "node:net";
 import httpProxy from "node:_http_proxy";
 const lazyTls = core.createLazyLoader("node:tls");
+function loadTls() {
+  const namespace = lazyTls();
+  return namespace.default ?? namespace;
+}
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
 const { debuglog } = core.loadExtScript(
   "ext:deno_node/internal/util/debuglog.ts",
@@ -309,9 +313,9 @@ Agent.prototype.createConnection = function createConnection(options, cb) {
         connectOpts.ca === undefined &&
         op_get_env_no_permission_check("NODE_EXTRA_CA_CERTS")
       ) {
-        connectOpts.ca = lazyTls().default.getCACertificates("default");
+        connectOpts.ca = loadTls().getCACertificates("default");
       }
-      return lazyTls().default.connect(connectOpts, cb);
+      return loadTls().connect(connectOpts, cb);
     }
     return net.createConnection(connectOpts, cb);
   }

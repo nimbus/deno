@@ -120,6 +120,10 @@ const { X509Certificate } = core.loadExtScript(
 );
 
 const lazyTls = core.createLazyLoader("node:tls");
+function loadTls() {
+  const namespace = lazyTls();
+  return namespace.default ?? namespace;
+}
 
 const kConnectOptions = Symbol("connect-options");
 const kHandshakeTimer = Symbol("handshake-timer");
@@ -156,7 +160,7 @@ function canonicalizeIP(ip) {
 }
 
 function getDefaultProtocolVersions() {
-  const tls = lazyTls().default;
+  const tls = loadTls();
   return {
     minVersion: tls.DEFAULT_MIN_VERSION,
     maxVersion: tls.DEFAULT_MAX_VERSION,

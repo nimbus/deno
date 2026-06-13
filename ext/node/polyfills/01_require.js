@@ -302,6 +302,7 @@ const { getOptionValue } = internalOptions;
 
 const nativeModuleExports = ObjectCreate(null);
 const builtinModules = [];
+const cjsHookedBuiltinModuleSymbol = Symbol("deno.node.cjsHookedBuiltinModule");
 
 // Modules installed as lazy getters on `nativeModuleExports`. Each value is
 // a `() => exports` thunk that's only invoked the first time the require name
@@ -341,7 +342,7 @@ const lazyNodeModules = {
   "crypto": () => core.loadExtScript("ext:deno_node/crypto.ts").default,
   "dgram": () => core.loadExtScript("ext:deno_node/dgram.ts").default,
   "zlib": () => core.loadExtScript("ext:deno_node/zlib.js"),
-  "tls": () => tls().default,
+  "tls": () => getTlsDefaultExport(),
   "internal/crypto/cipher": () =>
     core.loadExtScript("ext:deno_node/internal/crypto/cipher.ts").default,
   "_tls_common": () =>
@@ -356,7 +357,14 @@ const lazyNodeModules = {
   "assert/strict": () => assertStrict().default,
   "internal/event_target": () => internalEventTarget().default,
   "internal/fs/utils": () => internalFsUtils().default,
-  "readline": () => readline().default,
+  "readline": () => {
+    internals.__loadingDenoNodeReadlineDefault = true;
+    try {
+      return readline().default;
+    } finally {
+      internals.__loadingDenoNodeReadlineDefault = false;
+    }
+  },
   "readline/promises": () => readlinePromises().default,
   "sea": () => sea().default,
   "internal/child_process": () =>
@@ -420,6 +428,61 @@ const lazyNodeModules = {
   "_stream_writable": () =>
     core.loadExtScript("ext:deno_node/internal/streams/writable.js").default,
 };
+
+let tlsDefaultExport;
+let tlsDefaultMaxVersionOverride;
+let tlsDefaultMinVersionOverride;
+function getTlsDefaultExport() {
+  if (tlsDefaultExport !== undefined) {
+    return tlsDefaultExport;
+  }
+  const mod = core.loadExtScript("ext:deno_node/tls.ts");
+  const tlsCommon = core.loadExtScript("ext:deno_node/_tls_common.ts");
+  const tlsWrap = core.loadExtScript("ext:deno_node/_tls_wrap.js");
+  const defaultExport = {
+    CryptoStream: mod.CryptoStream,
+    SecurePair: mod.SecurePair,
+    Server: tlsWrap.Server,
+    TLSSocket: tlsWrap.TLSSocket,
+    checkServerIdentity: tlsWrap.checkServerIdentity,
+    connect: tlsWrap.connect,
+    createSecureContext: tlsCommon.createSecureContext,
+    createSecurePair: mod.createSecurePair,
+    createServer: tlsWrap.createServer,
+    convertALPNProtocols: mod.convertALPNProtocols,
+    getCiphers: mod.getCiphers,
+    getCACertificates: mod.getCACertificates,
+    setDefaultCACertificates: mod.setDefaultCACertificates,
+    DEFAULT_CIPHERS: tlsWrap.DEFAULT_CIPHERS,
+    DEFAULT_ECDH_CURVE: mod.DEFAULT_ECDH_CURVE,
+    CLIENT_RENEG_LIMIT: mod.CLIENT_RENEG_LIMIT,
+    CLIENT_RENEG_WINDOW: mod.CLIENT_RENEG_WINDOW,
+  };
+  ObjectDefineProperty(defaultExport, "DEFAULT_MAX_VERSION", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get: () => tlsDefaultMaxVersionOverride ?? mod.DEFAULT_MAX_VERSION,
+    set: (value) => tlsDefaultMaxVersionOverride = value,
+  });
+  ObjectDefineProperty(defaultExport, "DEFAULT_MIN_VERSION", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get: () => tlsDefaultMinVersionOverride ?? mod.DEFAULT_MIN_VERSION,
+    set: (value) => tlsDefaultMinVersionOverride = value,
+  });
+  ObjectDefineProperty(defaultExport, "rootCertificates", {
+    __proto__: null,
+    configurable: false,
+    enumerable: true,
+    get: () => mod.rootCertificates,
+  });
+  tlsDefaultExport = defaultExport;
+  return defaultExport;
+}
+
+internals.__getDenoNodeTlsDefaultExport = getTlsDefaultExport;
 
 function defineLazyNativeModule(name, loader) {
   ObjectDefineProperty(nativeModuleExports, name, {
@@ -1871,7 +1934,11 @@ Module._load = function (request, parent, isMain) {
     const filename = relativeResolveCache[relResolveCacheIdentifier];
     if (filename !== undefined) {
       const cachedModule = Module._cache[filename];
-      if (cachedModule !== undefined) {
+      if (
+        cachedModule !== undefined &&
+        !StringPrototypeStartsWith(filename, "node:") &&
+        !nativeModuleCanBeRequiredByUsers(filename)
+      ) {
         updateChildren(parent, cachedModule, true);
         if (!cachedModule.loaded) {
           return getExportsForCircularRequire(cachedModule);
@@ -1886,7 +1953,8 @@ Module._load = function (request, parent, isMain) {
   const cachedModule = Module._cache[filename];
   if (
     cachedModule !== undefined &&
-    !StringPrototypeStartsWith(filename, "node:")
+    !StringPrototypeStartsWith(filename, "node:") &&
+    !nativeModuleCanBeRequiredByUsers(filename)
   ) {
     updateChildren(parent, cachedModule, true);
     if (!cachedModule.loaded) {
@@ -1958,7 +2026,10 @@ Module._load = function (request, parent, isMain) {
     // above misses; check the prefixed key here so repeated requires reuse
     // the same module instance.
     const cachedBuiltin = Module._cache[builtinFilename];
-    if (cachedBuiltin !== undefined) {
+    if (
+      cachedBuiltin !== undefined &&
+      cachedBuiltin[cjsHookedBuiltinModuleSymbol]
+    ) {
       updateChildren(parent, cachedBuiltin, true);
       if (!cachedBuiltin.loaded) {
         return getExportsForCircularRequire(cachedBuiltin);
@@ -1976,6 +2047,10 @@ Module._load = function (request, parent, isMain) {
         result.format && result.format !== "builtin" && result.source != null
       ) {
         const mod = new Module(builtinFilename, parent);
+        ObjectDefineProperty(mod, cjsHookedBuiltinModuleSymbol, {
+          __proto__: null,
+          value: true,
+        });
         Module._cache[builtinFilename] = mod;
         const source = loadHookSourceToString(result.source);
         if (result.format === "commonjs") {
@@ -1996,6 +2071,10 @@ Module._load = function (request, parent, isMain) {
           return module.exports;
         }
         const mod = new Module(builtinFilename, parent);
+        ObjectDefineProperty(mod, cjsHookedBuiltinModuleSymbol, {
+          __proto__: null,
+          value: true,
+        });
         mod.exports = {};
         mod.loaded = true;
         Module._cache[builtinFilename] = mod;
@@ -3505,6 +3584,17 @@ function isBuiltin(moduleName) {
     !StringPrototypeStartsWith(moduleName, "internal/");
 }
 
+let getBuiltinModuleRequire;
+function requireBuiltinModule(id) {
+  if (getBuiltinModuleRequire === undefined) {
+    const mod = new Module("internal/process/get_builtin");
+    mod.filename = "internal/process/get_builtin";
+    mod.paths = [];
+    getBuiltinModuleRequire = makeRequireFunction(mod);
+  }
+  return getBuiltinModuleRequire(id);
+}
+
 function getBuiltinModule(id) {
   if (typeof id !== "string") {
     throw new internalErrors.ERR_INVALID_ARG_TYPE("id", "string", id);
@@ -3513,17 +3603,11 @@ function getBuiltinModule(id) {
     return undefined;
   }
 
-  if (StringPrototypeStartsWith(id, "node:")) {
-    // Slice 'node:' prefix
-    id = StringPrototypeSlice(id, 5);
-  }
-
-  const mod = loadNativeModule(id, id);
-  if (mod) {
-    return mod.exports;
-  }
-
-  return undefined;
+  const normalizedId = StringPrototypeStartsWith(id, "node:")
+    ? StringPrototypeSlice(id, 5)
+    : id;
+  const requireId = StringPrototypeStartsWith(id, "node:") ? id : normalizedId;
+  return requireBuiltinModule(requireId);
 }
 
 Module.isBuiltin = isBuiltin;

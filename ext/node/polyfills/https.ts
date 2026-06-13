@@ -57,7 +57,8 @@ const { kEmptyObject } = core.loadExtScript(
 );
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 
-const tls = lazyTls().default;
+const tlsNamespace = lazyTls();
+const tls = tlsNamespace.default ?? tlsNamespace;
 const net = lazyNet();
 const http = lazyHttp();
 const {

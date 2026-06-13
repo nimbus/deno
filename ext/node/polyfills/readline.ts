@@ -11,6 +11,24 @@ import {
   moveCursor,
   promises,
 } from "ext:deno_node/_readline.mjs";
+import { internals } from "ext:core/mod.js";
+
+const originalDefaultExport = {
+  Interface,
+  clearLine,
+  clearScreenDown,
+  createInterface,
+  cursorTo,
+  emitKeypressEvents,
+  moveCursor,
+  promises,
+};
+const processGetBuiltinModule = globalThis.process?.getBuiltinModule;
+const defaultExport =
+  (!internals.__loadingDenoNodeReadlineDefault &&
+      typeof processGetBuiltinModule === "function"
+    ? processGetBuiltinModule("readline")
+    : undefined) ?? originalDefaultExport;
 
 export {
   clearLine,
@@ -23,13 +41,4 @@ export {
   promises,
 };
 
-export default {
-  Interface,
-  clearLine,
-  clearScreenDown,
-  createInterface,
-  cursorTo,
-  emitKeypressEvents,
-  moveCursor,
-  promises,
-};
+export default defaultExport;

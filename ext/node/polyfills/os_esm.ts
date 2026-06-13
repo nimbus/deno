@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-import { core } from "ext:core/mod.js";
-const mod = core.loadExtScript("ext:deno_node/os.ts");
+import { getBuiltinModule } from "node:module";
+const mod = getBuiltinModule("os");
 
 export const {
   constants,
@@ -28,4 +28,4 @@ export const {
   devNull,
 } = mod;
 
-export default mod.default;
+export default mod;

@@ -1041,6 +1041,8 @@ ObjectDefineProperty(process, "release", {
         `https://nodejs.org/download/release/${version}/node-${version}-headers.tar.gz`,
     };
   },
+  enumerable: true,
+  configurable: true,
 });
 
 /** https://nodejs.org/api/process.html#process_process_arch */

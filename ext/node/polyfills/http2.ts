@@ -77,7 +77,8 @@ const {
 } = core.createLazyLoader("node:_http_server")();
 const { Duplex } = core.createLazyLoader("node:stream")();
 const lazyTls = core.createLazyLoader("node:tls");
-const tls = lazyTls().default;
+const tlsNamespace = lazyTls();
+const tls = tlsNamespace.default ?? tlsNamespace;
 const { deprecate } = core.loadExtScript("ext:deno_node/util.ts");
 const dc = core.loadExtScript("ext:deno_node/diagnostics_channel.js").default;
 const { utcDate } = core.loadExtScript("ext:deno_node/internal/http.ts");
