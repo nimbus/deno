@@ -28,6 +28,7 @@ const {
   Error,
   ErrorPrototype,
   ErrorCaptureStackTrace,
+  ErrorPrototypeToString,
   JSONStringify,
   MapPrototypeGet,
   MapPrototypeSet,
@@ -102,6 +103,30 @@ const lazyLoadAssert = () => {
 };
 
 const kIsNodeError = Symbol("kIsNodeError");
+
+function defaultPrepareStackTrace(error, trace) {
+  const errorString = kIsNodeError in error
+    ? `${error.name} [${error.code}]: ${error.message}`
+    : ErrorPrototypeToString(error);
+  if (trace.length === 0) {
+    return errorString;
+  }
+  return `${errorString}\n    at ${ArrayPrototypeJoin(trace, "\n    at ")}`;
+}
+
+function ErrorPrepareStackTrace(error, trace) {
+  return defaultPrepareStackTrace(error, trace);
+}
+
+if (typeof Error.prepareStackTrace !== "function") {
+  ObjectDefineProperty(Error, "prepareStackTrace", {
+    __proto__: null,
+    value: ErrorPrepareStackTrace,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
 
 /**
  * @see https://github.com/nodejs/node/blob/f3eb224/lib/internal/errors.js

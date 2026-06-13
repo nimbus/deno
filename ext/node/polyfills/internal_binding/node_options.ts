@@ -108,6 +108,12 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     case "--pending-deprecation":
       options.set("--pending-deprecation", { value: true });
       break;
+    case "--enable-source-maps":
+      options.set("--enable-source-maps", { value: true });
+      break;
+    case "--no-enable-source-maps":
+      options.set("--enable-source-maps", { value: false });
+      break;
     case "--expose-internals":
     case "--expose_internals":
       options.set("--expose-internals", { value: true });
