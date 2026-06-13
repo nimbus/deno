@@ -2289,7 +2289,7 @@ function formatProperty(
       SymbolPrototypeToString(key),
       escapeFn,
     );
-    name = ctx.stylize(tmp, "symbol");
+    name = `[${ctx.stylize(tmp, "symbol")}]`;
   } else if (keyStrRegExp.test(key)) {
     name = key === "__proto__" ? "['__proto__']" : ctx.stylize(key, "name");
   } else {
