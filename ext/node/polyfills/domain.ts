@@ -101,6 +101,7 @@ class Domain extends EventEmitter {
   constructor() {
     super();
     this[kWeak] = new WeakReference(this);
+    ensureUncaughtExceptionClearListeners();
     patchEventEmitter();
     patchPromiseReject();
     patchPromisePrototype(Promise);
@@ -279,6 +280,7 @@ class Domain extends EventEmitter {
 }
 
 let exceptionCaptureActive = false;
+let uncaughtExceptionClearListenersInstalled = false;
 
 function updateExceptionCapture() {
   if (stack.length > 0 && !exceptionCaptureActive) {
@@ -294,6 +296,43 @@ function updateExceptionCapture() {
   } else if (stack.length === 0 && exceptionCaptureActive) {
     exceptionCaptureActive = false;
     process.setUncaughtExceptionCaptureCallback(null);
+  }
+}
+
+function domainUncaughtExceptionClear() {
+  stack.length = 0;
+  active = process.domain = null;
+  updateExceptionCapture();
+}
+
+function ensureUncaughtExceptionClearListeners() {
+  if (uncaughtExceptionClearListenersInstalled) {
+    return;
+  }
+  uncaughtExceptionClearListenersInstalled = true;
+
+  process.on("newListener", (name, listener) => {
+    if (name === "uncaughtException" && listener !== domainUncaughtExceptionClear) {
+      process.removeListener("uncaughtException", domainUncaughtExceptionClear);
+      process.prependListener("uncaughtException", domainUncaughtExceptionClear);
+    }
+  });
+
+  process.on("removeListener", (name, listener) => {
+    if (name === "uncaughtException" && listener !== domainUncaughtExceptionClear) {
+      const listeners = process.listeners("uncaughtException");
+      if (
+        listeners.length === 1 && listeners[0] === domainUncaughtExceptionClear
+      ) {
+        process.removeListener("uncaughtException", domainUncaughtExceptionClear);
+      }
+    }
+  });
+
+  const listeners = process.listeners("uncaughtException");
+  if (listeners.length > 0 && listeners[0] !== domainUncaughtExceptionClear) {
+    process.removeListener("uncaughtException", domainUncaughtExceptionClear);
+    process.prependListener("uncaughtException", domainUncaughtExceptionClear);
   }
 }
 
