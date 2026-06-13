@@ -7,7 +7,10 @@
 const { core, primordials } = __bootstrap;
 const {
   Array,
+  ArrayPrototypeIndexOf,
   ArrayPrototypePush,
+  ArrayPrototypeSlice,
+  ArrayPrototypeSplice,
   BigInt64Array,
   BigUint64Array,
   DataView,
@@ -30,6 +33,10 @@ const {
   Int8Array,
   ObjectFreeze,
   ObjectPrototypeToString,
+  SafeWeakSet,
+  Promise,
+  PromisePrototypeThen,
+  ReflectApply,
   String,
   StringPrototypePadStart,
   Symbol,
@@ -43,6 +50,8 @@ const {
   Uint32Array,
   Uint8Array,
   Uint8ClampedArray,
+  WeakSetPrototypeAdd,
+  WeakSetPrototypeHas,
 } = primordials;
 const {
   op_v8_cached_data_version_tag,
@@ -84,6 +93,9 @@ const lazyStream = core.createLazyLoader("node:stream");
 const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
 const { isArrayBufferView, isDataView } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
+);
+const { ERR_INVALID_ARG_TYPE } = core.loadExtScript(
+  "ext:deno_node/internal/errors.ts",
 );
 
 function getViewBuffer(view: ArrayBufferView): ArrayBufferLike {
@@ -280,6 +292,254 @@ function queryObjects(
   // empty array keeps the signature sensible.
   return [];
 }
+
+const promiseHookLists = {
+  init: [] as ((promise: Promise<unknown>, parent: Promise<unknown>) => void)[],
+  before: [] as ((promise: Promise<unknown>) => void)[],
+  after: [] as ((promise: Promise<unknown>) => void)[],
+  settled: [] as ((promise: Promise<unknown>) => void)[],
+};
+const settledPublicPromiseHookPromises = new SafeWeakSet<Promise<unknown>>();
+let promiseHooksInstalled = false;
+
+function validatePlainPromiseHook(
+  hook: unknown,
+  name: string,
+): asserts hook is (...args: unknown[]) => void {
+  const tag = ObjectPrototypeToString(hook);
+  if (
+    typeof hook !== "function" ||
+    tag === "[object AsyncFunction]" ||
+    tag === "[object AsyncGeneratorFunction]"
+  ) {
+    throw new ERR_INVALID_ARG_TYPE(name, "Function", hook);
+  }
+}
+
+function triggerUncaughtPromiseHookException(error: unknown): void {
+  if (
+    globalThis.process !== undefined &&
+    typeof globalThis.process._fatalException === "function" &&
+    globalThis.process._fatalException(error, false)
+  ) {
+    return;
+  }
+  throw error;
+}
+
+function runPromiseInitHooks(
+  promise: Promise<unknown>,
+  parent: Promise<unknown>,
+): void {
+  if (core.isPromiseHooksSuppressed()) return;
+  const hookSet = ArrayPrototypeSlice(promiseHookLists.init);
+  const exceptions = [];
+  for (let i = 0; i < hookSet.length; i++) {
+    try {
+      hookSet[i](promise, parent);
+    } catch (error) {
+      ArrayPrototypePush(exceptions, error);
+    }
+  }
+  for (let i = 0; i < exceptions.length; i++) {
+    triggerUncaughtPromiseHookException(exceptions[i]);
+  }
+}
+
+function makePromiseHookRunner(
+  list: ((promise: Promise<unknown>) => void)[],
+) {
+  return (promise: Promise<unknown>) => {
+    const hookSet = ArrayPrototypeSlice(list);
+    const exceptions = [];
+    for (let i = 0; i < hookSet.length; i++) {
+      try {
+        hookSet[i](promise);
+      } catch (error) {
+        ArrayPrototypePush(exceptions, error);
+      }
+    }
+    for (let i = 0; i < exceptions.length; i++) {
+      triggerUncaughtPromiseHookException(exceptions[i]);
+    }
+  };
+}
+
+const runPromiseBeforeHooks = makePromiseHookRunner(promiseHookLists.before);
+const runPromiseAfterHooks = makePromiseHookRunner(promiseHookLists.after);
+const runPromiseSettledHooks = makePromiseHookRunner(promiseHookLists.settled);
+
+function runPromiseSettledOnce(promise: Promise<unknown>): void {
+  if (WeakSetPrototypeHas(settledPublicPromiseHookPromises, promise)) return;
+  WeakSetPrototypeAdd(settledPublicPromiseHookPromises, promise);
+  runPromiseSettledHooks(promise);
+}
+
+function ensurePublicPromiseHooksInstalled(): void {
+  if (promiseHooksInstalled) return;
+  promiseHooksInstalled = true;
+
+  const OriginalPromise = Promise;
+  const originalCatch = OriginalPromise.prototype.catch;
+  const originalFinally = OriginalPromise.prototype.finally;
+
+  function InstrumentedPromise(
+    this: unknown,
+    executor: (
+      resolve: (value?: unknown) => void,
+      reject: (reason?: unknown) => void,
+    ) => void,
+  ) {
+    let created = false;
+    let settledBeforeCreate = false;
+    let promise: Promise<unknown>;
+    promise = new OriginalPromise((resolve, reject) => {
+      const settle = (fn: (value?: unknown) => void, value?: unknown) => {
+        fn(value);
+        if (created) {
+          runPromiseSettledOnce(promise);
+        } else {
+          settledBeforeCreate = true;
+        }
+      };
+      try {
+        executor(
+          (value?: unknown) => settle(resolve, value),
+          (reason?: unknown) => settle(reject, reason),
+        );
+      } catch (error) {
+        settle(reject, error);
+      }
+    });
+    created = true;
+    runPromiseInitHooks(promise, undefined as unknown as Promise<unknown>);
+    if (settledBeforeCreate) runPromiseSettledOnce(promise);
+    return promise;
+  }
+
+  InstrumentedPromise.prototype = OriginalPromise.prototype;
+  Object.setPrototypeOf(InstrumentedPromise, OriginalPromise);
+
+  InstrumentedPromise.resolve = (value?: unknown) => {
+    const promise = OriginalPromise.resolve(value);
+    runPromiseInitHooks(promise, undefined as unknown as Promise<unknown>);
+    runPromiseSettledOnce(promise);
+    return promise;
+  };
+  InstrumentedPromise.reject = (reason?: unknown) => {
+    const promise = OriginalPromise.reject(reason);
+    runPromiseInitHooks(promise, undefined as unknown as Promise<unknown>);
+    runPromiseSettledOnce(promise);
+    return promise;
+  };
+
+  OriginalPromise.prototype.then = function (
+    onFulfilled?: ((value: unknown) => unknown) | null,
+    onRejected?: ((reason: unknown) => unknown) | null,
+  ) {
+    let child: Promise<unknown>;
+    const wrap = (handler: unknown) => {
+      if (typeof handler !== "function") return handler;
+      return function (this: unknown, value: unknown) {
+        runPromiseBeforeHooks(child);
+        try {
+          return ReflectApply(handler, this, [value]);
+        } finally {
+          runPromiseAfterHooks(child);
+          runPromiseSettledOnce(child);
+        }
+      };
+    };
+    child = PromisePrototypeThen(
+      this,
+      wrap(onFulfilled),
+      wrap(onRejected),
+    );
+    runPromiseInitHooks(child, this as Promise<unknown>);
+    PromisePrototypeThen(
+      child,
+      () => runPromiseSettledOnce(child),
+      () => runPromiseSettledOnce(child),
+    );
+    return child;
+  };
+  OriginalPromise.prototype.catch = function (
+    onRejected?: ((reason: unknown) => unknown) | null,
+  ) {
+    return ReflectApply(originalCatch, this, [onRejected]);
+  };
+  OriginalPromise.prototype.finally = function (
+    onFinally?: (() => unknown) | null,
+  ) {
+    return ReflectApply(originalFinally, this, [onFinally]);
+  };
+  (globalThis as { Promise: PromiseConstructor }).Promise =
+    InstrumentedPromise as unknown as PromiseConstructor;
+}
+
+function stopPromiseHook(list: unknown[], hook: unknown): void {
+  const index = ArrayPrototypeIndexOf(list, hook);
+  if (index >= 0) {
+    ArrayPrototypeSplice(list, index, 1);
+  }
+}
+
+function makeUsePromiseHook(
+  name: "init" | "before" | "after" | "settled",
+  argumentName: string,
+) {
+  const list = promiseHookLists[name];
+  return (hook: unknown) => {
+    validatePlainPromiseHook(hook, argumentName);
+    ensurePublicPromiseHooksInstalled();
+    ArrayPrototypePush(list, hook);
+    return () => stopPromiseHook(list, hook);
+  };
+}
+
+const onPromiseInit = makeUsePromiseHook("init", "initHook");
+const onPromiseBefore = makeUsePromiseHook("before", "beforeHook");
+const onPromiseAfter = makeUsePromiseHook("after", "afterHook");
+const onPromiseSettled = makeUsePromiseHook("settled", "settledHook");
+
+function createPromiseHook(
+  hooks:
+    | {
+      init?: (...args: unknown[]) => void;
+      before?: (...args: unknown[]) => void;
+      after?: (...args: unknown[]) => void;
+      settled?: (...args: unknown[]) => void;
+    }
+    | undefined = undefined,
+) {
+  if (hooks === undefined) {
+    hooks = {};
+  } else {
+    validateObject(hooks, "hooks");
+  }
+
+  const stops = [];
+  if (hooks.init) ArrayPrototypePush(stops, onPromiseInit(hooks.init));
+  if (hooks.before) ArrayPrototypePush(stops, onPromiseBefore(hooks.before));
+  if (hooks.after) ArrayPrototypePush(stops, onPromiseAfter(hooks.after));
+  if (hooks.settled) {
+    ArrayPrototypePush(stops, onPromiseSettled(hooks.settled));
+  }
+
+  return () => {
+    for (let i = 0; i < stops.length; i++) {
+      stops[i]();
+    }
+  };
+}
+
+const promiseHooks = ObjectFreeze({
+  createHook: createPromiseHook,
+  onInit: onPromiseInit,
+  onBefore: onPromiseBefore,
+  onAfter: onPromiseAfter,
+  onSettled: onPromiseSettled,
+});
 
 // deno-lint-ignore no-explicit-any
 function serialize(value: any) {
@@ -634,6 +894,7 @@ return {
   getHeapSnapshot,
   getHeapSpaceStatistics,
   getHeapStatistics,
+  promiseHooks,
   queryObjects,
   setFlagsFromString,
   startupSnapshot,
