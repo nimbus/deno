@@ -46,6 +46,7 @@ const {
   ERR_INVALID_ARG_VALUE,
   ERR_INVALID_THIS,
   ERR_MODULE_LINK_MISMATCH,
+  ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG,
   ERR_VM_MODULE_ALREADY_LINKED,
   ERR_VM_MODULE_CACHED_DATA_REJECTED,
   ERR_VM_MODULE_CANNOT_CREATE_CACHED_DATA,
@@ -54,6 +55,9 @@ const {
   ERR_VM_MODULE_NOT_MODULE,
   ERR_VM_MODULE_STATUS,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
+const { getOptionValue } = core.loadExtScript(
+  "ext:deno_node/internal/options.ts",
+);
 
 const {
   ArrayIsArray,
@@ -235,6 +239,10 @@ function validateImportModuleDynamically(value, name) {
   }
 }
 
+function hasExperimentalVmModulesFlag() {
+  return getOptionValue("--experimental-vm-modules") === true;
+}
+
 function getImportModuleDynamicallyId(value, name, getReferrer) {
   validateImportModuleDynamically(value, name);
   if (value === USE_MAIN_CONTEXT_DEFAULT_LOADER) {
@@ -242,6 +250,11 @@ function getImportModuleDynamicallyId(value, name, getReferrer) {
   }
   if (value === undefined) {
     return 0;
+  }
+  if (!hasExperimentalVmModulesFlag()) {
+    return op_vm_dynamic_import_callback_register(() =>
+      PromiseReject(new ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG())
+    );
   }
   return op_vm_dynamic_import_callback_register(
     (specifier, importAttributes) => {
