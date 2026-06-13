@@ -148,8 +148,7 @@ class Domain extends EventEmitter {
       } catch (e) {
         self.exit();
         if (typeof e === "object" && e !== null) {
-          e.domainBound = fn;
-          e.domainThrown = false;
+          e.domainThrown = true;
           ObjectDefineProperty(e, "domain", {
             __proto__: null,
             configurable: true,
@@ -201,8 +200,7 @@ class Domain extends EventEmitter {
         } catch (e) {
           self.exit();
           if (typeof e === "object" && e !== null) {
-            e.domainBound = fn;
-            e.domainThrown = false;
+            e.domainThrown = true;
             ObjectDefineProperty(e, "domain", {
               __proto__: null,
               configurable: true,

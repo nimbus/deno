@@ -367,7 +367,9 @@ function createContext(
       context,
       importModuleDynamically,
     );
-    patchDomainPromiseContext(context);
+    if (!microtaskQueue) {
+      patchDomainPromiseContext(context);
+    }
     return context;
   }
 
@@ -424,7 +426,9 @@ function createContext(
     contextObject,
     importModuleDynamically,
   );
-  patchDomainPromiseContext(contextObject);
+  if (!microtaskQueue) {
+    patchDomainPromiseContext(contextObject);
+  }
   return contextObject;
 }
 
