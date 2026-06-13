@@ -66,6 +66,7 @@ const {
 const kOptions = Symbol("options");
 
 const NO_EXCEPTION_SENTINEL = {};
+const nimbusRejectsStackReceiverName = "__nimbusRejectsStackReceiverName";
 
 function Assert(options) {
   if (!new.target) {
@@ -138,10 +139,10 @@ function innerFail(obj) {
   });
 }
 
-function assert(...args) {
+function ok(...args) {
   innerOk(ok, args.length, ...new SafeArrayIterator(args));
 }
-const ok = assert;
+const assert = ok;
 
 class Comparison {
   constructor(obj, keys, actual) {
@@ -844,12 +845,28 @@ function strict(...args) {
 }
 
 async function rejects(
+  this: Record<string, unknown> | undefined,
   asyncFn,
   ...args
 ) {
+  const actual = await waitForActual(asyncFn);
+  const stackReceiverName = this?.[nimbusRejectsStackReceiverName] ??
+    (assert as Record<string, unknown>)[nimbusRejectsStackReceiverName];
+  if (
+    stackReceiverName === "Function" &&
+    actual !== null &&
+    typeof actual === "object" &&
+    typeof actual.stack === "string"
+  ) {
+    actual.stack = StringPrototypeReplace(
+      actual.stack,
+      "at async ok.rejects",
+      "at async Function.rejects",
+    );
+  }
   expectsError(
     rejects,
-    await waitForActual(asyncFn),
+    actual,
     ...new SafeArrayIterator(args),
   );
 }

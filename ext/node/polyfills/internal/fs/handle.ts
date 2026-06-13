@@ -40,7 +40,9 @@ const { kEmptyObject, promisify } = core.loadExtScript(
 );
 
 // CreateReadStreamOptions, CreateWriteStreamOptions types from node:fs/promises
-const { default: assert } = core.loadExtScript("ext:deno_node/assert.ts");
+const assert = core.loadExtScript(
+  "ext:deno_node/internal/assert.mjs",
+);
 const {
   denoErrorToNodeError,
   ERR_INVALID_STATE,
@@ -49,6 +51,7 @@ const { readableStreamCancel } = core.loadExtScript(
   "ext:deno_web/06_streams.js",
 );
 const {
+  validateBuffer,
   validateBoolean,
   validateObject,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
@@ -205,6 +208,13 @@ export class FileHandle extends EventEmitter {
       }
     } else {
       // fileHandle.read(options)
+      if (
+        bufferOrOpt !== undefined &&
+        bufferOrOpt !== null &&
+        typeof bufferOrOpt !== "object"
+      ) {
+        validateBuffer(bufferOrOpt, "buffer");
+      }
       const opts = (bufferOrOpt ?? {}) as {
         buffer?: ArrayBufferView;
         offset?: number;
