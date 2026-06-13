@@ -182,6 +182,7 @@
   const kImmHasOutstanding = 2;
   const kRefed = Symbol("refed");
   let immediateInfo;
+  let immediateExceptionReported = false;
 
   function queueImmediate(immediate) {
     immediateInfo[kImmCount]++;
@@ -229,9 +230,12 @@
 
     let prevImmediate;
     let ranAtLeastOneImmediate = false;
+    immediateExceptionReported = false;
     while (immediate !== null) {
       if (ranAtLeastOneImmediate) {
-        runNextTicks();
+        if (!immediateExceptionReported) {
+          runNextTicks();
+        }
       } else {
         ranAtLeastOneImmediate = true;
       }
@@ -283,6 +287,7 @@
     }
 
     immediateInfo[kImmHasOutstanding] = 0;
+    immediateExceptionReported = false;
   }
 
   // ---------------------------------------------------------------------------
@@ -532,7 +537,10 @@
   }
 
   // Report an exception (called from Rust for timer callback errors).
-  function __reportException(e) {
+  function __reportException(e, fromImmediate = false) {
+    if (fromImmediate) {
+      immediateExceptionReported = true;
+    }
     reportExceptionCallback(e);
   }
 

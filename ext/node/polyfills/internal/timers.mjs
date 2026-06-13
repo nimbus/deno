@@ -236,10 +236,15 @@ Timeout.prototype[createTimer] = function () {
   // pushAsyncContext/popAsyncContext.
   cb = function () {
     const oldContext = getAsyncContext();
+    const processObject = lazyProcess().default;
+    const restoreInactiveDomain = processObject.domain === undefined;
     let caught;
     let didThrow = false;
     try {
       setAsyncContext(asyncContext);
+      if (restoreInactiveDomain) {
+        processObject.domain = null;
+      }
       emitBefore(asyncId, triggerAsyncId, self);
       const ret = invokeCallback();
       // emitAfter/emitDestroy run in the finally block below so the
@@ -277,6 +282,9 @@ Timeout.prototype[createTimer] = function () {
       if (!self._repeat && !self._asyncDestroyed) {
         self._asyncDestroyed = true;
         emitDestroy(asyncId);
+      }
+      if (restoreInactiveDomain && processObject.domain === null) {
+        processObject.domain = undefined;
       }
       setAsyncContext(oldContext);
     }
@@ -448,7 +456,7 @@ class Immediate {
         // InternalCallbackScope::Close ordering. Swallow afterwards so the
         // runImmediateCallbacks drain loop does not re-dispatch with the
         // (already restored) outer context.
-        core.__reportException(e);
+        core.__reportException(e, true);
       } finally {
         setAsyncContext(oldContext);
       }

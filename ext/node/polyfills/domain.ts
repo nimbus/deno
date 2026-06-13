@@ -257,9 +257,10 @@ class Domain extends EventEmitter {
     // position onwards. This matches Node.js behavior: exiting a domain also
     // exits all domains that were entered after its most recent entry.
     const index = ArrayPrototypeLastIndexOf(stack, this);
-    if (index !== -1) {
-      ArrayPrototypeSplice(stack, index);
+    if (index === -1) {
+      return this;
     }
+    ArrayPrototypeSplice(stack, index);
     // Match Node lib/domain.js exit(): an empty stack yields `undefined`
     // (stack[-1]), not `null`. Node only uses `null` for the active domain in
     // the synchronous emit-error routing and the top-level uncaught handler.
