@@ -187,6 +187,17 @@ let debug = debuglog("net", (fn) => {
 const kLastWriteQueueSize = Symbol("lastWriteQueueSize");
 const kBytesRead = Symbol("kBytesRead");
 const kBytesWritten = Symbol("kBytesWritten");
+const kAsyncInitResourceSeen = Symbol("asyncInitResourceSeen");
+
+class ReusedHandle {
+  type: number;
+  handle: Handle;
+
+  constructor(type: number, handle: Handle) {
+    this.type = type;
+    this.handle = handle;
+  }
+}
 
 const DEFAULT_IPV4_ADDR = "0.0.0.0";
 const DEFAULT_IPV6_ADDR = "::";
@@ -367,11 +378,17 @@ function _emitHandleInit(handle: Handle, asyncId: number) {
     return;
   }
   const providerType = (handle as any).getProviderType();
+  let resource: Handle | ReusedHandle = handle;
+  if ((handle as any)[kAsyncInitResourceSeen]) {
+    resource = new ReusedHandle(providerType, handle);
+  } else {
+    (handle as any)[kAsyncInitResourceSeen] = true;
+  }
   emitInit(
     asyncId,
     providerTypeNames[providerType] || "UNKNOWN",
     executionAsyncId(),
-    handle,
+    resource,
   );
 }
 

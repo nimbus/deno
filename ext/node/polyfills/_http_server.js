@@ -333,6 +333,13 @@ const STATUS_CODES = {
 
 // ---- ServerResponse ----
 
+class HTTPServerAsyncResource {
+  constructor(type, socket) {
+    this.type = type;
+    this.socket = socket;
+  }
+}
+
 function ServerResponse(req, options) {
   FunctionPrototypeCall(OutgoingMessage, this, options);
 
@@ -552,7 +559,7 @@ function connectionListenerInternal(server, socket) {
 
   parser.initialize(
     HTTPParser.REQUEST,
-    {},
+    new HTTPServerAsyncResource("HTTPINCOMINGMESSAGE", socket),
     server.maxHeaderSize || 0,
     lenient ? kLenientAll : kLenientNone,
   );

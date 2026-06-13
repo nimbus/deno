@@ -126,6 +126,8 @@ const kOnBody = 3;
 const kOnMessageComplete = 4;
 const kOnExecute = 5;
 const kOnTimeout = 6;
+const HTTP_REQUEST = 1;
+const HTTP_RESPONSE = 2;
 
 /**
  * JS wrapper around the native llhttp-based HTTPParser cppgc object.
@@ -161,8 +163,11 @@ HTTPParser.prototype.initialize = function (
   // correct async context (preserves AsyncLocalStorage through the
   // native parser, emulating Node's MakeCallback behavior).
   if (asyncResource) {
+    const asyncResourceType = type === HTTP_REQUEST
+      ? "HTTPINCOMINGMESSAGE"
+      : "HTTPCLIENTREQUEST";
     this._asyncResource = new AsyncResource(
-      asyncResource.type || "HTTPPARSER",
+      asyncResourceType,
     );
   }
   this._native.initialize(
@@ -303,8 +308,8 @@ HTTPParser.prototype.unconsume = function (this: any) {
 };
 
 // Static constants
-HTTPParser.REQUEST = 1;
-HTTPParser.RESPONSE = 2;
+HTTPParser.REQUEST = HTTP_REQUEST;
+HTTPParser.RESPONSE = HTTP_RESPONSE;
 HTTPParser.kOnMessageBegin = kOnMessageBegin;
 HTTPParser.kOnHeaders = kOnHeaders;
 HTTPParser.kOnHeadersComplete = kOnHeadersComplete;
