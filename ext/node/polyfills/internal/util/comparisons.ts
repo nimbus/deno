@@ -220,6 +220,12 @@ function areEqualArrayBuffers(buf1: ArrayBuffer, buf2: ArrayBuffer): boolean {
     Buffer.compare(new Uint8Array(buf1), new Uint8Array(buf2)) === 0;
 }
 
+function isNodeCompatLegacyCycleLane(): boolean {
+  const lane = (globalThis as { __nimbusNodeCompatLane?: string })
+    .__nimbusNodeCompatLane;
+  return lane === "node20" || lane === "node22";
+}
+
 function isEqualBoxedPrimitive(val1: unknown, val2: unknown) {
   if (isNumberObject(val1)) {
     return isNumberObject(val2) &&
@@ -470,6 +476,7 @@ function objectComparisonStart(
   } else if (isCryptoKey(val1)) {
     if (
       !isCryptoKey(val2) ||
+      val1.type !== val2.type ||
       val1.extractable !== val2.extractable ||
       !innerDeepEqual(val1.algorithm, val2.algorithm, mode, memos) ||
       !innerDeepEqual(val1.usages, val2.usages, mode, memos) ||
@@ -614,9 +621,10 @@ function handleCycles(
   if (memos.set === undefined) {
     if (memos.deep === false) {
       if (memos.a === val1) {
-        return memos.b === val2;
+        if (memos.b === val2) return true;
+        if (!isNodeCompatLegacyCycleLane()) return false;
       }
-      if (memos.b === val2) {
+      if (!isNodeCompatLegacyCycleLane() && memos.b === val2) {
         return false;
       }
       memos.c = val1;

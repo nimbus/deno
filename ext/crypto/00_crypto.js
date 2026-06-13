@@ -108,7 +108,8 @@ const { createFilteredInspectProxy } = core.loadExtScript(
   "ext:deno_web/01_console.js",
 );
 const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
-const { kKeyObject } = internals;
+const kKeyObject = internals.kKeyObject ?? Symbol("kKeyObject");
+internals.kKeyObject = kKeyObject;
 
 const supportedNamedCurves = ["P-256", "P-384", "P-521"];
 const recognisedUsages = [
