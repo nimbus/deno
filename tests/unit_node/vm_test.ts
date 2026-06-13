@@ -410,6 +410,31 @@ Deno.test({
   },
 });
 
+Deno.test({
+  name: "vm defineProperty respects non-configurable sandbox properties",
+  fn() {
+    const sandbox = {};
+    Object.defineProperty(sandbox, "f", {});
+    createContext(sandbox);
+
+    assertThrows(
+      () =>
+        runInContext(
+          `"use strict"; Object.defineProperty(this, "f", { value: "newF" });`,
+          sandbox,
+        ),
+      TypeError,
+      "Cannot redefine property: f",
+    );
+    assertEquals(Object.getOwnPropertyDescriptor(sandbox, "f"), {
+      value: undefined,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+  },
+});
+
 // Regression test: a function extracted from a contextified sandbox keeps the
 // vm context alive after every JS reference to the sandbox is dropped. The
 // native ContextifyContext wrapper must stay alive with the context, otherwise

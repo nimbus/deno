@@ -1160,6 +1160,15 @@ fn property_definer<'s>(
     return v8::Intercepted::kNo;
   };
 
+  let throw_cannot_redefine = |scope: &mut v8::PinScope<'_, '_>| {
+    let key_name = key.to_rust_string_lossy(scope);
+    let message =
+      v8::String::new(scope, &format!("Cannot redefine property: {key_name}"))
+        .unwrap();
+    let exception = v8::Exception::type_error(scope, message);
+    scope.throw_exception(exception);
+  };
+
   let define_prop_on_sandbox =
     |scope: &mut v8::PinScope<'_, '_>,
      desc_for_sandbox: &mut v8::PropertyDescriptor| {
@@ -1171,7 +1180,9 @@ fn property_definer<'s>(
         desc_for_sandbox.set_configurable(desc.configurable());
       }
 
-      sandbox.define_property(scope, key, desc_for_sandbox);
+      sandbox
+        .define_property(scope, key, desc_for_sandbox)
+        .unwrap_or(false)
     };
 
   if desc.has_get() || desc.has_set() {
@@ -1188,7 +1199,9 @@ fn property_definer<'s>(
       },
     );
 
-    define_prop_on_sandbox(scope, &mut desc_for_sandbox);
+    if !define_prop_on_sandbox(scope, &mut desc_for_sandbox) {
+      throw_cannot_redefine(scope);
+    }
   } else {
     let value = if desc.has_value() {
       desc.value()
@@ -1199,10 +1212,14 @@ fn property_definer<'s>(
     if desc.has_writable() {
       let mut desc_for_sandbox =
         v8::PropertyDescriptor::new_from_value_writable(value, desc.writable());
-      define_prop_on_sandbox(scope, &mut desc_for_sandbox);
+      if !define_prop_on_sandbox(scope, &mut desc_for_sandbox) {
+        throw_cannot_redefine(scope);
+      }
     } else {
       let mut desc_for_sandbox = v8::PropertyDescriptor::new_from_value(value);
-      define_prop_on_sandbox(scope, &mut desc_for_sandbox);
+      if !define_prop_on_sandbox(scope, &mut desc_for_sandbox) {
+        throw_cannot_redefine(scope);
+      }
     }
   }
 
