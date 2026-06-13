@@ -40,7 +40,7 @@ import {
   streamReturningOperators,
 } from "ext:deno_node/internal/streams/operators.js";
 
-import compose from "ext:deno_node/internal/streams/compose.js";
+import staticCompose from "ext:deno_node/internal/streams/compose.js";
 const {
   getDefaultHighWaterMark,
   setDefaultHighWaterMark,
@@ -70,8 +70,11 @@ import Duplex from "node:_stream_duplex";
 import Transform from "node:_stream_transform";
 import PassThrough from "node:_stream_passthrough";
 import duplexPair from "ext:deno_node/internal/streams/duplexpair.js";
-const { addAbortSignal } = core.loadExtScript(
+const { addAbortSignal, addAbortSignalNoValidate } = core.loadExtScript(
   "ext:deno_node/internal/streams/add-abort-signal.js",
+);
+const { validateAbortSignal, validateObject } = core.loadExtScript(
+  "ext:deno_node/internal/validators.mjs",
 );
 const { ERR_ILLEGAL_CONSTRUCTOR } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
@@ -104,6 +107,32 @@ for (let i = 0; i < streamKeys.length; i++) {
     writable: true,
   });
 }
+ObjectDefineProperty(Stream.Readable.prototype, "compose", {
+  __proto__: null,
+  value: function compose(stream, options) {
+    if (options != null) {
+      validateObject(options, "options");
+    }
+    if (options?.signal != null) {
+      validateAbortSignal(options.signal, "options.signal");
+    }
+
+    const composedStream = staticCompose(this, stream);
+
+    if (options?.signal) {
+      // Not validating as we already validated before.
+      addAbortSignalNoValidate(
+        options.signal,
+        composedStream,
+      );
+    }
+
+    return composedStream;
+  },
+  enumerable: false,
+  configurable: true,
+  writable: true,
+});
 const promiseKeys = ObjectKeys(promiseReturningOperators);
 for (let i = 0; i < promiseKeys.length; i++) {
   const key = promiseKeys[i];
@@ -134,7 +163,7 @@ Stream.pipeline = pipeline;
 Stream.addAbortSignal = addAbortSignal;
 Stream.finished = eos;
 Stream.destroy = destroyer;
-Stream.compose = compose;
+Stream.compose = staticCompose;
 Stream.setDefaultHighWaterMark = setDefaultHighWaterMark;
 Stream.getDefaultHighWaterMark = getDefaultHighWaterMark;
 
@@ -176,7 +205,6 @@ Stream._uint8ArrayToBuffer = function _uint8ArrayToBuffer(chunk) {
 
 export {
   addAbortSignal,
-  compose,
   destroyer as destroy,
   Duplex,
   duplexPair,
@@ -186,6 +214,7 @@ export {
   promises,
   Readable,
   setDefaultHighWaterMark,
+  staticCompose as compose,
   Stream,
   Transform,
   Writable,

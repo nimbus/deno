@@ -18,20 +18,11 @@ import {
 const { finished } = core.loadExtScript(
   "ext:deno_node/internal/streams/end-of-stream.js",
 );
-import staticCompose from "ext:deno_node/internal/streams/compose.js";
-const { addAbortSignalNoValidate } = core.loadExtScript(
-  "ext:deno_node/internal/streams/add-abort-signal.js",
-);
-const {
-  isNodeStream,
-  isWritable,
-} = core.loadExtScript("ext:deno_node/internal/streams/utils.js");
 
 const {
   AbortError,
   codes: {
     ERR_INVALID_ARG_TYPE,
-    ERR_INVALID_ARG_VALUE,
     ERR_MISSING_ARGS,
     ERR_OUT_OF_RANGE,
   },
@@ -54,31 +45,6 @@ const {
 
 const kEmpty = Symbol("kEmpty");
 const kEof = Symbol("kEof");
-
-function compose(stream, options) {
-  if (options != null) {
-    validateObject(options, "options");
-  }
-  if (options?.signal != null) {
-    validateAbortSignal(options.signal, "options.signal");
-  }
-
-  if (isNodeStream(stream) && !isWritable(stream)) {
-    throw new ERR_INVALID_ARG_VALUE("stream", stream, "must be writable");
-  }
-
-  const composedStream = staticCompose(this, stream);
-
-  if (options?.signal) {
-    // Not validating as we already validated before
-    addAbortSignalNoValidate(
-      options.signal,
-      composedStream,
-    );
-  }
-
-  return composedStream;
-}
 
 function map(fn, options) {
   if (typeof fn !== "function") {
@@ -457,7 +423,6 @@ const streamReturningOperators = {
   flatMap,
   map,
   take,
-  compose,
 };
 
 export { streamReturningOperators };
