@@ -11,6 +11,9 @@ const { ERR_UNHANDLED_ERROR } = core.loadExtScript(
 const { AsyncHook } = core.loadExtScript(
   "ext:deno_node/internal/async_hooks.ts",
 );
+const { WeakReference } = core.loadExtScript(
+  "ext:deno_node/internal/util.mjs",
+);
 const {
   ArrayPrototypeIndexOf,
   ArrayPrototypeLastIndexOf,
@@ -24,6 +27,7 @@ const {
   Promise,
   ReflectApply,
   SafeMap,
+  Symbol,
 } = primordials;
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
 
@@ -43,13 +47,14 @@ let active = null;
 
 // Map asyncId -> domain for tracking async operations
 const pairing = new SafeMap();
+const kWeak = Symbol("kWeak");
 
 // Async hook to track domain associations across async operations
 const asyncHook = new AsyncHook({
   init(asyncId, _type, _triggerAsyncId, resource) {
     if (process.domain !== null && process.domain !== undefined) {
       // Record which domain this async operation belongs to
-      pairing.set(asyncId, process.domain);
+      pairing.set(asyncId, process.domain[kWeak]);
       // Attach domain to resource
       if (typeof resource === "object" && resource !== null) {
         ObjectDefineProperty(resource, "domain", {
@@ -63,14 +68,17 @@ const asyncHook = new AsyncHook({
     }
   },
   before(asyncId) {
-    const domain = pairing.get(asyncId);
-    if (domain !== undefined) {
-      domain.enter();
+    const current = pairing.get(asyncId);
+    if (current !== undefined) {
+      current.incRef();
+      current.get().enter();
     }
   },
   after(asyncId) {
-    const domain = pairing.get(asyncId);
-    if (domain !== undefined) {
+    const current = pairing.get(asyncId);
+    if (current !== undefined) {
+      const domain = current.get();
+      current.decRef();
       domain.exit();
     }
   },
@@ -92,6 +100,7 @@ class Domain extends EventEmitter {
 
   constructor() {
     super();
+    this[kWeak] = new WeakReference(this);
     patchEventEmitter();
     patchPromiseReject();
     patchPromisePrototype(Promise);
