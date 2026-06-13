@@ -2554,6 +2554,7 @@ impl JsRuntime {
     // without returning to tokio. This avoids kqueue/kevent round-trip
     // latency between batches.
     let mut dispatched_ops = false;
+    let mut completed_refed_ops = false;
     let mut did_work = false;
     let mut uv_did_io = false;
     // ===== Phase 1: Timers =====
@@ -2578,8 +2579,10 @@ impl JsRuntime {
     // draining to preserve the nextTick-before-then invariant.
     let timer_ready = context_state.user_timer.poll_ready(cx).is_ready();
     did_work |= timer_ready;
-    dispatched_ops |=
+    let tick_dispatch =
       Self::dispatch_event_loop_tick(cx, scope, context_state, timer_ready)?;
+    dispatched_ops |= tick_dispatch.dispatched_ops;
+    completed_refed_ops |= tick_dispatch.completed_refed_ops;
     // After the JS call, read timer_expiry shared buffer and schedule.
     if timer_ready {
       Self::process_timer_expiry(context_state);
@@ -2670,7 +2673,7 @@ impl JsRuntime {
           || context_state.immediate_info[IMM_IDX_COUNT] > 0;
       let has_refed = context_state.immediate_info[IMM_IDX_REF_COUNT] > 0;
       if has_immediates
-        && (has_refed || did_work || dispatched_ops || uv_did_io)
+        && (has_refed || did_work || completed_refed_ops || uv_did_io)
       {
         Self::do_js_run_immediate_callbacks(scope, context_state)?;
         // Drain ticks queued by immediate callbacks so they don't
@@ -3102,6 +3105,12 @@ pub(crate) struct EventLoopPendingState {
   has_outstanding_immediates: bool,
   has_pending_timers: bool,
   has_uv_alive_handles: bool,
+}
+
+#[derive(Default)]
+struct EventLoopTickDispatch {
+  dispatched_ops: bool,
+  completed_refed_ops: bool,
 }
 
 impl EventLoopPendingState {
@@ -3583,11 +3592,12 @@ impl JsRuntime {
     scope: &mut v8::PinScope<'s, 'i>,
     context_state: &ContextState,
     timer_ready: bool,
-  ) -> Result<bool, Box<JsError>> {
+  ) -> Result<EventLoopTickDispatch, Box<JsError>> {
     const MAX_VEC_SIZE_FOR_OPS: usize = 1024;
 
     let mut args: SmallVec<[v8::Local<v8::Value>; 32]> =
       SmallVec::with_capacity(32);
+    let mut completed_refed_ops = false;
 
     // First arg: timer now (positive = process timers, -1 = skip)
     let timer_now = if timer_ready {
@@ -3627,7 +3637,9 @@ impl JsRuntime {
         }
       }
 
-      context_state.unrefed_ops.borrow_mut().remove(&promise_id);
+      let was_unrefed_op =
+        context_state.unrefed_ops.borrow_mut().remove(&promise_id);
+      completed_refed_ops |= !was_unrefed_op;
       context_state
         .activity_traces
         .complete(RuntimeActivityType::AsyncOp, promise_id as _);
@@ -3639,7 +3651,7 @@ impl JsRuntime {
     // Skip the call if no timers fired and no ops completed
     let has_ops = args.len() > 1;
     if !timer_ready && !has_ops {
-      return Ok(false);
+      return Ok(EventLoopTickDispatch::default());
     }
 
     let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
@@ -3654,10 +3666,13 @@ impl JsRuntime {
       return exception_to_err_result(tc_scope, exception, false, true);
     }
     if tc_scope.has_terminated() || tc_scope.is_execution_terminating() {
-      return Ok(false);
+      return Ok(EventLoopTickDispatch::default());
     }
 
-    Ok(has_ops)
+    Ok(EventLoopTickDispatch {
+      dispatched_ops: has_ops,
+      completed_refed_ops,
+    })
   }
 
   /// Dispatch "rejectionhandled" events for promises that were previously
