@@ -158,6 +158,12 @@ class Deferred {
   }
 }
 
+function createInvalidStateTypeError(message) {
+  const error = new TypeError(message);
+  error.code = "ERR_INVALID_STATE";
+  return error;
+}
+
 /**
  * @template T
  * @param {T | PromiseLike<T>} value
@@ -5830,19 +5836,21 @@ class ReadableStreamBYOBReader {
     }
     if (byteLength === 0) {
       return PromiseReject(
-        new TypeError("view must have non-zero byteLength"),
+        createInvalidStateTypeError("view must have non-zero byteLength"),
       );
     }
 
     if (getArrayBufferByteLength(buffer) === 0) {
       if (isDetachedBuffer(buffer)) {
         return PromiseReject(
-          new TypeError("view's buffer has been detached"),
+          createInvalidStateTypeError("view's buffer has been detached"),
         );
       }
 
       return PromiseReject(
-        new TypeError("view's buffer must have non-zero byteLength"),
+        createInvalidStateTypeError(
+          "view's buffer must have non-zero byteLength",
+        ),
       );
     }
 
@@ -5977,7 +5985,9 @@ class ReadableStreamBYOBRequest {
     );
 
     if (this[_controller] === undefined) {
-      throw new TypeError("This BYOB request has been invalidated");
+      throw createInvalidStateTypeError(
+        "This BYOB request has been invalidated",
+      );
     }
 
     let buffer, byteLength;
@@ -5989,7 +5999,7 @@ class ReadableStreamBYOBRequest {
       byteLength = DataViewPrototypeGetByteLength(this[_view]);
     }
     if (isDetachedBuffer(buffer)) {
-      throw new TypeError(
+      throw createInvalidStateTypeError(
         "The BYOB request's buffer has been detached and so cannot be used as a response",
       );
     }
@@ -6006,7 +6016,9 @@ class ReadableStreamBYOBRequest {
     view = webidl.converters.ArrayBufferView(view, prefix, "Argument 1");
 
     if (this[_controller] === undefined) {
-      throw new TypeError("This BYOB request has been invalidated");
+      throw createInvalidStateTypeError(
+        "This BYOB request has been invalidated",
+      );
     }
 
     let buffer;
@@ -6016,7 +6028,7 @@ class ReadableStreamBYOBRequest {
       buffer = DataViewPrototypeGetBuffer(view);
     }
     if (isDetachedBuffer(buffer)) {
-      throw new TypeError(
+      throw createInvalidStateTypeError(
         "The given view's buffer has been detached and so cannot be used as a response",
       );
     }
