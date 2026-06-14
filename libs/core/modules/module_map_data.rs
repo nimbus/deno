@@ -190,6 +190,10 @@ pub(crate) struct ModuleMapData {
   pub(crate) main_module_callbacks: Vec<v8::Global<v8::Function>>,
   /// The modules we have loaded so far.
   pub(crate) info: Vec<ModuleInfo>,
+  /// One-line named import snippets keyed by referrer module id and original
+  /// specifier. Runtime-only; V8 linkage errors use this for Node-style CJS
+  /// named-export suggestions.
+  pub(crate) one_line_named_imports: HashMap<ModuleId, HashMap<String, String>>,
   /// [`ModuleName`] to [`SymbolicModule`] for modules.
   by_name: ModuleNameTypeMap<SymbolicModule>,
   /// The next ID used for a load.
@@ -275,6 +279,7 @@ impl ModuleMapData {
     handle: v8::Global<v8::Module>,
     main: bool,
     requests: Vec<ModuleRequest>,
+    is_commonjs_wrapper: bool,
   ) -> ModuleId {
     let data = self;
     let id = data.handles.len();
@@ -295,6 +300,7 @@ impl ModuleMapData {
       name: name2,
       requests,
       module_type,
+      is_commonjs_wrapper,
     });
 
     id

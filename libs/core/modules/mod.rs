@@ -784,6 +784,8 @@ pub(crate) struct ModuleInfo {
   pub name: ModuleName,
   pub requests: Vec<ModuleRequest>,
   pub module_type: ModuleType,
+  #[serde(default)]
+  pub is_commonjs_wrapper: bool,
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]

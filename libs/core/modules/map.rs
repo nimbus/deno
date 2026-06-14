@@ -74,11 +74,73 @@ use crate::runtime::exception_state::ExceptionState;
 use crate::source_map::SourceMapper;
 
 const DATA_PREFIX: &str = "data:";
+const CJS_WRAPPER_MARKER: &str = r#"import { createRequire as __internalCreateRequire, Module as __internalModule } from "node:module";"#;
 
 type PrepareLoadFuture =
   dyn Future<Output = (ModuleLoadId, Result<RecursiveModuleLoad, CoreError>)>;
 
 type CodeCacheReadyFuture = dyn Future<Output = ()>;
+
+fn is_commonjs_wrapper_source(source: &str) -> bool {
+  source.starts_with(CJS_WRAPPER_MARKER)
+    && source
+      .contains("const require = __internalCreateRequire(import.meta.url);")
+    && source.contains("export default mod;\n")
+}
+
+fn error_property_to_string<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  value: v8::Local<'s, v8::Value>,
+  property: &str,
+) -> Option<String> {
+  let object: v8::Local<v8::Object> = value.try_into().ok()?;
+  let key = v8::String::new(scope, property)?;
+  let value = object.get(scope, key.into())?;
+  let value: v8::Local<v8::String> = value.try_into().ok()?;
+  Some(value.to_rust_string_lossy(scope))
+}
+
+fn parse_missing_named_export_message(message: &str) -> Option<(&str, &str)> {
+  let rest = message.strip_prefix("The requested module '")?;
+  let (specifier, rest) =
+    rest.split_once("' does not provide an export named '")?;
+  let name = rest.strip_suffix("'")?;
+  Some((specifier, name))
+}
+
+fn one_line_named_imports_from_stack(stack: &str) -> Option<String> {
+  let import_statement = stack.lines().nth(1)?;
+  one_line_named_imports_from_line(import_statement)
+}
+
+fn one_line_named_imports_from_source_at_offset(
+  source: &str,
+  offset: i32,
+) -> Option<String> {
+  let offset = usize::try_from(offset).ok()?;
+  if offset > source.len() {
+    return None;
+  }
+  let line_start = source[..offset]
+    .rfind('\n')
+    .map(|line_start| line_start + 1)
+    .unwrap_or(0);
+  let line_end = source[offset..]
+    .find('\n')
+    .map(|line_len| offset + line_len)
+    .unwrap_or(source.len());
+  one_line_named_imports_from_line(&source[line_start..line_end])
+}
+
+fn one_line_named_imports_from_line(import_statement: &str) -> Option<String> {
+  let start = import_statement.find('{')?;
+  let end = import_statement.rfind('}')?;
+  if end <= start {
+    return None;
+  }
+  let named_imports = &import_statement[start..=end];
+  Some(named_imports.replace(" as ", ": "))
+}
 
 struct ModEvaluate {
   module_map: Rc<ModuleMap>,
@@ -737,6 +799,7 @@ impl ModuleMap {
       handle,
       false,
       vec![],
+      false,
     );
 
     // Synthetic modules have no imports so their instantation must never fail.
@@ -854,6 +917,7 @@ impl ModuleMap {
       handle,
       false,
       vec![],
+      false,
     );
 
     // Synthetic modules have no imports so their instantation must never fail.
@@ -951,6 +1015,8 @@ impl ModuleMap {
 
     let name_str = name.v8_string(scope).unwrap();
     let source_str = source.v8_string(scope).unwrap();
+    let is_commonjs_wrapper = module_type == ModuleType::JavaScript
+      && is_commonjs_wrapper_source(source.as_str());
     let host_defined_options = self
       .loader
       .borrow()
@@ -1070,6 +1136,7 @@ impl ModuleMap {
     let module_requests = module.get_module_requests();
     let requests_len = module_requests.length();
     let mut requests = Vec::with_capacity(requests_len);
+    let mut one_line_named_imports = Vec::new();
     for i in 0..module_requests.length() {
       let module_request = v8::Local::<v8::ModuleRequest>::try_from(
         module_requests.get(tc_scope, i).unwrap(),
@@ -1152,6 +1219,13 @@ impl ModuleMap {
       } else {
         Some(module_request.get_source_offset())
       };
+      let request_one_line_named_imports =
+        referrer_source_offset.and_then(|source_offset| {
+          one_line_named_imports_from_source_at_offset(
+            source.as_str(),
+            source_offset,
+          )
+        });
       if crate::modules::import_graph::is_enabled() {
         crate::modules::import_graph::record_esm_import(
           name.as_ref(),
@@ -1171,17 +1245,34 @@ impl ModuleMap {
           v8::ModuleImportPhase::kDefer => ModuleImportPhase::Defer,
         },
       };
+      if let (Some(specifier_key), Some(named_imports)) =
+        (&request.specifier_key, request_one_line_named_imports)
+      {
+        one_line_named_imports.push((specifier_key.clone(), named_imports));
+      }
       requests.push(request);
     }
 
     let handle = v8::Global::<v8::Module>::new(tc_scope, module);
-    let id = self.data.borrow_mut().create_module_info(
-      name,
-      module_type,
-      handle,
-      main,
-      requests,
-    );
+    let id = {
+      let mut data = self.data.borrow_mut();
+      let id = data.create_module_info(
+        name,
+        module_type,
+        handle,
+        main,
+        requests,
+        is_commonjs_wrapper,
+      );
+      if !one_line_named_imports.is_empty() {
+        data
+          .one_line_named_imports
+          .entry(id)
+          .or_default()
+          .extend(one_line_named_imports);
+      }
+      id
+    };
     Ok(NewModuleResult::Ready(id))
   }
 
@@ -2320,6 +2411,31 @@ impl ModuleMap {
     id: ModuleLoadId,
     exception: v8::Global<v8::Value>,
   ) {
+    self.dynamic_import_reject_inner(scope, id, exception, None);
+  }
+
+  fn dynamic_import_reject_with_root_module(
+    &self,
+    scope: &mut v8::PinScope,
+    id: ModuleLoadId,
+    exception: v8::Global<v8::Value>,
+    root_module_id: ModuleId,
+  ) {
+    self.dynamic_import_reject_inner(
+      scope,
+      id,
+      exception,
+      Some(root_module_id),
+    );
+  }
+
+  fn dynamic_import_reject_inner(
+    &self,
+    scope: &mut v8::PinScope,
+    id: ModuleLoadId,
+    exception: v8::Global<v8::Value>,
+    root_module_id: Option<ModuleId>,
+  ) {
     let resolver_handle = self
       .dynamic_import_map
       .borrow_mut()
@@ -2328,11 +2444,98 @@ impl ModuleMap {
       .resolver;
     let resolver = resolver_handle.open(scope);
 
+    let exception = root_module_id
+      .and_then(|root_module_id| {
+        self.maybe_commonjs_named_export_exception(
+          scope,
+          root_module_id,
+          &exception,
+        )
+      })
+      .unwrap_or(exception);
     let exception = v8::Local::new(scope, exception);
     resolver.reject(scope, exception).unwrap();
     if !JsRealm::state_from_scope(scope).has_tick_scheduled() {
       scope.perform_microtask_checkpoint();
     }
+  }
+
+  fn maybe_commonjs_named_export_exception(
+    &self,
+    scope: &mut v8::PinScope,
+    root_module_id: ModuleId,
+    exception: &v8::Global<v8::Value>,
+  ) -> Option<v8::Global<v8::Value>> {
+    let exception_local = v8::Local::new(scope, exception);
+    let message = error_property_to_string(scope, exception_local, "message")?;
+    let (child_specifier, name) = parse_missing_named_export_message(&message)?;
+    if !self.is_commonjs_wrapper_request(root_module_id, child_specifier) {
+      return None;
+    }
+    let named_imports = self
+      .commonjs_wrapper_request_named_imports(root_module_id, child_specifier);
+    let named_imports = named_imports.or_else(|| {
+      error_property_to_string(scope, exception_local, "stack")
+        .and_then(|stack| one_line_named_imports_from_stack(&stack))
+    });
+    let mut rewritten = format!(
+      "Named export '{name}' not found. The requested module \
+       '{child_specifier}' is a CommonJS module, which may not support \
+       all module.exports as named exports.\nCommonJS modules can always \
+       be imported via the default export, for example using:\n\n\
+       import pkg from '{child_specifier}';\n",
+    );
+    if let Some(named_imports) = named_imports {
+      rewritten.push_str("const ");
+      rewritten.push_str(&named_imports);
+      rewritten.push_str(" = pkg;\n");
+    }
+    let message = v8::String::new(scope, &rewritten)?;
+    let exception = v8::Exception::syntax_error(scope, message);
+    Some(v8::Global::new(scope, exception))
+  }
+
+  fn is_commonjs_wrapper_request(
+    &self,
+    root_module_id: ModuleId,
+    child_specifier: &str,
+  ) -> bool {
+    let data = self.data.borrow();
+    let Some(root_info) = data.info.get(root_module_id) else {
+      return false;
+    };
+    let Some(request) = root_info.requests.iter().find(|request| {
+      request.specifier_key.as_deref() == Some(child_specifier)
+    }) else {
+      return false;
+    };
+    let Some(child_module_id) = data.get_id(
+      request.reference.specifier.as_str(),
+      &request.reference.requested_module_type,
+    ) else {
+      return false;
+    };
+    data
+      .info
+      .get(child_module_id)
+      .map(|info| info.is_commonjs_wrapper)
+      .unwrap_or(false)
+  }
+
+  fn commonjs_wrapper_request_named_imports(
+    &self,
+    root_module_id: ModuleId,
+    child_specifier: &str,
+  ) -> Option<String> {
+    if !self.is_commonjs_wrapper_request(root_module_id, child_specifier) {
+      return None;
+    }
+    self
+      .data
+      .borrow()
+      .one_line_named_imports
+      .get(&root_module_id)
+      .and_then(|imports| imports.get(child_specifier).cloned())
   }
 
   fn module_namespace_for_promise_resolve<'s, 'i>(
@@ -2527,7 +2730,12 @@ impl ModuleMap {
                 load.root_module_id().expect("Root module should be loaded");
               let result = self.instantiate_module(scope, module_id);
               if let Err(exception) = result {
-                self.dynamic_import_reject(scope, dyn_import_id, exception);
+                self.dynamic_import_reject_with_root_module(
+                  scope,
+                  dyn_import_id,
+                  exception,
+                  module_id,
+                );
               }
               self.dynamic_import_module_evaluate(
                 scope,
@@ -2546,7 +2754,12 @@ impl ModuleMap {
                 load.root_module_id().expect("Root module should be loaded");
               let result = self.instantiate_module(scope, module_id);
               if let Err(exception) = result {
-                self.dynamic_import_reject(scope, dyn_import_id, exception);
+                self.dynamic_import_reject_with_root_module(
+                  scope,
+                  dyn_import_id,
+                  exception,
+                  module_id,
+                );
                 continue;
               }
               let module_handle =
