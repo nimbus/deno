@@ -26,7 +26,7 @@ pub enum GenerateKeyError {
     #[inherit]
     SharedError,
   ),
-  #[error("Bad public exponent")]
+  #[error("The publicExponent must be equivalent to an unsigned 32-bit value")]
   BadPublicExponent,
   #[error("Invalid HMAC key length")]
   InvalidHMACKeyLength,

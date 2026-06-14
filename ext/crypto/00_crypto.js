@@ -15,6 +15,7 @@ const {
   op_crypto_derive_bits_x25519,
   op_crypto_derive_bits_x448,
   op_crypto_encrypt,
+  op_crypto_generate_ed448_keypair,
   op_crypto_export_key,
   op_crypto_export_pkcs8_ed448,
   op_crypto_export_pkcs8_ed25519,
@@ -136,6 +137,65 @@ function isNimbusNode22CompatLane() {
   return globalThis.__nimbusNodeCompatLane === "node22";
 }
 
+function hasGenerateKeyRequiredOption(algorithm, name) {
+  return ObjectHasOwn(algorithm, name) && algorithm[name] !== undefined;
+}
+
+function isGenerateKeyMissingRequiredOption(algorithm) {
+  if (algorithm === null || typeof algorithm !== "object") {
+    return false;
+  }
+  switch (algorithm.name) {
+    case "RSASSA-PKCS1-v1_5":
+    case "RSA-PSS":
+    case "RSA-OAEP":
+      return !hasGenerateKeyRequiredOption(algorithm, "modulusLength") ||
+        !hasGenerateKeyRequiredOption(algorithm, "publicExponent") ||
+        !hasGenerateKeyRequiredOption(algorithm, "hash");
+    case "ECDSA":
+    case "ECDH":
+      return !hasGenerateKeyRequiredOption(algorithm, "namedCurve");
+    case "AES-CTR":
+    case "AES-CBC":
+    case "AES-GCM":
+    case "AES-OCB":
+    case "AES-KW":
+      return !hasGenerateKeyRequiredOption(algorithm, "length");
+    case "HMAC":
+      return !hasGenerateKeyRequiredOption(algorithm, "hash");
+    default:
+      return false;
+  }
+}
+
+function isUint8ArrayValue(value) {
+  return isTypedArray(value) &&
+    TypedArrayPrototypeGetSymbolToStringTag(value) === "Uint8Array";
+}
+
+function isGenerateKeyInvalidArgumentTypeOption(algorithm) {
+  if (algorithm === null || typeof algorithm !== "object") {
+    return false;
+  }
+  switch (algorithm.name) {
+    case "RSASSA-PKCS1-v1_5":
+    case "RSA-PSS":
+    case "RSA-OAEP":
+      if (
+        ObjectHasOwn(algorithm, "modulusLength") &&
+        algorithm.modulusLength !== undefined &&
+        typeof algorithm.modulusLength !== "number"
+      ) {
+        return true;
+      }
+      return ObjectHasOwn(algorithm, "publicExponent") &&
+        algorithm.publicExponent !== undefined &&
+        !isUint8ArrayValue(algorithm.publicExponent);
+    default:
+      return false;
+  }
+}
+
 const supportedNamedCurves = ["P-256", "P-384", "P-521"];
 const recognisedUsages = [
   "encrypt",
@@ -211,6 +271,7 @@ const supportedAlgorithms = {
     "X25519": null,
     "X448": null,
     "Ed25519": null,
+    "Ed448": null,
     "ML-KEM-512": null,
     "ML-KEM-768": null,
     "ML-KEM-1024": null,
@@ -2108,15 +2169,30 @@ class SubtleCrypto {
       prefix,
       "Argument 2",
     );
-    keyUsages = webidl.converters["sequence<KeyUsage>"](
-      keyUsages,
-      prefix,
-      "Argument 3",
-    );
+    try {
+      keyUsages = webidl.converters["sequence<KeyUsage>"](
+        keyUsages,
+        prefix,
+        "Argument 3",
+      );
+    } catch (error) {
+      throw tagNodeErrorCode(error, "ERR_INVALID_ARG_TYPE");
+    }
 
     const usages = keyUsages;
 
-    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "generateKey");
+    let normalizedAlgorithm;
+    try {
+      normalizedAlgorithm = normalizeAlgorithm(algorithm, "generateKey");
+    } catch (error) {
+      if (isGenerateKeyMissingRequiredOption(algorithm)) {
+        throw tagNodeErrorCode(error, "ERR_MISSING_OPTION");
+      }
+      if (isGenerateKeyInvalidArgumentTypeOption(algorithm)) {
+        throw tagNodeErrorCode(error, "ERR_INVALID_ARG_TYPE");
+      }
+      throw error;
+    }
     const result = await new Promise((resolve, reject) =>
       PromisePrototypeThen(
         generateKey(
@@ -3302,6 +3378,9 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
     case "AES-CBC":
     case "AES-GCM":
     case "AES-OCB": {
+      if (!ArrayPrototypeIncludes([128, 192, 256], normalizedAlgorithm.length)) {
+        throw new DOMException("Invalid AES key length", "OperationError");
+      }
       // 1.
       if (
         ArrayPrototypeFind(
@@ -3342,6 +3421,9 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
       );
     }
     case "AES-KW": {
+      if (!ArrayPrototypeIncludes([128, 192, 256], normalizedAlgorithm.length)) {
+        throw new DOMException("Invalid AES key length", "OperationError");
+      }
       // 1.
       if (
         ArrayPrototypeFind(
@@ -3475,6 +3557,52 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
       if (
         !op_crypto_generate_ed25519_keypair(privateKeyData, publicKeyData)
       ) {
+        throw new DOMException("Failed to generate key", "OperationError");
+      }
+
+      const handle = {};
+      setKeyData(handle, privateKeyData);
+
+      const publicHandle = {};
+      setKeyData(publicHandle, publicKeyData);
+
+      const algorithm = {
+        name: algorithmName,
+      };
+
+      const publicKey = constructKey(
+        "public",
+        true,
+        usageIntersection(usages, ["verify"]),
+        algorithm,
+        publicHandle,
+      );
+
+      const privateKey = constructKey(
+        "private",
+        extractable,
+        usageIntersection(usages, ["sign"]),
+        algorithm,
+        handle,
+      );
+
+      return { publicKey, privateKey };
+    }
+    case "Ed448": {
+      if (
+        ArrayPrototypeFind(
+          usages,
+          (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
+        ) !== undefined
+      ) {
+        throw new DOMException("Unsupported key usage", "SyntaxError");
+      }
+
+      const ED448_SEED_LEN = 57;
+      const ED448_PUBLIC_KEY_LEN = 57;
+      const privateKeyData = new Uint8Array(ED448_SEED_LEN);
+      const publicKeyData = new Uint8Array(ED448_PUBLIC_KEY_LEN);
+      if (!op_crypto_generate_ed448_keypair(privateKeyData, publicKeyData)) {
         throw new DOMException("Failed to generate key", "OperationError");
       }
 

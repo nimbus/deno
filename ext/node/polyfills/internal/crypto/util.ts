@@ -413,6 +413,14 @@ function toBuf(val: string | Buffer, encoding?: string): Buffer {
   return val;
 }
 
+function bigIntArrayToUnsignedBigInt(input: Uint8Array): bigint {
+  let result = 0n;
+  for (let i = 0; i < input.length; i++) {
+    result = (result << 8n) + BigInt(input[i]);
+  }
+  return result;
+}
+
 const validateByteSource = hideStackFrames((val, name) => {
   val = toBuf(val);
 
@@ -465,6 +473,7 @@ function getOpenSSLSecLevel(): number {
 const kAesKeyLengths = [128, 192, 256];
 
 const _defaultExport = {
+  bigIntArrayToUnsignedBigInt,
   getDefaultEncoding,
   setDefaultEncoding,
   getCiphers,
@@ -482,6 +491,7 @@ const _defaultExport = {
 };
 
 return {
+  bigIntArrayToUnsignedBigInt,
   ellipticCurves,
   getCiphers,
   getHashBlockSize,

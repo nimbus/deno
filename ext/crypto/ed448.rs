@@ -8,6 +8,8 @@ use ed448_goldilocks::SecretKey;
 use ed448_goldilocks::SigningKey;
 use ed448_goldilocks::VerifyingKey;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
+use rand::RngCore;
+use rand::rngs::OsRng;
 use spki::der::Decode;
 use spki::der::Encode;
 use spki::der::asn1::BitString;
@@ -28,6 +30,28 @@ pub enum Ed448Error {
 // id-Ed448 OBJECT IDENTIFIER ::= { 1 3 101 113 }
 pub const ED448_OID: const_oid::ObjectIdentifier =
   const_oid::ObjectIdentifier::new_unwrap("1.3.101.113");
+
+#[op2(fast)]
+pub fn op_crypto_generate_ed448_keypair(
+  #[buffer] pkey: &mut [u8],
+  #[buffer] pubkey: &mut [u8],
+) -> bool {
+  if pkey.len() != 57 || pubkey.len() != 57 {
+    return false;
+  }
+
+  let mut rng = OsRng;
+  rng.fill_bytes(pkey);
+
+  let secret = match SecretKey::try_from(&pkey[..]) {
+    Ok(secret) => secret,
+    Err(_) => return false,
+  };
+  let pair = SigningKey::from(secret);
+  let public_key = pair.verifying_key().to_bytes();
+  pubkey.copy_from_slice(&public_key);
+  true
+}
 
 #[op2(fast)]
 pub fn op_crypto_import_spki_ed448(
