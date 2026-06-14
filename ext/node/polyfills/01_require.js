@@ -2227,7 +2227,10 @@ Module._load = function (request, parent, isMain) {
     throw err;
   }
 
-  if (isMain && parent === null) {
+  if (
+    isMain && parent === null &&
+    pendingCommonJsDynamicImports === 0
+  ) {
     core.processTicksAndRejections();
   }
 
@@ -2615,17 +2618,38 @@ Module.prototype.load = function (filename) {
 // `exports` property.
 const moduleRequireDc = diagnosticsChannel.tracingChannel("module.require");
 const moduleImportDc = diagnosticsChannel.tracingChannel("module.import");
+let pendingCommonJsDynamicImports = 0;
 
 function traceDynamicModuleImport(parentURL, loader, ...args) {
-  if (!moduleImportDc.hasSubscribers) {
-    return loader(...args);
+  pendingCommonJsDynamicImports++;
+  core.deferNextTickDrain();
+  let promise;
+  try {
+    promise = moduleImportDc.hasSubscribers
+      ? moduleImportDc.tracePromise(() => loader(...args), {
+        __proto__: null,
+        parentURL,
+        url: args[0],
+      })
+      : loader(...args);
+  } catch (error) {
+    pendingCommonJsDynamicImports--;
+    core.resumeNextTickDrain();
+    throw error;
   }
 
-  return moduleImportDc.tracePromise(() => loader(...args), {
-    __proto__: null,
-    parentURL,
-    url: args[0],
-  });
+  PromisePrototypeThen(
+    promise,
+    () => {
+      pendingCommonJsDynamicImports--;
+      core.resumeNextTickDrain();
+    },
+    () => {
+      pendingCommonJsDynamicImports--;
+      core.resumeNextTickDrain();
+    },
+  );
+  return promise;
 }
 
 ObjectDefineProperty(globalThis, "__denoNodeTraceModuleImport", {

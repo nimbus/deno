@@ -346,6 +346,18 @@
     tickInfo[kHasTickScheduled] = value ? 1 : 0;
   }
 
+  let nextTickDrainDeferrals = 0;
+
+  function deferNextTickDrain() {
+    nextTickDrainDeferrals++;
+  }
+
+  function resumeNextTickDrain() {
+    if (nextTickDrainDeferrals > 0) {
+      nextTickDrainDeferrals--;
+    }
+  }
+
   // Enqueue a tick object. The object must have { callback, args } and
   // an async context snapshot. It may contain additional fields for
   // async hooks (asyncId, triggerAsyncId).
@@ -473,6 +485,12 @@
     if (!hasTickScheduled() && !hasRejectionToWarn()) {
       op_run_microtasks();
       if (!hasTickScheduled() && !hasRejectionToWarn()) {
+        return;
+      }
+    }
+    if (nextTickDrainDeferrals > 0) {
+      op_run_microtasks();
+      if (nextTickDrainDeferrals > 0) {
         return;
       }
     }
@@ -1158,6 +1176,8 @@
     queueNextTick,
     processTicksAndRejections,
     runNextTicks,
+    deferNextTickDrain,
+    resumeNextTickDrain,
     setAsyncHooksEmit,
     queueImmediate,
     queueMicrotask,
