@@ -3395,6 +3395,16 @@ function _throwRequireAsyncModule(specifier, module) {
   throw new internalErrors.ERR_REQUIRE_ASYNC_MODULE(specifier, parent);
 }
 
+function _throwRequireESMRaceCondition(specifier, module) {
+  const parentModule = module ? moduleParentCache.get(module) : undefined;
+  const parent = parentModule?.filename ?? "<unknown>";
+  throw new internalErrors.ERR_REQUIRE_ESM_RACE_CONDITION(
+    specifier,
+    parent,
+    false,
+  );
+}
+
 const REQUIRE_ESM_FORMATTED_STACK_RE =
   /^(Error|TypeError|ReferenceError|RangeError|SyntaxError|URIError): ([^\n]*)\n\s+at /;
 
@@ -3451,6 +3461,12 @@ function loadESMFromCJS(
       )
     ) {
       _throwRequireAsyncModule(specifier, module);
+    }
+    if (
+      e instanceof Error &&
+      StringPrototypeIncludes(e.message, "because it is not yet fully loaded")
+    ) {
+      _throwRequireESMRaceCondition(specifier, module);
     }
     throw normalizeRequireESMThrownError(e);
   }

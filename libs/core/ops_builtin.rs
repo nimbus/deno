@@ -785,6 +785,17 @@ fn import_sync<'s, 'i>(
     return Err(CoreErrorKind::TLA.into_box());
   }
 
+  if module_map_rc.has_pending_dynamic_imports()
+    && module.get_status() != v8::ModuleStatus::Evaluated
+  {
+    return Err(
+      JsErrorBox::generic(format!(
+        "Cannot require() ES Module {specifier} because it is not yet fully loaded."
+      ))
+      .into(),
+    );
+  }
+
   match module.get_status() {
     v8::ModuleStatus::Uninstantiated
     | v8::ModuleStatus::Instantiating

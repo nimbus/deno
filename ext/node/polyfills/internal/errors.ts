@@ -2175,6 +2175,31 @@ class ERR_REQUIRE_CYCLE_MODULE extends NodeError {
     this.toString = nodeErrorToStringWithEmbeddedCode;
   }
 }
+class ERR_REQUIRE_ESM_RACE_CONDITION extends NodeError {
+  constructor(
+    filename: string,
+    parentFilename: string,
+    isForAsyncLoaderHookWorker = false,
+  ) {
+    let raceMessage =
+      `Cannot require() ES Module ${filename} because it is not yet fully loaded.\n`;
+    raceMessage +=
+      "This may be caused by a race condition if the module is simultaneously dynamically ";
+    raceMessage += "import()-ed via Promise.all().\n";
+    raceMessage +=
+      "Try await-ing the import() sequentially in a loop instead.\n";
+    raceMessage +=
+      ` (From ${parentFilename ? `${parentFilename} in ` : " "}`;
+    raceMessage += `${
+      isForAsyncLoaderHookWorker
+        ? "loader hook worker thread"
+        : "non-loader-hook thread"
+    })`;
+    super("ERR_REQUIRE_ESM_RACE_CONDITION", raceMessage);
+    this.name = `Error [${this.code}]`;
+    this.toString = nodeErrorToStringWithEmbeddedCode;
+  }
+}
 function nodeErrorToStringWithEmbeddedCode(this: NodeErrorAbstraction) {
   return `${this.name}: ${this.message}`;
 }
@@ -3596,6 +3621,7 @@ return {
   ERR_QUIC_TLS13_REQUIRED,
   ERR_REQUIRE_ASYNC_MODULE,
   ERR_REQUIRE_CYCLE_MODULE,
+  ERR_REQUIRE_ESM_RACE_CONDITION,
   ERR_SCRIPT_EXECUTION_INTERRUPTED,
   ERR_SERVER_ALREADY_LISTEN,
   ERR_SERVER_NOT_RUNNING,
@@ -3915,6 +3941,7 @@ return {
     ERR_QUIC_TLS13_REQUIRED,
     ERR_REQUIRE_ASYNC_MODULE,
     ERR_REQUIRE_CYCLE_MODULE,
+    ERR_REQUIRE_ESM_RACE_CONDITION,
     ERR_SCRIPT_EXECUTION_INTERRUPTED,
     ERR_SERVER_ALREADY_LISTEN,
     ERR_SERVER_NOT_RUNNING,
