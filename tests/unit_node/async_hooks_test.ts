@@ -8,6 +8,7 @@ import {
 } from "node:async_hooks";
 import process from "node:process";
 import { clearImmediate, setImmediate } from "node:timers";
+import * as v8 from "node:v8";
 import { assert, assertEquals } from "@std/assert";
 
 Deno.test(async function foo() {
@@ -209,6 +210,54 @@ Deno.test(function runInAsyncScopeFiresBeforeAndAfter() {
     hook.disable();
   }
   assertEquals(events, ["before", "fn", "after"]);
+});
+
+Deno.test(function promiseInitKeepsUserCreatedPromiseInsideHookVisible() {
+  let createdNestedPromise = false;
+  let promiseInitCount = 0;
+  const hook = createHook({
+    init(_asyncId, type) {
+      if (type !== "PROMISE") {
+        return;
+      }
+      promiseInitCount++;
+      if (!createdNestedPromise) {
+        createdNestedPromise = true;
+        Promise.resolve();
+      }
+    },
+  });
+
+  hook.enable();
+  try {
+    Promise.resolve();
+  } finally {
+    hook.disable();
+  }
+
+  assertEquals(promiseInitCount, 2);
+});
+
+Deno.test(function heapSnapshotInsidePromiseInitDoesNotAddVisiblePromise() {
+  let promiseInitCount = 0;
+  const hook = createHook({
+    init(_asyncId, type) {
+      if (type !== "PROMISE") {
+        return;
+      }
+      promiseInitCount++;
+      v8.getHeapSnapshot().resume();
+    },
+  });
+
+  hook.enable();
+  try {
+    Promise.resolve().then(() => {});
+  } finally {
+    hook.disable();
+  }
+
+  assertEquals(promiseInitCount, 2);
 });
 
 Deno.test(function clearImmediateEmitsDestroy() {

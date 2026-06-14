@@ -19,12 +19,14 @@ const {
   ArrayPrototypePop,
   ArrayPrototypeSlice,
   ArrayPrototypeSplice,
+  Error,
   FunctionPrototypeApply,
   ObjectKeys,
   SafeFinalizationRegistry,
   SafeSet,
   SafeWeakMap,
   SafeWeakSet,
+  StringPrototypeSplit,
   Symbol,
 } = primordials;
 const {
@@ -224,6 +226,23 @@ function normalizeHookThrow(e: unknown): unknown {
 function isStackOverflow(e: any): boolean {
   return e instanceof RangeError &&
     e.message === "Maximum call stack size exceeded";
+}
+
+// V8 can surface native, parentless promises created by embedder work. Node
+// does not expose those implementation promises to user hooks (for example,
+// taking a heap snapshot in a promise init hook). Keep real user-created
+// promises visible: they carry JS creation frames in the stack even when
+// created recursively inside a hook.
+// deno-lint-ignore no-explicit-any
+function isNativeRootPromise(parent: any): boolean {
+  if (parent != null) {
+    return false;
+  }
+  const stack = new Error().stack;
+  if (typeof stack !== "string") {
+    return false;
+  }
+  return StringPrototypeSplit(stack, "\n").length <= 3;
 }
 
 // Emit functions that work with the internal hook system
@@ -767,7 +786,10 @@ function trackPromise(
 
 // deno-lint-ignore no-explicit-any
 function promiseInitHook(promise: any, parent: any): void {
-  if (isPromiseHooksSuppressed()) {
+  if (
+    isPromiseHooksSuppressed() ||
+    isNativeRootPromise(parent)
+  ) {
     // This promise was created by deno_core infrastructure (async-op
     // wrapper, etc.); user code never observes it directly so we skip
     // tracking and firing any of the four async_hooks callbacks for it.
