@@ -966,7 +966,9 @@ class SubtleCrypto {
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
       throw new DOMException(
-        `Encryption algorithm '${normalizedAlgorithm.name}' does not match key algorithm`,
+        isNimbusNode22CompatLane()
+          ? "The requested operation is not valid for the provided key"
+          : "Key algorithm mismatch",
         "InvalidAccessError",
       );
     }
@@ -974,7 +976,9 @@ class SubtleCrypto {
     // 9.
     if (!ArrayPrototypeIncludes(key[_usages], "encrypt")) {
       throw new DOMException(
-        "The requested operation is not valid for the provided key",
+        isNimbusNode22CompatLane()
+          ? "The requested operation is not valid for the provided key"
+          : "Unable to use this key to encrypt",
         "InvalidAccessError",
       );
     }
@@ -1011,15 +1015,19 @@ class SubtleCrypto {
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
       throw new DOMException(
-        `Decryption algorithm "${normalizedAlgorithm.name}" does not match key algorithm`,
-        "OperationError",
+        isNimbusNode22CompatLane()
+          ? "The requested operation is not valid for the provided key"
+          : "Key algorithm mismatch",
+        "InvalidAccessError",
       );
     }
 
     // 9.
     if (!ArrayPrototypeIncludes(key[_usages], "decrypt")) {
       throw new DOMException(
-        "The requested operation is not valid for the provided key",
+        isNimbusNode22CompatLane()
+          ? "The requested operation is not valid for the provided key"
+          : "Unable to use this key to decrypt",
         "InvalidAccessError",
       );
     }
@@ -1060,7 +1068,9 @@ class SubtleCrypto {
         // 1.
         if (TypedArrayPrototypeGetByteLength(normalizedAlgorithm.iv) !== 16) {
           throw new DOMException(
-            "Counter must be 16 bytes",
+            isNimbusNode22CompatLane()
+              ? "Counter must be 16 bytes"
+              : "algorithm.iv must contain exactly 16 bytes",
             "OperationError",
           );
         }
@@ -1082,7 +1092,9 @@ class SubtleCrypto {
           TypedArrayPrototypeGetByteLength(normalizedAlgorithm.counter) !== 16
         ) {
           throw new DOMException(
-            "Counter vector must be 16 bytes",
+            isNimbusNode22CompatLane()
+              ? "Counter vector must be 16 bytes"
+              : "algorithm.iv must contain exactly 16 bytes",
             "OperationError",
           );
         }
@@ -1122,7 +1134,7 @@ class SubtleCrypto {
           )
         ) {
           throw new DOMException(
-            `Invalid tag length: ${normalizedAlgorithm.tagLength}`,
+            `${normalizedAlgorithm.tagLength} is not a valid ${normalizedAlgorithm.name} tag length`,
             "OperationError",
           );
         }
@@ -1138,10 +1150,10 @@ class SubtleCrypto {
           );
         }
 
-        // 3. We only support 96-bit and 128-bit nonce for GCM, 1-15 bytes for OCB
+        // 3. AES-GCM permits variable-length nonces; AES-OCB permits up to 15.
         const ivLen = TypedArrayPrototypeGetByteLength(normalizedAlgorithm.iv);
         if (algorithm.name === "AES-GCM") {
-          if (!ArrayPrototypeIncludes([12, 16], ivLen)) {
+          if (ivLen === 0) {
             throw new DOMException(
               "Initialization vector length not supported",
               "NotSupportedError",
@@ -1156,7 +1168,7 @@ class SubtleCrypto {
             )
           ) {
             throw new DOMException(
-              `Invalid tag length: ${normalizedAlgorithm.tagLength}`,
+              `${normalizedAlgorithm.tagLength} is not a valid ${normalizedAlgorithm.name} tag length`,
               "OperationError",
             );
           }
@@ -8100,7 +8112,9 @@ async function encrypt(normalizedAlgorithm, key, data) {
       // 1.
       if (TypedArrayPrototypeGetByteLength(normalizedAlgorithm.iv) !== 16) {
         throw new DOMException(
-          "Initialization vector must be 16 bytes",
+          isNimbusNode22CompatLane()
+            ? "Initialization vector must be 16 bytes"
+            : "algorithm.iv must contain exactly 16 bytes",
           "OperationError",
         );
       }
@@ -8123,7 +8137,9 @@ async function encrypt(normalizedAlgorithm, key, data) {
         TypedArrayPrototypeGetByteLength(normalizedAlgorithm.counter) !== 16
       ) {
         throw new DOMException(
-          "Counter vector must be 16 bytes",
+          isNimbusNode22CompatLane()
+            ? "Counter vector must be 16 bytes"
+            : "algorithm.iv must contain exactly 16 bytes",
           "OperationError",
         );
       }
@@ -8195,7 +8211,7 @@ async function encrypt(normalizedAlgorithm, key, data) {
         )
       ) {
         throw new DOMException(
-          `Invalid tag length: ${normalizedAlgorithm.tagLength}`,
+          `${normalizedAlgorithm.tagLength} is not a valid ${normalizedAlgorithm.name} tag length`,
           "OperationError",
         );
       }
@@ -8246,7 +8262,7 @@ async function encrypt(normalizedAlgorithm, key, data) {
         !ArrayPrototypeIncludes([64, 96, 128], normalizedAlgorithm.tagLength)
       ) {
         throw new DOMException(
-          `Invalid tag length: ${normalizedAlgorithm.tagLength}`,
+          `${normalizedAlgorithm.tagLength} is not a valid ${normalizedAlgorithm.name} tag length`,
           "OperationError",
         );
       }
