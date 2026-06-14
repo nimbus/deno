@@ -895,6 +895,9 @@ if (import.meta.main) {
       builder.append(&quoted_entry_specifier_text);
       builder.append(r#");
 }
+const __deno_cjs_exports__ = __internalModule._getCjsEsmExportsSnapshot?.("#);
+      builder.append(&quoted_entry_specifier_text);
+      builder.append(r#", mod) ?? mod;
 "#);
 
       for (export_name, quoted_name) in &export_names_with_quoted {
@@ -904,7 +907,7 @@ if (import.meta.main) {
             export_name,
             quoted_name,
             |builder| {
-              builder.append("mod[");
+              builder.append("__deno_cjs_exports__[");
               builder.append(quoted_name);
               builder.append("]");
             },
@@ -913,13 +916,13 @@ if (import.meta.main) {
         }
       }
 
-      builder.append("export default mod;\n");
+      builder.append("export default __deno_cjs_exports__;\n");
       if include_module_exports {
         add_export(
           builder,
           "module.exports",
           "\"module.exports\"",
-          |builder| builder.append("mod"),
+          |builder| builder.append("__deno_cjs_exports__"),
           &mut temp_var_count,
         );
       }
@@ -1005,16 +1008,17 @@ if (import.meta.main) {
 } else {
   mod = require("/test/test.ts");
 }
-const __deno_export_1__ = mod["3d"];
+const __deno_cjs_exports__ = __internalModule._getCjsEsmExportsSnapshot?.("/test/test.ts", mod) ?? mod;
+const __deno_export_1__ = __deno_cjs_exports__["3d"];
 export { __deno_export_1__ as "3d" };
-export const app = mod["app"];
-const __deno_export_2__ = mod["dashed-export"];
+export const app = __deno_cjs_exports__["app"];
+const __deno_export_2__ = __deno_cjs_exports__["dashed-export"];
 export { __deno_export_2__ as "dashed-export" };
-export const server = mod["server"];
-const __deno_export_3__ = mod["static"];
+export const server = __deno_cjs_exports__["server"];
+const __deno_export_3__ = __deno_cjs_exports__["static"];
 export { __deno_export_3__ as "static" };
-export default mod;
-const __deno_export_4__ = mod;
+export default __deno_cjs_exports__;
+const __deno_export_4__ = __deno_cjs_exports__;
 export { __deno_export_4__ as "module.exports" };
 "#
     );
@@ -1037,15 +1041,16 @@ if (import.meta.main) {
 } else {
   mod = require("/test/test.ts");
 }
-const __deno_export_1__ = mod["3d"];
+const __deno_cjs_exports__ = __internalModule._getCjsEsmExportsSnapshot?.("/test/test.ts", mod) ?? mod;
+const __deno_export_1__ = __deno_cjs_exports__["3d"];
 export { __deno_export_1__ as "3d" };
-export const app = mod["app"];
-const __deno_export_2__ = mod["dashed-export"];
+export const app = __deno_cjs_exports__["app"];
+const __deno_export_2__ = __deno_cjs_exports__["dashed-export"];
 export { __deno_export_2__ as "dashed-export" };
-export const server = mod["server"];
-const __deno_export_3__ = mod["static"];
+export const server = __deno_cjs_exports__["server"];
+const __deno_export_3__ = __deno_cjs_exports__["static"];
 export { __deno_export_3__ as "static" };
-export default mod;
+export default __deno_cjs_exports__;
 "#
     );
   }

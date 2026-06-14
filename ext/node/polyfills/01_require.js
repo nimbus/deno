@@ -303,6 +303,9 @@ const { getOptionValue } = internalOptions;
 const nativeModuleExports = ObjectCreate(null);
 const builtinModules = [];
 const cjsHookedBuiltinModuleSymbol = Symbol("deno.node.cjsHookedBuiltinModule");
+const cjsEsmExportsSnapshotSymbol = Symbol(
+  "deno.node.cjsEsmExportsSnapshot",
+);
 
 // Modules installed as lazy getters on `nativeModuleExports`. Each value is
 // a `() => exports` thunk that's only invoked the first time the require name
@@ -1640,6 +1643,27 @@ Module._pathCache = ObjectCreate(null);
 let modulePaths = [];
 Module.globalPaths = modulePaths;
 
+function snapshotCjsExportsForEsm(module) {
+  if (!ObjectHasOwn(module, cjsEsmExportsSnapshotSymbol)) {
+    ObjectDefineProperty(module, cjsEsmExportsSnapshotSymbol, {
+      __proto__: null,
+      configurable: true,
+      value: module.exports,
+    });
+  }
+}
+
+Module._getCjsEsmExportsSnapshot = function (filename, fallback) {
+  const module = Module._cache[filename];
+  if (
+    module !== undefined &&
+    ObjectHasOwn(module, cjsEsmExportsSnapshotSymbol)
+  ) {
+    return module[cjsEsmExportsSnapshotSymbol];
+  }
+  return fallback;
+};
+
 ObjectDefineProperty(Module, "_stat", {
   __proto__: null,
   configurable: true,
@@ -2149,6 +2173,7 @@ Module._load = function (request, parent, isMain) {
   try {
     try {
       module.load(filename);
+      snapshotCjsExportsForEsm(module);
       threw = false;
     } finally {
       if (threw) {
