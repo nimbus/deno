@@ -96,6 +96,7 @@ const {
   StringFromCharCode,
   StringPrototypeCharCodeAt,
   StringPrototypeRepeat,
+  StringPrototypeSubstring,
   StringPrototypeToLowerCase,
   StringPrototypeToUpperCase,
   Symbol,
@@ -228,9 +229,12 @@ const simpleAlgorithmDictionaries = {
   RsaHashedKeyGenParams: { hash: "HashAlgorithmIdentifier" },
   EcKeyGenParams: {},
   HmacKeyGenParams: { hash: "HashAlgorithmIdentifier" },
+  KmacKeyGenParams: {},
+  KmacSignParams: { customization: "BufferSource" },
   RsaPssParams: {},
   EcdsaParams: { hash: "HashAlgorithmIdentifier" },
   HmacImportParams: { hash: "HashAlgorithmIdentifier" },
+  KmacImportParams: {},
   HkdfParams: {
     hash: "HashAlgorithmIdentifier",
     salt: "BufferSource",
@@ -278,6 +282,8 @@ const supportedAlgorithms = {
     "AES-OCB": "AesKeyGenParams",
     "AES-KW": "AesKeyGenParams",
     "HMAC": "HmacKeyGenParams",
+    "KMAC128": "KmacKeyGenParams",
+    "KMAC256": "KmacKeyGenParams",
     "ChaCha20-Poly1305": null,
     "X25519": null,
     "X448": null,
@@ -295,6 +301,8 @@ const supportedAlgorithms = {
     "RSA-PSS": "RsaPssParams",
     "ECDSA": "EcdsaParams",
     "HMAC": null,
+    "KMAC128": "KmacSignParams",
+    "KMAC256": "KmacSignParams",
     "Ed25519": null,
     "ML-DSA-44": "MlDsaParams",
     "ML-DSA-65": "MlDsaParams",
@@ -305,6 +313,8 @@ const supportedAlgorithms = {
     "RSA-PSS": "RsaPssParams",
     "ECDSA": "EcdsaParams",
     "HMAC": null,
+    "KMAC128": "KmacSignParams",
+    "KMAC256": "KmacSignParams",
     "Ed25519": null,
     "ML-DSA-44": "MlDsaParams",
     "ML-DSA-65": "MlDsaParams",
@@ -317,6 +327,8 @@ const supportedAlgorithms = {
     "ECDSA": "EcKeyImportParams",
     "ECDH": "EcKeyImportParams",
     "HMAC": "HmacImportParams",
+    "KMAC128": "KmacImportParams",
+    "KMAC256": "KmacImportParams",
     "HKDF": null,
     "PBKDF2": null,
     "AES-CTR": null,
@@ -376,6 +388,8 @@ const supportedAlgorithms = {
     "AES-OCB": "AesDerivedKeyParams",
     "AES-KW": "AesDerivedKeyParams",
     "HMAC": "HmacImportParams",
+    "KMAC128": "KmacImportParams",
+    "KMAC256": "KmacImportParams",
     "ChaCha20-Poly1305": null,
     "HKDF": null,
     "PBKDF2": null,
@@ -654,8 +668,8 @@ core.registerCloneableResource("CryptoKey", (data) => {
  */
 function usageIntersection(a, b) {
   return ArrayPrototypeFilter(
-    a,
-    (i) => ArrayPrototypeIncludes(b, i),
+    b,
+    (i) => ArrayPrototypeIncludes(a, i),
   );
 }
 
@@ -837,6 +851,10 @@ function getKeyLength(algorithm) {
       // 2.
       return length;
     }
+    case "KMAC128":
+    case "KMAC256": {
+      return getKmacKeyLength(algorithm);
+    }
     case "ChaCha20-Poly1305": {
       // ChaCha20-Poly1305 keys are always 256 bits.
       return 256;
@@ -852,6 +870,28 @@ function getKeyLength(algorithm) {
     default:
       throw new TypeError("Unreachable");
   }
+}
+
+function getKmacDefaultLength(name) {
+  return name === "KMAC128" ? 128 : 256;
+}
+
+function getKmacKeyLength(algorithm) {
+  if (algorithm.length === undefined) {
+    return getKmacDefaultLength(algorithm.name);
+  }
+  if (algorithm.length === 0 || algorithm.length % 8 !== 0) {
+    throw new DOMException("Invalid length", "OperationError");
+  }
+  return algorithm.length;
+}
+
+function getKmacOutputLength(algorithm) {
+  const outputLength = algorithm.outputLength ?? 256;
+  if (outputLength === 0 || outputLength % 8 !== 0) {
+    throw new DOMException("Invalid outputLength", "OperationError");
+  }
+  return outputLength;
 }
 
 class SubtleCrypto {
@@ -1285,6 +1325,15 @@ class SubtleCrypto {
 
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
+      if (
+        normalizedAlgorithm.name === "KMAC128" ||
+        normalizedAlgorithm.name === "KMAC256"
+      ) {
+        throw new DOMException(
+          "Key algorithm mismatch",
+          "InvalidAccessError",
+        );
+      }
       throw new DOMException(
         "Signing algorithm does not match key algorithm",
         "InvalidAccessError",
@@ -1293,6 +1342,15 @@ class SubtleCrypto {
 
     // 9.
     if (!ArrayPrototypeIncludes(key[_usages], "sign")) {
+      if (
+        normalizedAlgorithm.name === "KMAC128" ||
+        normalizedAlgorithm.name === "KMAC256"
+      ) {
+        throw new DOMException(
+          "Unable to use this key to sign",
+          "InvalidAccessError",
+        );
+      }
       throw new DOMException(
         "The requested operation is not valid for the provided key",
         "InvalidAccessError",
@@ -1371,6 +1429,16 @@ class SubtleCrypto {
 
         return TypedArrayPrototypeGetBuffer(signature);
       }
+      case "KMAC128":
+      case "KMAC256": {
+        const signature = await op_crypto_sign_key(handle.cppgc, {
+          algorithm: normalizedAlgorithm.name,
+          outputLength: getKmacOutputLength(normalizedAlgorithm),
+          customization: normalizedAlgorithm.customization ?? null,
+        }, data);
+
+        return TypedArrayPrototypeGetBuffer(signature);
+      }
       case "Ed25519": {
         // 1.
         if (key[_type] !== "private") {
@@ -1426,7 +1494,11 @@ class SubtleCrypto {
   async importKey(format, keyData, algorithm, extractable, keyUsages) {
     webidl.assertBranded(this, SubtleCryptoPrototype);
     const prefix = "Failed to execute 'importKey' on 'SubtleCrypto'";
-    webidl.requiredArguments(arguments.length, 4, prefix);
+    try {
+      webidl.requiredArguments(arguments.length, 5, prefix);
+    } catch (error) {
+      throw tagNodeErrorCode(error, "ERR_MISSING_ARGS");
+    }
     try {
       format = webidl.converters.KeyFormat(format, prefix, "Argument 1");
     } catch (error) {
@@ -1537,6 +1609,11 @@ class SubtleCrypto {
     switch (algorithmName) {
       case "HMAC": {
         result = exportKeyHMAC(format, key, innerKey);
+        break;
+      }
+      case "KMAC128":
+      case "KMAC256": {
+        result = exportKeyKMAC(format, key, innerKey);
         break;
       }
       case "RSASSA-PKCS1-v1_5":
@@ -1790,6 +1867,15 @@ class SubtleCrypto {
     const handle = key[_handle];
 
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
+      if (
+        normalizedAlgorithm.name === "KMAC128" ||
+        normalizedAlgorithm.name === "KMAC256"
+      ) {
+        throw new DOMException(
+          "Key algorithm mismatch",
+          "InvalidAccessError",
+        );
+      }
       throw new DOMException(
         "Verifying algorithm does not match key algorithm",
         "InvalidAccessError",
@@ -1797,6 +1883,15 @@ class SubtleCrypto {
     }
 
     if (!ArrayPrototypeIncludes(key[_usages], "verify")) {
+      if (
+        normalizedAlgorithm.name === "KMAC128" ||
+        normalizedAlgorithm.name === "KMAC256"
+      ) {
+        throw new DOMException(
+          "Unable to use this key to verify",
+          "InvalidAccessError",
+        );
+      }
       throw new DOMException(
         "The requested operation is not valid for the provided key",
         "InvalidAccessError",
@@ -1840,6 +1935,15 @@ class SubtleCrypto {
         return await op_crypto_verify_key(handle.cppgc, {
           algorithm: "HMAC",
           hash,
+          signature,
+        }, data);
+      }
+      case "KMAC128":
+      case "KMAC256": {
+        return await op_crypto_verify_key(handle.cppgc, {
+          algorithm: normalizedAlgorithm.name,
+          outputLength: getKmacOutputLength(normalizedAlgorithm),
+          customization: normalizedAlgorithm.customization ?? null,
           signature,
         }, data);
       }
@@ -3205,7 +3309,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
       const algorithm = {
         name: algorithmName,
         modulusLength: normalizedAlgorithm.modulusLength,
-        publicExponent: normalizedAlgorithm.publicExponent,
+        publicExponent: copyBuffer(normalizedAlgorithm.publicExponent),
         hash: normalizedAlgorithm.hash,
       };
 
@@ -3264,7 +3368,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
       const algorithm = {
         name: algorithmName,
         modulusLength: normalizedAlgorithm.modulusLength,
-        publicExponent: normalizedAlgorithm.publicExponent,
+        publicExponent: copyBuffer(normalizedAlgorithm.publicExponent),
         hash: normalizedAlgorithm.hash,
       };
 
@@ -3450,7 +3554,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
       return constructKey(
         "secret",
         extractable,
-        usages,
+        usageIntersection(usages, ["encrypt", "decrypt", "wrapKey", "unwrapKey"]),
         algorithm,
         handle,
       );
@@ -3487,7 +3591,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
       return constructKey(
         "secret",
         extractable,
-        usages,
+        usageIntersection(usages, ["wrapKey", "unwrapKey"]),
         algorithm,
         handle,
       );
@@ -3755,7 +3859,40 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
       return constructKey(
         "secret",
         extractable,
-        usages,
+        usageIntersection(usages, ["encrypt", "decrypt", "wrapKey", "unwrapKey"]),
+        algorithm,
+        handle,
+      );
+    }
+    case "KMAC128":
+    case "KMAC256": {
+      if (
+        ArrayPrototypeFind(
+          usages,
+          (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
+        ) !== undefined
+      ) {
+        throw new DOMException("Unsupported key usage", "SyntaxError");
+      }
+
+      const length = getKmacKeyLength(normalizedAlgorithm);
+      const keyData = new Uint8Array(length / 8);
+      op_crypto_get_random_values(keyData);
+      const handle = {};
+      setKeyData(handle, {
+        type: "secret",
+        data: keyData,
+      });
+
+      const algorithm = {
+        name: algorithmName,
+        length,
+      };
+
+      return constructKey(
+        "secret",
+        extractable,
+        usageIntersection(usages, ["sign", "verify"]),
         algorithm,
         handle,
       );
@@ -3806,7 +3943,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
       const key = constructKey(
         "secret",
         extractable,
-        usages,
+        usageIntersection(usages, ["sign", "verify"]),
         algorithm,
         handle,
       );
@@ -5684,7 +5821,7 @@ function importKeyHMAC(
         case "SHA-1": {
           if (jwk.alg !== undefined && jwk.alg !== "HS1") {
             throw new DOMException(
-              "'alg' property of JsonWebKey must be 'HS1'",
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
           }
@@ -5693,7 +5830,7 @@ function importKeyHMAC(
         case "SHA-256": {
           if (jwk.alg !== undefined && jwk.alg !== "HS256") {
             throw new DOMException(
-              "'alg' property of JsonWebKey must be 'HS256'",
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
           }
@@ -5702,7 +5839,7 @@ function importKeyHMAC(
         case "SHA-384": {
           if (jwk.alg !== undefined && jwk.alg !== "HS384") {
             throw new DOMException(
-              "'alg' property of JsonWebKey must be 'HS384'",
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
           }
@@ -5711,7 +5848,7 @@ function importKeyHMAC(
         case "SHA-512": {
           if (jwk.alg !== undefined && jwk.alg !== "HS512") {
             throw new DOMException(
-              "'alg' property of JsonWebKey must be 'HS512'",
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
           }
@@ -5720,7 +5857,7 @@ function importKeyHMAC(
         case "SHA3-256": {
           if (jwk.alg !== undefined && jwk.alg !== "HS3-256") {
             throw new DOMException(
-              "'alg' property of JsonWebKey must be 'HS3-256'",
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
           }
@@ -5729,7 +5866,7 @@ function importKeyHMAC(
         case "SHA3-384": {
           if (jwk.alg !== undefined && jwk.alg !== "HS3-384") {
             throw new DOMException(
-              "'alg' property of JsonWebKey must be 'HS3-384'",
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
           }
@@ -5738,7 +5875,7 @@ function importKeyHMAC(
         case "SHA3-512": {
           if (jwk.alg !== undefined && jwk.alg !== "HS3-512") {
             throw new DOMException(
-              "'alg' property of JsonWebKey must be 'HS3-512'",
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
           }
@@ -5861,6 +5998,141 @@ function importKeyHMAC(
   );
 
   return key;
+}
+
+function importKeyKMAC(
+  format,
+  normalizedAlgorithm,
+  keyData,
+  extractable,
+  keyUsages,
+) {
+  const algorithmName = normalizedAlgorithm.name;
+  if (
+    ArrayPrototypeFind(
+      keyUsages,
+      (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
+    ) !== undefined
+  ) {
+    throw new DOMException("Unsupported key usage", "SyntaxError");
+  }
+
+  let data;
+  switch (format) {
+    case "raw-secret": {
+      data = keyData;
+      break;
+    }
+    case "raw": {
+      throw new DOMException(
+        `Unable to import ${algorithmName} using raw format`,
+        "NotSupportedError",
+      );
+    }
+    case "jwk": {
+      const jwk = keyData;
+      if (jwk.kty !== "oct") {
+        throw new DOMException(
+          "'kty' property of JsonWebKey must be 'oct'",
+          "DataError",
+        );
+      }
+      if (jwk.k === undefined) {
+        throw new DOMException(
+          "'k' property of JsonWebKey must be present",
+          "DataError",
+        );
+      }
+      const expectedAlg = `K${StringPrototypeSubstring(algorithmName, 4)}`;
+      if (jwk.alg !== undefined && jwk.alg !== expectedAlg) {
+        throw new DOMException(
+          'JWK "alg" does not match the requested algorithm',
+          "DataError",
+        );
+      }
+      const { rawData } = op_crypto_import_key(
+        { algorithm: "HMAC" },
+        { jwkSecret: jwk },
+      );
+      data = rawData.data;
+
+      if (
+        keyUsages.length > 0 && jwk.use !== undefined && jwk.use !== "sig"
+      ) {
+        throw new DOMException(
+          "'use' property of JsonWebKey must be 'sig'",
+          "DataError",
+        );
+      }
+
+      if (jwk.key_ops !== undefined) {
+        if (
+          ArrayPrototypeFind(
+            jwk.key_ops,
+            (u) => !ArrayPrototypeIncludes(recognisedUsages, u),
+          ) !== undefined
+        ) {
+          throw new DOMException(
+            "'key_ops' property of JsonWebKey is invalid",
+            "DataError",
+          );
+        }
+
+        if (
+          !ArrayPrototypeEvery(
+            keyUsages,
+            (u) => ArrayPrototypeIncludes(jwk.key_ops, u),
+          )
+        ) {
+          throw new DOMException(
+            "'key_ops' property of JsonWebKey is invalid",
+            "DataError",
+          );
+        }
+      }
+
+      if (jwk.ext === false && extractable === true) {
+        throw new DOMException(
+          "'ext' property of JsonWebKey must not be false if extractable is true",
+          "DataError",
+        );
+      }
+      break;
+    }
+    default:
+      throw new DOMException("Not implemented", "NotSupportedError");
+  }
+
+  const dataLength = TypedArrayPrototypeGetByteLength(data) * 8;
+  if (dataLength === 0) {
+    throw new DOMException(
+      "KmacImportParams.length cannot be 0",
+      "DataError",
+    );
+  }
+  const length = getKmacKeyLength(normalizedAlgorithm);
+  if (length > dataLength) {
+    throw new DOMException("Invalid key length", "DataError");
+  }
+
+  const handle = {};
+  setKeyData(handle, {
+    type: "secret",
+    data,
+  });
+
+  const algorithm = {
+    name: algorithmName,
+    length,
+  };
+
+  return constructKey(
+    "secret",
+    extractable,
+    usageIntersection(keyUsages, ["sign", "verify"]),
+    algorithm,
+    handle,
+  );
 }
 
 function importKeyEC(
@@ -6538,6 +6810,16 @@ async function importKeyInner(
   switch (algorithmName) {
     case "HMAC": {
       return importKeyHMAC(
+        format,
+        normalizedAlgorithm,
+        keyData,
+        extractable,
+        keyUsages,
+      );
+    }
+    case "KMAC128":
+    case "KMAC256": {
+      return importKeyKMAC(
         format,
         normalizedAlgorithm,
         keyData,
@@ -7291,6 +7573,35 @@ function exportKeyHMAC(format, key, innerKey) {
   }
 }
 
+function exportKeyKMAC(format, key, innerKey) {
+  if (innerKey == null) {
+    throw new DOMException("Key is not available", "OperationError");
+  }
+
+  switch (format) {
+    case "raw-secret": {
+      return TypedArrayPrototypeGetBuffer(innerKey.data);
+    }
+    case "raw": {
+      throw new DOMException(
+        `Unable to export ${key[_algorithm].name} using raw format`,
+        "NotSupportedError",
+      );
+    }
+    case "jwk": {
+      return {
+        kty: "oct",
+        k: op_crypto_base64url_encode(innerKey.data),
+        alg: `K${StringPrototypeSubstring(key[_algorithm].name, 4)}`,
+        key_ops: key.usages,
+        ext: key[_extractable],
+      };
+    }
+    default:
+      throw new DOMException("Not implemented", "NotSupportedError");
+  }
+}
+
 function exportKeyRSA(format, key, innerKey) {
   switch (format) {
     case "pkcs8": {
@@ -7928,7 +8239,10 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
         if (length === null) {
           return TypedArrayPrototypeGetBuffer(buf);
         } else if (TypedArrayPrototypeGetByteLength(buf) * 8 < length) {
-          throw new DOMException("Invalid length", "OperationError");
+          throw new DOMException(
+            "derived bit length is too small",
+            "OperationError",
+          );
         } else {
           return ArrayBufferPrototypeSlice(
             TypedArrayPrototypeGetBuffer(buf),
@@ -8588,6 +8902,40 @@ const dictHmacKeyGenParams = [
 webidl.converters.HmacKeyGenParams = webidl
   .createDictionaryConverter("HmacKeyGenParams", dictHmacKeyGenParams);
 
+const dictKmacKeyGenParams = [
+  ...new SafeArrayIterator(dictAlgorithm),
+  {
+    key: "length",
+    converter: (V, prefix, context, opts) =>
+      webidl.converters["unsigned long"](V, prefix, context, {
+        ...opts,
+        enforceRange: true,
+      }),
+  },
+];
+
+webidl.converters.KmacKeyGenParams = webidl
+  .createDictionaryConverter("KmacKeyGenParams", dictKmacKeyGenParams);
+
+const dictKmacSignParams = [
+  ...new SafeArrayIterator(dictAlgorithm),
+  {
+    key: "outputLength",
+    converter: (V, prefix, context, opts) =>
+      webidl.converters["unsigned long"](V, prefix, context, {
+        ...opts,
+        enforceRange: true,
+      }),
+  },
+  {
+    key: "customization",
+    converter: webidl.converters["BufferSource"],
+  },
+];
+
+webidl.converters.KmacSignParams = webidl
+  .createDictionaryConverter("KmacSignParams", dictKmacSignParams);
+
 const dictRsaPssParams = [
   ...new SafeArrayIterator(dictAlgorithm),
   {
@@ -8646,6 +8994,9 @@ const dictHmacImportParams = [
 
 webidl.converters.HmacImportParams = webidl
   .createDictionaryConverter("HmacImportParams", dictHmacImportParams);
+
+webidl.converters.KmacImportParams = webidl
+  .createDictionaryConverter("KmacImportParams", dictKmacKeyGenParams);
 
 const dictRsaOtherPrimesInfo = [
   {
@@ -9148,6 +9499,15 @@ function importCryptoKeySync(format, keyData, algorithm, extractable, usages) {
   switch (algorithmName) {
     case "HMAC":
       return importKeyHMAC(
+        format,
+        normalizedAlgorithm,
+        keyData,
+        extractable,
+        usages,
+      );
+    case "KMAC128":
+    case "KMAC256":
+      return importKeyKMAC(
         format,
         normalizedAlgorithm,
         keyData,

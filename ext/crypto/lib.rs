@@ -399,6 +399,8 @@ pub struct SignArg {
   #[from_v8(serde)]
   algorithm: Algorithm,
   salt_length: Option<u32>,
+  output_length: Option<u32>,
+  customization: Option<Uint8Array>,
   #[from_v8(serde)]
   hash: Option<CryptoHash>,
   #[from_v8(serde)]
@@ -572,6 +574,21 @@ pub async fn op_crypto_sign_key(
           }
         }
       }
+      Algorithm::Kmac128 | Algorithm::Kmac256 => {
+        let output_length =
+          args.output_length.ok_or(CryptoError::InvalidKeyLength)?;
+        let customization = args.customization.as_deref().unwrap_or(&[]);
+        let bits = match algorithm {
+          Algorithm::Kmac128 => {
+            kmac128(&key.data, data, output_length, customization)?
+          }
+          Algorithm::Kmac256 => {
+            kmac256(&key.data, data, output_length, customization)?
+          }
+          _ => unreachable!(),
+        };
+        bits
+      }
       _ => return Err(CryptoError::UnsupportedAlgorithm),
     };
 
@@ -601,11 +618,122 @@ fn hmac_verify<M: hmac::Mac + hmac::digest::KeyInit>(
   Ok(mac.verify_slice(signature).is_ok())
 }
 
+fn kmac128(
+  key: &[u8],
+  data: &[u8],
+  output_length_bits: u32,
+  customization: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+  use sha3::digest::ExtendableOutput;
+  use sha3::digest::Update;
+  use sha3::digest::XofReader;
+  use sha3::digest::core_api::CoreWrapper;
+
+  let input = kmac_input(key, data, output_length_bits, 168)?;
+  let core =
+    sha3::CShake128Core::new_with_function_name(b"KMAC", customization);
+  let mut h: sha3::CShake128 = CoreWrapper::from_core(core);
+  h.update(&input);
+  let mut out = vec![0u8; (output_length_bits / 8) as usize];
+  h.finalize_xof().read(&mut out);
+  Ok(out)
+}
+
+fn kmac256(
+  key: &[u8],
+  data: &[u8],
+  output_length_bits: u32,
+  customization: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+  use sha3::digest::ExtendableOutput;
+  use sha3::digest::Update;
+  use sha3::digest::XofReader;
+  use sha3::digest::core_api::CoreWrapper;
+
+  let input = kmac_input(key, data, output_length_bits, 136)?;
+  let core =
+    sha3::CShake256Core::new_with_function_name(b"KMAC", customization);
+  let mut h: sha3::CShake256 = CoreWrapper::from_core(core);
+  h.update(&input);
+  let mut out = vec![0u8; (output_length_bits / 8) as usize];
+  h.finalize_xof().read(&mut out);
+  Ok(out)
+}
+
+fn kmac_input(
+  key: &[u8],
+  data: &[u8],
+  output_length_bits: u32,
+  rate_bytes: usize,
+) -> Result<Vec<u8>, CryptoError> {
+  if output_length_bits == 0 || output_length_bits % 8 != 0 {
+    return Err(CryptoError::InvalidXofParameters);
+  }
+
+  let mut input = bytepad(&encode_string(key), rate_bytes);
+  input.extend_from_slice(data);
+  input.extend_from_slice(&right_encode(output_length_bits as u64));
+  Ok(input)
+}
+
+fn bytepad(encoded: &[u8], width: usize) -> Vec<u8> {
+  let mut out = left_encode(width as u64);
+  out.extend_from_slice(encoded);
+  let padding = (width - (out.len() % width)) % width;
+  out.resize(out.len() + padding, 0);
+  out
+}
+
+fn encode_string(input: &[u8]) -> Vec<u8> {
+  let mut out = left_encode((input.len() as u64) * 8);
+  out.extend_from_slice(input);
+  out
+}
+
+fn left_encode(value: u64) -> Vec<u8> {
+  encode_integer(value, true)
+}
+
+fn right_encode(value: u64) -> Vec<u8> {
+  encode_integer(value, false)
+}
+
+fn encode_integer(value: u64, left: bool) -> Vec<u8> {
+  let bytes = value.to_be_bytes();
+  let first = bytes
+    .iter()
+    .position(|b| *b != 0)
+    .unwrap_or(bytes.len() - 1);
+  let n = (bytes.len() - first) as u8;
+  let mut out = Vec::with_capacity(n as usize + 1);
+  if left {
+    out.push(n);
+  }
+  out.extend_from_slice(&bytes[first..]);
+  if !left {
+    out.push(n);
+  }
+  out
+}
+
+fn fixed_time_eq(a: &[u8], b: &[u8]) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+  let mut diff = 0u8;
+  for (left, right) in a.iter().zip(b.iter()) {
+    diff |= left ^ right;
+  }
+  diff == 0
+}
+
 #[derive(deno_core::FromV8)]
 pub struct VerifyArg {
   #[from_v8(serde)]
   algorithm: Algorithm,
   salt_length: Option<u32>,
+  output_length: Option<u32>,
+  customization: Option<Uint8Array>,
   #[from_v8(serde)]
   hash: Option<CryptoHash>,
   signature: Uint8Array,
@@ -707,6 +835,21 @@ pub async fn op_crypto_verify_key(
             aws_lc_rs::hmac::verify(&key, data, &args.signature).is_ok()
           }
         }
+      }
+      Algorithm::Kmac128 | Algorithm::Kmac256 => {
+        let output_length =
+          args.output_length.ok_or(CryptoError::InvalidKeyLength)?;
+        let customization = args.customization.as_deref().unwrap_or(&[]);
+        let expected = match algorithm {
+          Algorithm::Kmac128 => {
+            kmac128(&key.data, data, output_length, customization)?
+          }
+          Algorithm::Kmac256 => {
+            kmac256(&key.data, data, output_length, customization)?
+          }
+          _ => unreachable!(),
+        };
+        fixed_time_eq(&expected, &args.signature)
       }
       Algorithm::Ecdsa => {
         let hash = args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)?;
