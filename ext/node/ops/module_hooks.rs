@@ -36,6 +36,13 @@ struct PendingLoad {
 type LoadResult = (Option<String>, Option<String>, Option<String>);
 type LoadSender =
   deno_core::futures::channel::oneshot::Sender<Result<LoadResult, String>>;
+type ResolveResult = (String, Option<String>);
+type ResolveSender =
+  deno_core::futures::channel::oneshot::Sender<Result<ResolveResult, String>>;
+pub type ResolveReceiver =
+  deno_core::futures::channel::oneshot::Receiver<Result<ResolveResult, String>>;
+
+const ASYNC_RESOLVE_PREFIX: &str = "nimbus-async-resolve:";
 
 #[derive(Debug)]
 struct ModuleHookError {
@@ -103,6 +110,8 @@ pub struct LoaderHookRegistry {
   /// Piggybacking senders for duplicate load requests.
   load_waiters:
     Rc<RefCell<HashMap<(String, RequestedModuleType), Vec<LoadSender>>>>,
+  resolve_senders: Rc<RefCell<HashMap<u32, ResolveSender>>>,
+  resolve_receivers: Rc<RefCell<HashMap<u32, ResolveReceiver>>>,
   default_resolve: Rc<RefCell<Option<DefaultResolveCb>>>,
   resolved_formats: Rc<RefCell<HashMap<(String, RequestedModuleType), String>>>,
 }
@@ -120,6 +129,23 @@ impl LoaderHookRegistry {
   /// (un-hooked) import.
   pub fn set_default_resolve(&self, cb: DefaultResolveCb) {
     *self.default_resolve.borrow_mut() = Some(cb);
+  }
+
+  pub fn resolve_active(&self) -> bool {
+    self.resolve_callback.borrow().is_some()
+  }
+
+  pub fn take_async_resolve(&self, specifier: &str) -> Option<ResolveReceiver> {
+    let id = specifier.strip_prefix(ASYNC_RESOLVE_PREFIX)?.parse().ok()?;
+    self.resolve_receivers.borrow_mut().remove(&id)
+  }
+
+  fn reserve_async_resolve(&self) -> String {
+    let id = self.next_id();
+    let (sender, receiver) = deno_core::futures::channel::oneshot::channel();
+    self.resolve_senders.borrow_mut().insert(id, sender);
+    self.resolve_receivers.borrow_mut().insert(id, receiver);
+    format!("{ASYNC_RESOLVE_PREFIX}{id}")
   }
 
   /// Call the default-resolution callback. Used by
@@ -158,11 +184,13 @@ impl LoaderHookRegistry {
     referrer: &str,
     requested_module_type: &RequestedModuleType,
   ) -> Result<Option<String>, JsErrorBox> {
-    let callbacks = self.resolve_callback.borrow();
-    let Some(callback) = callbacks.as_ref() else {
-      return Ok(None);
+    let callback = {
+      let callbacks = self.resolve_callback.borrow();
+      let Some(callback) = callbacks.as_ref() else {
+        return Ok(None);
+      };
+      v8::Local::new(scope, callback)
     };
-    let callback = v8::Local::new(scope, callback);
     let recv = v8::undefined(scope).into();
     let specifier = v8::String::new(scope, specifier)
       .ok_or_else(|| JsErrorBox::generic("failed to allocate specifier"))?;
@@ -396,6 +424,45 @@ pub fn op_module_default_resolve(
 ) -> Result<String, JsErrorBox> {
   let registry = state.borrow::<LoaderHookRegistry>().clone();
   registry.default_resolve(specifier, referrer, conditions)
+}
+
+/// Reserve a placeholder URL for an async resolve hook result. The Rust module
+/// loader uses this URL synchronously, then awaits the real URL when it reaches
+/// `load()`.
+#[op2]
+#[string]
+pub fn op_module_hooks_reserve_async_resolve(state: &mut OpState) -> String {
+  let registry = state.borrow::<LoaderHookRegistry>().clone();
+  registry.reserve_async_resolve()
+}
+
+/// Fulfill an async resolve placeholder reserved by
+/// `op_module_hooks_reserve_async_resolve`.
+#[op2]
+pub fn op_module_hooks_respond_resolve(
+  state: &mut OpState,
+  #[string] placeholder: &str,
+  #[string] url: Option<String>,
+  #[string] format: Option<String>,
+  #[string] error: Option<String>,
+) {
+  let registry = state.borrow::<LoaderHookRegistry>().clone();
+  let Some(id) = placeholder
+    .strip_prefix(ASYNC_RESOLVE_PREFIX)
+    .and_then(|id| id.parse().ok())
+  else {
+    return;
+  };
+  if let Some(sender) = registry.resolve_senders.borrow_mut().remove(&id) {
+    let result = if let Some(error) = error {
+      Err(error)
+    } else if let Some(url) = url {
+      Ok((url, format))
+    } else {
+      Err("module resolve hook must return a string or URL".to_string())
+    };
+    let _ = sender.send(result);
+  }
 }
 
 /// Respond to a load request. `source` is null to delegate to default loading.

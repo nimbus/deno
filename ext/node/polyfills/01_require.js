@@ -6,13 +6,16 @@ import { core, internals, primordials } from "ext:core/mod.js";
 import {
   op_get_env_no_permission_check,
   op_import_sync,
+  op_import_sync_for_module_register,
   op_import_sync_main,
   op_import_sync_main_with_source,
   op_import_sync_with_source,
   op_module_default_resolve,
   op_module_hooks_poll_load,
   op_module_hooks_register,
+  op_module_hooks_reserve_async_resolve,
   op_module_hooks_respond_load,
+  op_module_hooks_respond_resolve,
   op_napi_open,
   op_node_has_child_ipc_pipe,
   op_node_strip_typescript_types,
@@ -1120,6 +1123,33 @@ function finalizeEsmResolveHookResult(result, requestedType) {
   return resolvedUrl;
 }
 
+function respondToAsyncEsmResolve(placeholder, result, requestedType) {
+  try {
+    const finalized = finalizeEsmResolveHookResult(result, requestedType);
+    if (typeof finalized === "string") {
+      op_module_hooks_respond_resolve(placeholder, finalized, null, null);
+      return;
+    }
+    if (finalized !== null && typeof finalized?.url === "string") {
+      op_module_hooks_respond_resolve(
+        placeholder,
+        finalized.url,
+        finalized.format ?? null,
+        null,
+      );
+      return;
+    }
+    op_module_hooks_respond_resolve(
+      placeholder,
+      null,
+      null,
+      "module resolve hook must return a URL",
+    );
+  } catch (e) {
+    op_module_hooks_respond_resolve(placeholder, null, null, String(e));
+  }
+}
+
 function esmResolveHookCallback(specifier, referrer, requestedType) {
   if (
     StringPrototypeStartsWith(specifier, "ext:") ||
@@ -1135,11 +1165,20 @@ function esmResolveHookCallback(specifier, referrer, requestedType) {
   try {
     const result = executeEsmResolveHookChain(specifier, context);
     if (core.isPromise(result)) {
-      const finalized = PromisePrototypeThen(
+      const placeholder = op_module_hooks_reserve_async_resolve();
+      PromisePrototypeThen(
         result,
-        (resolved) => finalizeEsmResolveHookResult(resolved, requestedType),
+        (resolved) =>
+          respondToAsyncEsmResolve(placeholder, resolved, requestedType),
+        (error) =>
+          op_module_hooks_respond_resolve(
+            placeholder,
+            null,
+            null,
+            String(error),
+          ),
       );
-      return finalized;
+      return placeholder;
     }
     return finalizeEsmResolveHookResult(result, requestedType);
   } catch (e) {
@@ -4629,7 +4668,17 @@ function resolveRegisterSpecifier(specifier, parentUrl, options) {
  */
 export function register(specifier, parentUrl, options) {
   const loaderUrl = resolveRegisterSpecifier(specifier, parentUrl, options);
-  const namespace = op_import_sync(loaderUrl);
+  let hookSource;
+  if (StringPrototypeStartsWith(loaderUrl, "file://")) {
+    try {
+      hookSource = op_require_read_file(url.fileURLToPath(loaderUrl));
+    } catch {
+      hookSource = undefined;
+    }
+  }
+  const namespace = hookSource !== undefined
+    ? op_import_sync_for_module_register(loaderUrl, hookSource)
+    : op_import_sync_for_module_register(loaderUrl);
   if (typeof namespace.initialize === "function") {
     namespace.initialize(options?.data);
   }
@@ -4690,6 +4739,7 @@ export function registerHooks(hooks) {
   };
 }
 
+Module.register = register;
 Module.registerHooks = registerHooks;
 
 let initialized = false;

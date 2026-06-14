@@ -202,6 +202,8 @@ deno_core::extension!(deno_node,
 
     ops::module_hooks::op_module_hooks_register,
     ops::module_hooks::op_module_hooks_poll_load,
+    ops::module_hooks::op_module_hooks_reserve_async_resolve,
+    ops::module_hooks::op_module_hooks_respond_resolve,
     ops::module_hooks::op_module_hooks_respond_load,
     ops::module_hooks::op_module_default_resolve,
 

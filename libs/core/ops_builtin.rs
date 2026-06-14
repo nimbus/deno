@@ -72,6 +72,7 @@ builtin_ops! {
   op_encode_binary_string,
   op_is_terminal,
   op_import_sync,
+  op_import_sync_for_module_register,
   op_import_sync_main,
   op_import_sync_with_source,
   op_import_sync_main_with_source,
@@ -745,6 +746,7 @@ fn import_sync<'s, 'i>(
   specifier: &str,
   code: Option<String>,
   main: bool,
+  allow_pending_dynamic_imports: bool,
 ) -> Result<v8::Local<'s, v8::Value>, CoreError> {
   let module_map_rc = JsRealm::module_map_from(scope);
 
@@ -785,7 +787,8 @@ fn import_sync<'s, 'i>(
     return Err(CoreErrorKind::TLA.into_box());
   }
 
-  if module_map_rc.has_pending_dynamic_imports()
+  if !allow_pending_dynamic_imports
+    && module_map_rc.has_pending_dynamic_imports()
     && module.get_status() != v8::ModuleStatus::Evaluated
   {
     return Err(
@@ -860,7 +863,16 @@ fn op_import_sync<'s, 'i>(
   #[string] specifier: &str,
   #[string] code: Option<String>,
 ) -> Result<v8::Local<'s, v8::Value>, CoreError> {
-  import_sync(scope, specifier, code, false)
+  import_sync(scope, specifier, code, false, false)
+}
+
+#[op2(reentrant)]
+fn op_import_sync_for_module_register<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  #[string] specifier: &str,
+  #[string] code: Option<String>,
+) -> Result<v8::Local<'s, v8::Value>, CoreError> {
+  import_sync(scope, specifier, code, false, true)
 }
 
 #[op2(reentrant)]
@@ -869,7 +881,7 @@ fn op_import_sync_main<'s, 'i>(
   #[string] specifier: &str,
   #[string] code: Option<String>,
 ) -> Result<v8::Local<'s, v8::Value>, CoreError> {
-  import_sync(scope, specifier, code, true)
+  import_sync(scope, specifier, code, true, false)
 }
 
 /// Like `op_import_sync`, but when `code` is provided, compiles the source
@@ -882,7 +894,7 @@ fn op_import_sync_with_source<'s, 'i>(
   #[string] specifier: &str,
   #[string] code: String,
 ) -> Result<v8::Local<'s, v8::Value>, CoreError> {
-  import_sync(scope, specifier, Some(code), false)
+  import_sync(scope, specifier, Some(code), false, false)
 }
 
 /// Like `op_import_sync_main`, but uses caller-provided source for the main
@@ -893,7 +905,7 @@ fn op_import_sync_main_with_source<'s, 'i>(
   #[string] specifier: &str,
   #[string] code: String,
 ) -> Result<v8::Local<'s, v8::Value>, CoreError> {
-  import_sync(scope, specifier, Some(code), true)
+  import_sync(scope, specifier, Some(code), true, false)
 }
 
 #[op2(fast)]
