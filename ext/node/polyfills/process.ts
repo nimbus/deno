@@ -1709,6 +1709,7 @@ export const removeAllListeners = process.removeAllListeners;
 
 let unhandledRejectionListenerCount = 0;
 let rejectionHandledListenerCount = 0;
+let multipleResolvesListenerCount = 0;
 let uncaughtExceptionListenerCount = 0;
 let uncaughtExceptionMonitorListenerCount = 0;
 let warningListenerCount = 0;
@@ -1799,6 +1800,9 @@ internals.__enableDomainUnhandledRejectionTracking = () => {
 
 process.on("newListener", (event: string) => {
   switch (event) {
+    case "multipleResolves":
+      multipleResolvesListenerCount++;
+      break;
     case "unhandledRejection":
       unhandledRejectionListenerCount++;
       break;
@@ -1828,6 +1832,9 @@ process.on("newListener", (event: string) => {
 
 process.on("removeListener", (event: string) => {
   switch (event) {
+    case "multipleResolves":
+      multipleResolvesListenerCount--;
+      break;
     case "unhandledRejection":
       unhandledRejectionListenerCount--;
       break;
@@ -1853,6 +1860,25 @@ process.on("removeListener", (event: string) => {
       return;
   }
   synchronizeListeners();
+});
+
+let multipleResolvesWarningEmitted = false;
+core.setPromiseMultipleResolveHandler((type, promise, reason) => {
+  if (multipleResolvesListenerCount === 0) {
+    return;
+  }
+  _nextTick(() => {
+    if (process.emit("multipleResolves", type, promise, reason)) {
+      if (!multipleResolvesWarningEmitted) {
+        multipleResolvesWarningEmitted = true;
+        process.emitWarning(
+          "The multipleResolves event has been deprecated.",
+          "DeprecationWarning",
+          "DEP0160",
+        );
+      }
+    }
+  });
 });
 
 function processOnError(event: ErrorEvent) {

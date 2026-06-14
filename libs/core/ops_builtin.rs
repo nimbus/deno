@@ -117,6 +117,7 @@ builtin_ops! {
   ops_builtin_v8::op_set_captured_bootstrap,
   ops_builtin_v8::op_run_microtasks,
   ops_builtin_v8::op_drain_pending_rejections,
+  ops_builtin_v8::op_drain_pending_multiple_resolves,
   ops_builtin_v8::op_compile_function,
   ops_builtin_v8::op_eval_context,
   ops_builtin_v8::op_queue_microtask,

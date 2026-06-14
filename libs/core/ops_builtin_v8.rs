@@ -267,6 +267,38 @@ pub fn op_drain_pending_rejections<'s>(
   arr.into()
 }
 
+/// Drain pending duplicate promise settle events from the Rust-side queue and
+/// return them as a flat JS array: [type, promise, reason, ...]. Type is
+/// "resolve" for PromiseResolveAfterResolved and "reject" for
+/// PromiseRejectAfterResolved.
+#[op2]
+pub fn op_drain_pending_multiple_resolves<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Value> {
+  let exception_state = JsRealm::exception_state_from_scope(scope);
+  let mut pending = exception_state
+    .pending_promise_multiple_resolves
+    .borrow_mut();
+  if pending.is_empty() {
+    return v8::undefined(scope).into();
+  }
+  let len = pending.len();
+  let arr = v8::Array::new(scope, (len * 3) as i32);
+  let resolve = v8::String::new(scope, "resolve").unwrap();
+  let reject = v8::String::new(scope, "reject").unwrap();
+  let mut idx = 0u32;
+  while let Some((kind, promise, reason)) = pending.pop_front() {
+    let ty = if kind == 0 { resolve } else { reject };
+    let p = v8::Local::new(scope, promise);
+    let r = v8::Local::new(scope, reason);
+    arr.set_index(scope, idx, ty.into());
+    arr.set_index(scope, idx + 1, p.into());
+    arr.set_index(scope, idx + 2, r);
+    idx += 3;
+  }
+  arr.into()
+}
+
 pub struct EvalContextError<'s> {
   thrown: v8::Local<'s, v8::Value>,
   is_native_error: bool,

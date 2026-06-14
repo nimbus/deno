@@ -23,6 +23,8 @@ pub(crate) struct ExceptionState {
   >,
   pub(crate) pending_handled_promise_rejections:
     RefCell<VecDeque<(v8::Global<v8::Promise>, v8::Global<v8::Value>)>>,
+  pub(crate) pending_promise_multiple_resolves:
+    RefCell<VecDeque<(u8, v8::Global<v8::Promise>, v8::Global<v8::Value>)>>,
   pub(crate) js_build_custom_error_cb:
     RefCell<Option<v8::Global<v8::Function>>>,
   /// Map of registered error class name to its constructor (the JS
@@ -48,6 +50,7 @@ impl ExceptionState {
     self.js_handled_promise_rejection_cb.borrow_mut().take();
     self.js_format_exception_cb.borrow_mut().take();
     self.pending_promise_rejections.borrow_mut().clear();
+    self.pending_promise_multiple_resolves.borrow_mut().clear();
     self.dispatched_exception.set(None);
   }
 
@@ -63,6 +66,7 @@ impl ExceptionState {
     self.dispatched_exception_is_promise.set(false);
     self.pending_promise_rejections.borrow_mut().clear();
     self.pending_handled_promise_rejections.borrow_mut().clear();
+    self.pending_promise_multiple_resolves.borrow_mut().clear();
   }
 
   pub(crate) fn has_dispatched_exception(&self) -> bool {
@@ -182,9 +186,23 @@ impl ExceptionState {
           }
         }
       }
-      PromiseRejectAfterResolved => {}
+      PromiseRejectAfterResolved => {
+        let value =
+          rejection_value.unwrap_or_else(|| v8::undefined(scope).into());
+        let value_global = v8::Global::new(scope, value);
+        self
+          .pending_promise_multiple_resolves
+          .borrow_mut()
+          .push_back((1, promise_global, value_global));
+      }
       PromiseResolveAfterResolved => {
-        // Should not warn. See #1272
+        let value =
+          rejection_value.unwrap_or_else(|| v8::undefined(scope).into());
+        let value_global = v8::Global::new(scope, value);
+        self
+          .pending_promise_multiple_resolves
+          .borrow_mut()
+          .push_back((0, promise_global, value_global));
       }
     }
   }

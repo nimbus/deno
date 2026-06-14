@@ -62,6 +62,7 @@
     op_get_proxy_details,
     op_get_ext_import_meta_proto,
     op_drain_pending_rejections,
+    op_drain_pending_multiple_resolves,
     op_lazy_load_esm,
     op_load_ext_script,
     op_set_captured_bootstrap,
@@ -358,12 +359,26 @@
   // Drain pending promise rejections from the Rust-side queue and process
   // them through the unhandledPromiseRejectionHandler. Returns true if any
   // rejections were processed (matching Node.js processPromiseRejections).
+  let promiseMultipleResolveHandler = () => {};
   function processPromiseRejections() {
     tickInfo[kHasRejectionToWarn] = 0;
+    let didWork = false;
+    const multipleResolves = op_drain_pending_multiple_resolves();
+    if (multipleResolves !== undefined) {
+      didWork = true;
+      for (let i = 0; i < multipleResolves.length; i += 3) {
+        promiseMultipleResolveHandler(
+          multipleResolves[i],
+          multipleResolves[i + 1],
+          multipleResolves[i + 2],
+        );
+      }
+    }
     const rejections = op_drain_pending_rejections();
     if (rejections === undefined) {
-      return false;
+      return didWork;
     }
+    didWork = true;
     for (let i = 0; i < rejections.length; i += 3) {
       const prevContext = getAsyncContext();
       setAsyncContext(rejections[i + 2]);
@@ -380,7 +395,7 @@
         setAsyncContext(prevContext);
       }
     }
-    return true;
+    return didWork;
   }
 
   // Matches Node.js processTicksAndRejections() from
@@ -1276,6 +1291,8 @@
     addMainModuleHandler: (handler) => op_add_main_module_handler(handler),
     setHandledPromiseRejectionHandler: (handler) =>
       op_set_handled_promise_rejection_handler(handler),
+    setPromiseMultipleResolveHandler: (handler) =>
+      promiseMultipleResolveHandler = handler,
     setUnhandledPromiseRejectionHandler: (handler) =>
       unhandledPromiseRejectionHandler = handler,
     reportUnhandledException: (e) => op_dispatch_exception(e, false),

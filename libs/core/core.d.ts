@@ -251,6 +251,18 @@ export namespace core {
   ) => void;
 
   /**
+   * Sets the duplicate promise settle handler used by Node's deprecated
+   * `multipleResolves` event.
+   */
+  function setPromiseMultipleResolveHandler(
+    cb: (
+      type: "resolve" | "reject",
+      promise: Promise<unknown>,
+      reason: any,
+    ) => void,
+  ): void;
+
+  /**
    * Report an exception that was not handled by any runtime handler, and escaped to the
    * top level. This terminates the runtime.
    */

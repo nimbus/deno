@@ -1600,7 +1600,12 @@ pub extern "C" fn promise_reject_callback(message: v8::PromiseRejectMessage) {
   // Set hasRejectionToWarn in the shared tick_info buffer so that JS
   // runNextTicks() enters processTicksAndRejections() even when no
   // ticks are queued (matching Node.js behavior).
-  if message.get_event() == v8::PromiseRejectEvent::PromiseRejectWithNoHandler {
+  if matches!(
+    message.get_event(),
+    v8::PromiseRejectEvent::PromiseRejectWithNoHandler
+      | v8::PromiseRejectEvent::PromiseRejectAfterResolved
+      | v8::PromiseRejectEvent::PromiseResolveAfterResolved
+  ) {
     let context_state = JsRealm::state_from_scope(scope);
     // SAFETY: We're in a single-threaded environment so if we're here
     // we're guaranteed that JS will not change this value.
