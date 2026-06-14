@@ -660,12 +660,18 @@ pub fn op_node_cipheriv_set_aad(
   state: &mut OpState,
   #[smi] rid: u32,
   #[buffer] aad: &[u8],
+  #[smi] plaintext_length: i32,
 ) -> bool {
   let context = match state.resource_table.get::<cipher::CipherContext>(rid) {
     Ok(context) => context,
     Err(_) => return false,
   };
-  context.set_aad(aad);
+  let plaintext_length = if plaintext_length == -1 {
+    None
+  } else {
+    Some(plaintext_length as usize)
+  };
+  context.set_aad(aad, plaintext_length);
   true
 }
 
@@ -746,12 +752,18 @@ pub fn op_node_decipheriv_set_aad(
   state: &mut OpState,
   #[smi] rid: u32,
   #[buffer] aad: &[u8],
+  #[smi] plaintext_length: i32,
 ) -> bool {
   let context = match state.resource_table.get::<cipher::DecipherContext>(rid) {
     Ok(context) => context,
     Err(_) => return false,
   };
-  context.set_aad(aad);
+  let plaintext_length = if plaintext_length == -1 {
+    None
+  } else {
+    Some(plaintext_length as usize)
+  };
+  context.set_aad(aad, plaintext_length);
   true
 }
 

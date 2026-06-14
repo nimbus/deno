@@ -285,12 +285,15 @@ MapPrototypeSet(
 // Must be kept in sorted (lexicographic) order - Node.js validates this.
 const supportedCiphers = [
   "aes-128-cbc",
+  "aes-128-ccm",
   "aes-128-ctr",
   "aes-128-ecb",
   "aes-128-gcm",
+  "aes-192-ccm",
   "aes-192-ctr",
   "aes-192-ecb",
   "aes-256-cbc",
+  "aes-256-ccm",
   "aes-256-ctr",
   "aes-256-ecb",
   "aes-256-gcm",
