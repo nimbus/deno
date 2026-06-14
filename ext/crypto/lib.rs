@@ -111,6 +111,7 @@ macro_rules! aes_gcm_nonce_dispatch {
 
 mod decrypt;
 mod ed25519;
+mod ed448;
 mod encrypt;
 mod export_key;
 mod generate_key;
@@ -125,6 +126,7 @@ mod x448;
 
 pub use crate::decrypt::DecryptError;
 pub use crate::decrypt::op_crypto_decrypt;
+pub use crate::ed448::Ed448Error;
 pub use crate::ed25519::Ed25519Error;
 pub use crate::encrypt::EncryptError;
 pub use crate::encrypt::op_crypto_encrypt;
@@ -181,6 +183,11 @@ deno_core::extension!(deno_crypto,
     x448::op_crypto_x448_public_key,
     x448::op_crypto_export_spki_x448,
     x448::op_crypto_export_pkcs8_x448,
+    ed448::op_crypto_import_spki_ed448,
+    ed448::op_crypto_import_pkcs8_ed448,
+    ed448::op_crypto_export_spki_ed448,
+    ed448::op_crypto_export_pkcs8_ed448,
+    ed448::op_crypto_jwk_x_ed448,
     ed25519::op_crypto_generate_ed25519_keypair,
     ed25519::op_crypto_import_spki_ed25519,
     ed25519::op_crypto_import_pkcs8_ed25519,

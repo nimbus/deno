@@ -22,6 +22,7 @@ base64.workspace = true
 cbc.workspace = true
 const-oid.workspace = true
 ctr.workspace = true
+crypto-bigint.workspace = true
 curve25519-dalek.workspace = true
 deno_core.workspace = true
 deno_error.workspace = true

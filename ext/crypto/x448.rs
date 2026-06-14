@@ -1,10 +1,12 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+use crypto_bigint::Encoding;
+use crypto_bigint::U448;
 use deno_core::convert::Uint8Array;
 use deno_core::op2;
-use ed448_goldilocks::EdwardsScalar;
-use ed448_goldilocks::MontgomeryPoint;
+use ed448_goldilocks::subtle::Choice;
+use ed448_goldilocks::subtle::ConditionallySelectable;
 use ed448_goldilocks::subtle::ConstantTimeEq;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
 use rand::RngCore;
@@ -28,6 +30,94 @@ pub enum X448Error {
   Der(#[from] spki::der::Error),
 }
 
+const X448_FIELD_MODULUS: U448 = U448::from_be_hex(
+  "fffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+);
+const X448_A24: U448 = U448::from_u64(39081);
+const X448_GENERATOR: [u8; 56] = {
+  let mut generator = [0u8; 56];
+  generator[0] = 5;
+  generator
+};
+const X448_IDENTITY: [u8; 56] = [0; 56];
+
+fn x448_field_from_le(bytes: &[u8; 56]) -> U448 {
+  U448::from_le_slice(bytes).const_rem(&X448_FIELD_MODULUS).0
+}
+
+fn x448_clamp_scalar(private_key: &[u8; 56]) -> [u8; 56] {
+  let mut scalar = *private_key;
+  scalar[0] &= 0xfc;
+  scalar[55] |= 0x80;
+  scalar
+}
+
+fn x448_mod_mul(lhs: &U448, rhs: &U448) -> U448 {
+  let (reduced, ok) =
+    U448::const_rem_wide(lhs.mul_wide(rhs), &X448_FIELD_MODULUS);
+  debug_assert!(bool::from(ok));
+  reduced
+}
+
+fn x448_mod_square(value: &U448) -> U448 {
+  let (reduced, ok) =
+    U448::const_rem_wide(value.square_wide(), &X448_FIELD_MODULUS);
+  debug_assert!(bool::from(ok));
+  reduced
+}
+
+fn x448_cswap(lhs: &mut U448, rhs: &mut U448, swap: Choice) {
+  let new_lhs = U448::conditional_select(lhs, rhs, swap);
+  let new_rhs = U448::conditional_select(rhs, lhs, swap);
+  *lhs = new_lhs;
+  *rhs = new_rhs;
+}
+
+fn x448_scalar_mult(private_key: &[u8; 56], public_key: &[u8; 56]) -> [u8; 56] {
+  let scalar = x448_clamp_scalar(private_key);
+  let x1 = x448_field_from_le(public_key);
+  let mut x2 = U448::ONE;
+  let mut z2 = U448::ZERO;
+  let mut x3 = x1;
+  let mut z3 = U448::ONE;
+  let mut swap = 0;
+
+  for bit_index in (0..448).rev() {
+    let bit = (scalar[bit_index / 8] >> (bit_index & 7)) & 1;
+    let swap_choice = Choice::from(swap ^ bit);
+    x448_cswap(&mut x2, &mut x3, swap_choice);
+    x448_cswap(&mut z2, &mut z3, swap_choice);
+    swap = bit;
+
+    let a = x2.add_mod(&z2, &X448_FIELD_MODULUS);
+    let aa = x448_mod_square(&a);
+    let b = x2.sub_mod(&z2, &X448_FIELD_MODULUS);
+    let bb = x448_mod_square(&b);
+    let e = aa.sub_mod(&bb, &X448_FIELD_MODULUS);
+    let c = x3.add_mod(&z3, &X448_FIELD_MODULUS);
+    let d = x3.sub_mod(&z3, &X448_FIELD_MODULUS);
+    let da = x448_mod_mul(&d, &a);
+    let cb = x448_mod_mul(&c, &b);
+    let da_plus_cb = da.add_mod(&cb, &X448_FIELD_MODULUS);
+    let da_minus_cb = da.sub_mod(&cb, &X448_FIELD_MODULUS);
+    x3 = x448_mod_square(&da_plus_cb);
+    z3 = x448_mod_mul(&x1, &x448_mod_square(&da_minus_cb));
+    x2 = x448_mod_mul(&aa, &bb);
+    let a24_e = x448_mod_mul(&X448_A24, &e);
+    let aa_plus_a24_e = aa.add_mod(&a24_e, &X448_FIELD_MODULUS);
+    z2 = x448_mod_mul(&e, &aa_plus_a24_e);
+  }
+
+  let swap_choice = Choice::from(swap);
+  x448_cswap(&mut x2, &mut x3, swap_choice);
+  x448_cswap(&mut z2, &mut z3, swap_choice);
+
+  let (z2_inv, invertible) = z2.inv_odd_mod(&X448_FIELD_MODULUS);
+  let result = x448_mod_mul(&x2, &z2_inv);
+  U448::conditional_select(&U448::ZERO, &result, invertible.into())
+    .to_le_bytes()
+}
+
 #[op2(fast)]
 pub fn op_crypto_generate_x448_keypair(
   #[buffer] pkey: &mut [u8],
@@ -37,14 +127,10 @@ pub fn op_crypto_generate_x448_keypair(
   rng.fill_bytes(pkey);
 
   // x448(pkey, 5)
-  let mut scalar_bytes = [0u8; 57];
-  scalar_bytes[..56].copy_from_slice(pkey);
-  let scalar = EdwardsScalar::from_bytes_mod_order(&scalar_bytes.into());
-  let point = &MontgomeryPoint::GENERATOR * &scalar;
-  pubkey.copy_from_slice(&point.0);
+  let mut private_key = [0u8; 56];
+  private_key.copy_from_slice(pkey);
+  pubkey.copy_from_slice(&x448_scalar_mult(&private_key, &X448_GENERATOR));
 }
-
-static MONTGOMERY_IDENTITY: MontgomeryPoint = MontgomeryPoint([0; 56]);
 
 #[op2(fast)]
 pub fn op_crypto_derive_bits_x448(
@@ -64,15 +150,12 @@ pub fn op_crypto_derive_bits_x448(
     .map_err(|_| X448Error::InvalidKeyLength)?;
 
   // x448(k, u)
-  let mut scalar_bytes = [0u8; 57];
-  scalar_bytes[..56].copy_from_slice(&k);
-  let scalar = EdwardsScalar::from_bytes_mod_order(&scalar_bytes.into());
-  let point = &MontgomeryPoint(u) * &scalar;
-  if point.ct_eq(&MONTGOMERY_IDENTITY).unwrap_u8() == 1 {
+  let shared_secret = x448_scalar_mult(&k, &u);
+  if shared_secret.ct_eq(&X448_IDENTITY).unwrap_u8() == 1 {
     return Ok(true);
   }
 
-  secret.copy_from_slice(&point.0);
+  secret.copy_from_slice(&shared_secret);
   Ok(false)
 }
 
@@ -91,11 +174,10 @@ pub fn op_crypto_x448_public_key(
     .try_into()
     .map_err(|_| X448Error::InvalidKeyLength)?;
   // x448(pkey, 5), identical derivation to op_crypto_generate_x448_keypair.
-  let mut scalar_bytes = [0u8; 57];
-  scalar_bytes[..56].copy_from_slice(&private_key);
-  let scalar = EdwardsScalar::from_bytes_mod_order(&scalar_bytes.into());
-  let point = &MontgomeryPoint::GENERATOR * &scalar;
-  Ok(BASE64_URL_SAFE_NO_PAD.encode(point.0))
+  Ok(
+    BASE64_URL_SAFE_NO_PAD
+      .encode(x448_scalar_mult(&private_key, &X448_GENERATOR)),
+  )
 }
 
 #[op2]
@@ -186,4 +268,26 @@ pub fn op_crypto_import_pkcs8_x448(
   }
   out.copy_from_slice(&pk_info.private_key[2..]);
   true
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use base64::Engine;
+
+  #[test]
+  fn x448_scalar_mult_matches_node_cfrg_vector() {
+    let private_key = BASE64_URL_SAFE_NO_PAD
+      .decode(
+        "_IGPZUaoH5Y8J3ZdwcBb_bFpZn5eDPRTGO0cuThyIXqw2QBODH3Q3LABkvcgOcwaHf91DsMcivs",
+      )
+      .unwrap();
+    let private_key: [u8; 56] = private_key.try_into().unwrap();
+
+    assert_eq!(
+      BASE64_URL_SAFE_NO_PAD
+        .encode(x448_scalar_mult(&private_key, &X448_GENERATOR)),
+      "HUUcjAw2mkLq38KHXNRJU8rrRsRm3IZWgoC_27sB9HCaGwseDdZs97EchBGd3JiJDbcokSnjDaQ"
+    );
+  }
 }

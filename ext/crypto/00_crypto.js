@@ -16,9 +16,11 @@ const {
   op_crypto_derive_bits_x448,
   op_crypto_encrypt,
   op_crypto_export_key,
+  op_crypto_export_pkcs8_ed448,
   op_crypto_export_pkcs8_ed25519,
   op_crypto_export_pkcs8_x25519,
   op_crypto_export_pkcs8_x448,
+  op_crypto_export_spki_ed448,
   op_crypto_export_spki_ed25519,
   op_crypto_export_spki_x25519,
   op_crypto_export_spki_x448,
@@ -30,12 +32,15 @@ const {
   op_crypto_import_key,
   op_crypto_key_store_get,
   op_crypto_key_store_insert,
+  op_crypto_import_pkcs8_ed448,
   op_crypto_import_pkcs8_ed25519,
   op_crypto_import_pkcs8_x25519,
   op_crypto_import_pkcs8_x448,
+  op_crypto_import_spki_ed448,
   op_crypto_import_spki_ed25519,
   op_crypto_import_spki_x25519,
   op_crypto_import_spki_x448,
+  op_crypto_jwk_x_ed448,
   op_crypto_jwk_x_ed25519,
   op_crypto_ml_kem_decapsulate,
   op_crypto_ml_kem_encapsulate,
@@ -231,6 +236,7 @@ const supportedAlgorithms = {
     "AES-KW": null,
     "ChaCha20-Poly1305": null,
     "Ed25519": null,
+    "Ed448": null,
     "X25519": null,
     "X448": null,
     "ML-KEM-512": null,
@@ -1414,6 +1420,10 @@ class SubtleCrypto {
         result = exportKeyEd25519(format, key, innerKey);
         break;
       }
+      case "Ed448": {
+        result = exportKeyEd448(format, key, innerKey);
+        break;
+      }
       case "ML-DSA-44":
       case "ML-DSA-65":
       case "ML-DSA-87": {
@@ -2418,6 +2428,7 @@ class SubtleCrypto {
       case "ECDSA":
       case "ECDH":
       case "Ed25519":
+      case "Ed448":
       case "X25519":
       case "X448":
       case "ML-DSA-44":
@@ -2529,13 +2540,16 @@ class SubtleCrypto {
         return await this.importKey("spki", spki, algorithm, true, keyUsages);
       }
       default: {
-        // Ed25519, X25519 and X448 store raw key material; derive the raw
+        // Ed25519, Ed448, X25519 and X448 store raw key material; derive the raw
         // public key from the private key and re-import it as a JWK.
         let x;
         try {
           switch (algorithmName) {
             case "Ed25519":
               x = op_crypto_jwk_x_ed25519(getKeyData(key[_handle]));
+              break;
+            case "Ed448":
+              x = op_crypto_jwk_x_ed448(getKeyData(key[_handle]));
               break;
             case "X25519":
               x = op_crypto_x25519_public_key(getKeyData(key[_handle]));
@@ -2671,6 +2685,7 @@ const PUBLIC_KEY_DERIVABLE_ALGORITHMS = [
   "ECDSA",
   "ECDH",
   "Ed25519",
+  "Ed448",
   "X25519",
   "X448",
   "ML-KEM-512",
@@ -3689,7 +3704,7 @@ function importKeyX448(
 
       const publicKeyData = new Uint8Array(56);
       if (!op_crypto_import_spki_x448(keyData, publicKeyData)) {
-        throw new DOMException("Invalid key data", "DataError");
+        throw new DOMException("Invalid key type", "DataError");
       }
 
       const handle = {};
@@ -3720,7 +3735,7 @@ function importKeyX448(
 
       const privateKeyData = new Uint8Array(56);
       if (!op_crypto_import_pkcs8_x448(keyData, privateKeyData)) {
-        throw new DOMException("Invalid key data", "DataError");
+        throw new DOMException("Invalid key type", "DataError");
       }
 
       const handle = {};
@@ -3770,13 +3785,16 @@ function importKeyX448(
 
       // 5.
       if (jwk.crv !== "X448") {
-        throw new DOMException("Invalid curve", "DataError");
+        throw new DOMException(
+          'JWK "crv" Parameter and algorithm name mismatch',
+          "DataError",
+        );
       }
 
       // 6.
       if (keyUsages.length > 0 && jwk.use !== undefined) {
         if (jwk.use !== "enc") {
-          throw new DOMException("Invalid key use", "DataError");
+          throw new DOMException("Invalid JWK \"use\" Parameter", "DataError");
         }
       }
 
@@ -3842,6 +3860,9 @@ function importKeyX448(
       } else {
         // https://www.rfc-editor.org/rfc/rfc8037#section-2
         let publicKeyData;
+        if (jwk.x === undefined) {
+          throw new DOMException("Invalid keyData", "DataError");
+        }
         try {
           publicKeyData = op_crypto_base64url_decode(jwk.x);
         } catch (_) {
@@ -3926,7 +3947,7 @@ function importKeyEd25519(
 
       const publicKeyData = new Uint8Array(32);
       if (!op_crypto_import_spki_ed25519(keyData, publicKeyData)) {
-        throw new DOMException("Invalid key data", "DataError");
+        throw new DOMException("Invalid key type", "DataError");
       }
 
       const handle = {};
@@ -3957,7 +3978,7 @@ function importKeyEd25519(
 
       const privateKeyData = new Uint8Array(32);
       if (!op_crypto_import_pkcs8_ed25519(keyData, privateKeyData)) {
-        throw new DOMException("Invalid key data", "DataError");
+        throw new DOMException("Invalid key type", "DataError");
       }
 
       const handle = {};
@@ -4015,14 +4036,26 @@ function importKeyEd25519(
 
       // 4.
       if (jwk.crv !== "Ed25519") {
-        throw new DOMException("Invalid curve", "DataError");
+        throw new DOMException(
+          'JWK "crv" Parameter and algorithm name mismatch',
+          "DataError",
+        );
       }
 
       // 5.
       if (
         keyUsages.length > 0 && jwk.use !== undefined && jwk.use !== "sig"
       ) {
-        throw new DOMException("Invalid key usage", "DataError");
+        throw new DOMException("Invalid JWK \"use\" Parameter", "DataError");
+      }
+
+      if (
+        jwk.alg !== undefined && jwk.alg !== "Ed25519" && jwk.alg !== "EdDSA"
+      ) {
+        throw new DOMException(
+          'JWK "alg" does not match the requested algorithm',
+          "DataError",
+        );
       }
 
       // 6.
@@ -4087,6 +4120,9 @@ function importKeyEd25519(
       } else {
         // https://www.rfc-editor.org/rfc/rfc8037#section-2
         let publicKeyData;
+        if (jwk.x === undefined) {
+          throw new DOMException("Invalid keyData", "DataError");
+        }
         try {
           publicKeyData = op_crypto_base64url_decode(jwk.x);
         } catch (_) {
@@ -4101,6 +4137,242 @@ function importKeyEd25519(
 
         const algorithm = {
           name: "Ed25519",
+        };
+
+        return constructKey(
+          "public",
+          extractable,
+          usageIntersection(keyUsages, recognisedUsages),
+          algorithm,
+          handle,
+        );
+      }
+    }
+    default:
+      throw new DOMException("Not implemented", "NotSupportedError");
+  }
+}
+
+function importKeyEd448(
+  format,
+  keyData,
+  extractable,
+  keyUsages,
+) {
+  switch (format) {
+    case "raw-public":
+    case "raw": {
+      if (
+        ArrayPrototypeFind(
+          keyUsages,
+          (u) => !ArrayPrototypeIncludes(["verify"], u),
+        ) !== undefined
+      ) {
+        throw new DOMException("Unsupported key usage", "SyntaxError");
+      }
+
+      if (TypedArrayPrototypeGetByteLength(keyData) !== 57) {
+        throw new DOMException("Invalid key data", "DataError");
+      }
+
+      const handle = {};
+      setKeyData(handle, keyData);
+
+      const algorithm = {
+        name: "Ed448",
+      };
+
+      return constructKey(
+        "public",
+        extractable,
+        usageIntersection(keyUsages, recognisedUsages),
+        algorithm,
+        handle,
+      );
+    }
+    case "spki": {
+      if (
+        ArrayPrototypeFind(
+          keyUsages,
+          (u) => !ArrayPrototypeIncludes(["verify"], u),
+        ) !== undefined
+      ) {
+        throw new DOMException("Unsupported key usage", "SyntaxError");
+      }
+
+      const publicKeyData = new Uint8Array(57);
+      if (!op_crypto_import_spki_ed448(keyData, publicKeyData)) {
+        throw new DOMException("Invalid key type", "DataError");
+      }
+
+      const handle = {};
+      setKeyData(handle, publicKeyData);
+
+      const algorithm = {
+        name: "Ed448",
+      };
+
+      return constructKey(
+        "public",
+        extractable,
+        usageIntersection(keyUsages, recognisedUsages),
+        algorithm,
+        handle,
+      );
+    }
+    case "pkcs8": {
+      if (
+        ArrayPrototypeFind(
+          keyUsages,
+          (u) => !ArrayPrototypeIncludes(["sign"], u),
+        ) !== undefined
+      ) {
+        throw new DOMException("Unsupported key usage", "SyntaxError");
+      }
+
+      const privateKeyData = new Uint8Array(57);
+      if (!op_crypto_import_pkcs8_ed448(keyData, privateKeyData)) {
+        throw new DOMException("Invalid key type", "DataError");
+      }
+
+      const handle = {};
+      setKeyData(handle, privateKeyData);
+
+      const algorithm = {
+        name: "Ed448",
+      };
+
+      return constructKey(
+        "private",
+        extractable,
+        usageIntersection(keyUsages, recognisedUsages),
+        algorithm,
+        handle,
+      );
+    }
+    case "jwk": {
+      const jwk = keyData;
+
+      if (jwk.d !== undefined) {
+        if (
+          ArrayPrototypeFind(
+            keyUsages,
+            (u) => !ArrayPrototypeIncludes(["sign"], u),
+          ) !== undefined
+        ) {
+          throw new DOMException("Unsupported key usage", "SyntaxError");
+        }
+      } else {
+        if (
+          ArrayPrototypeFind(
+            keyUsages,
+            (u) => !ArrayPrototypeIncludes(["verify"], u),
+          ) !== undefined
+        ) {
+          throw new DOMException("Unsupported key usage", "SyntaxError");
+        }
+      }
+
+      if (jwk.kty !== "OKP") {
+        throw new DOMException("Invalid key type", "DataError");
+      }
+
+      if (jwk.crv !== "Ed448") {
+        throw new DOMException(
+          'JWK "crv" Parameter and algorithm name mismatch',
+          "DataError",
+        );
+      }
+
+      if (
+        keyUsages.length > 0 && jwk.use !== undefined && jwk.use !== "sig"
+      ) {
+        throw new DOMException("Invalid JWK \"use\" Parameter", "DataError");
+      }
+
+      if (
+        jwk.alg !== undefined && jwk.alg !== "Ed448" && jwk.alg !== "EdDSA"
+      ) {
+        throw new DOMException(
+          'JWK "alg" does not match the requested algorithm',
+          "DataError",
+        );
+      }
+
+      if (jwk.key_ops !== undefined) {
+        if (
+          ArrayPrototypeFind(
+            jwk.key_ops,
+            (u) => !ArrayPrototypeIncludes(recognisedUsages, u),
+          ) !== undefined
+        ) {
+          throw new DOMException(
+            "'key_ops' property of JsonWebKey is invalid",
+            "DataError",
+          );
+        }
+
+        if (
+          !ArrayPrototypeEvery(
+            keyUsages,
+            (u) => ArrayPrototypeIncludes(jwk.key_ops, u),
+          )
+        ) {
+          throw new DOMException(
+            "'key_ops' property of JsonWebKey is invalid",
+            "DataError",
+          );
+        }
+      }
+
+      if (jwk.ext !== undefined && jwk.ext === false && extractable) {
+        throw new DOMException("Invalid key extractability", "DataError");
+      }
+
+      if (jwk.d !== undefined) {
+        let privateKeyData;
+        try {
+          privateKeyData = op_crypto_base64url_decode(jwk.d);
+        } catch (_) {
+          throw new DOMException("Invalid private key data", "DataError");
+        }
+        if (TypedArrayPrototypeGetByteLength(privateKeyData) !== 57) {
+          throw new DOMException("Invalid private key data", "DataError");
+        }
+
+        const handle = {};
+        setKeyData(handle, privateKeyData);
+
+        const algorithm = {
+          name: "Ed448",
+        };
+
+        return constructKey(
+          "private",
+          extractable,
+          usageIntersection(keyUsages, recognisedUsages),
+          algorithm,
+          handle,
+        );
+      } else {
+        let publicKeyData;
+        if (jwk.x === undefined) {
+          throw new DOMException("Invalid keyData", "DataError");
+        }
+        try {
+          publicKeyData = op_crypto_base64url_decode(jwk.x);
+        } catch (_) {
+          throw new DOMException("Invalid public key data", "DataError");
+        }
+        if (TypedArrayPrototypeGetByteLength(publicKeyData) !== 57) {
+          throw new DOMException("Invalid public key data", "DataError");
+        }
+
+        const handle = {};
+        setKeyData(handle, publicKeyData);
+
+        const algorithm = {
+          name: "Ed448",
         };
 
         return constructKey(
@@ -4242,13 +4514,16 @@ function importKeyX25519(
 
       // 5.
       if (jwk.crv !== "X25519") {
-        throw new DOMException("Invalid curve", "DataError");
+        throw new DOMException(
+          'JWK "crv" Parameter and algorithm name mismatch',
+          "DataError",
+        );
       }
 
       // 6.
       if (keyUsages.length > 0 && jwk.use !== undefined) {
         if (jwk.use !== "enc") {
-          throw new DOMException("Invalid key use", "DataError");
+          throw new DOMException("Invalid JWK \"use\" Parameter", "DataError");
         }
       }
 
@@ -4314,6 +4589,9 @@ function importKeyX25519(
       } else {
         // https://www.rfc-editor.org/rfc/rfc8037#section-2
         let publicKeyData;
+        if (jwk.x === undefined) {
+          throw new DOMException("Invalid keyData", "DataError");
+        }
         try {
           publicKeyData = op_crypto_base64url_decode(jwk.x);
         } catch (_) {
@@ -6112,6 +6390,14 @@ async function importKeyInner(
         keyUsages,
       );
     }
+    case "Ed448": {
+      return importKeyEd448(
+        format,
+        keyData,
+        extractable,
+        keyUsages,
+      );
+    }
     case "ML-KEM-512":
     case "ML-KEM-768":
     case "ML-KEM-1024": {
@@ -6975,6 +7261,66 @@ function exportKeyEd25519(format, key, innerKey) {
       const jwk = {
         kty: "OKP",
         crv: "Ed25519",
+        alg: "Ed25519",
+        x,
+        "key_ops": key.usages,
+        ext: key[_extractable],
+      };
+      if (key[_type] === "private") {
+        jwk.d = op_crypto_base64url_encode(innerKey);
+      }
+      return jwk;
+    }
+    default:
+      throw new DOMException("Not implemented", "NotSupportedError");
+  }
+}
+
+function exportKeyEd448(format, key, innerKey) {
+  switch (format) {
+    case "raw-public":
+    case "raw": {
+      if (key[_type] !== "public") {
+        throw new DOMException(
+          "Key is not a public key",
+          "InvalidAccessError",
+        );
+      }
+
+      return TypedArrayPrototypeGetBuffer(innerKey);
+    }
+    case "spki": {
+      if (key[_type] !== "public") {
+        throw new DOMException(
+          "Key is not a public key",
+          "InvalidAccessError",
+        );
+      }
+
+      const spkiDer = op_crypto_export_spki_ed448(innerKey);
+      return TypedArrayPrototypeGetBuffer(spkiDer);
+    }
+    case "pkcs8": {
+      if (key[_type] !== "private") {
+        throw new DOMException(
+          "Key is not a private key",
+          "InvalidAccessError",
+        );
+      }
+
+      const pkcs8Der = op_crypto_export_pkcs8_ed448(
+        new Uint8Array([0x04, 0x39, ...new SafeArrayIterator(innerKey)]),
+      );
+      return TypedArrayPrototypeGetBuffer(pkcs8Der);
+    }
+    case "jwk": {
+      const x = key[_type] === "private"
+        ? op_crypto_jwk_x_ed448(innerKey)
+        : op_crypto_base64url_encode(innerKey);
+      const jwk = {
+        kty: "OKP",
+        crv: "Ed448",
+        alg: "Ed448",
         x,
         "key_ops": key.usages,
         ext: key[_extractable],
@@ -8439,6 +8785,9 @@ function cryptoKeyExportNodeKeyMaterial(cryptoKey) {
       case "Ed25519":
         data = op_crypto_export_spki_ed25519(innerKey);
         break;
+      case "Ed448":
+        data = op_crypto_export_spki_ed448(innerKey);
+        break;
       case "X25519":
         data = op_crypto_export_spki_x25519(innerKey);
         break;
@@ -8483,6 +8832,12 @@ function cryptoKeyExportNodeKeyMaterial(cryptoKey) {
         new Uint8Array([0x04, 0x22, ...new SafeArrayIterator(innerKey)]),
       );
       data[15] = 0x20;
+      break;
+    }
+    case "Ed448": {
+      data = op_crypto_export_pkcs8_ed448(
+        new Uint8Array([0x04, 0x39, ...new SafeArrayIterator(innerKey)]),
+      );
       break;
     }
     case "X25519": {
@@ -8599,6 +8954,8 @@ function importCryptoKeySync(format, keyData, algorithm, extractable, usages) {
       return importKeyX25519(format, keyData, extractable, usages);
     case "Ed25519":
       return importKeyEd25519(format, keyData, extractable, usages);
+    case "Ed448":
+      return importKeyEd448(format, keyData, extractable, usages);
     case "ML-DSA-44":
     case "ML-DSA-65":
     case "ML-DSA-87":

@@ -2228,6 +2228,7 @@ dependencies = [
  "base64 0.22.1",
  "cbc",
  "const-oid 0.9.6",
+ "crypto-bigint 0.5.5",
  "ctr",
  "curve25519-dalek",
  "deno_core",
