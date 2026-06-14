@@ -7018,6 +7018,7 @@ function setUpCrossRealmTransformReadable(stream, port) {
     port.close();
   });
   port.start();
+  port.unref();
   const startAlgorithm = () => undefined;
   const pullAlgorithm = () => {
     packAndPostMessage(port, "pull", undefined);
@@ -7076,6 +7077,7 @@ function setUpCrossRealmTransformWritable(stream, port) {
     port.close();
   });
   port.start();
+  port.unref();
   const startAlgorithm = () => undefined;
   const writeAlgorithm = (chunk) => {
     if (!backpressurePromise) {
