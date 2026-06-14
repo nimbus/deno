@@ -101,7 +101,8 @@ pub struct ContextState {
   /// Shared tick info buffer exposed to JS as a Uint8Array.
   /// Index 0: hasTickScheduled (1 = true, 0 = false)
   /// Index 1: hasRejectionToWarn (set by Rust in promise_reject_callback)
-  pub(crate) tick_info: Box<[u8; 2]>,
+  /// Index 2: nextTickDrainDeferrals
+  pub(crate) tick_info: Box<[u8; 3]>,
   /// Shared immediate info buffer exposed to JS as a Uint32Array.
   /// Indices: IMM_IDX_COUNT, IMM_IDX_REF_COUNT, IMM_IDX_HAS_OUTSTANDING
   pub(crate) immediate_info: Box<[u32; 3]>,
@@ -156,6 +157,26 @@ impl ContextState {
     self.tick_info[0] != 0
   }
 
+  pub(crate) fn defer_next_tick_drain(&self) {
+    unsafe {
+      let ptr = self.tick_info.as_ptr() as *mut u8;
+      let value = *ptr.add(2);
+      if value < u8::MAX {
+        *ptr.add(2) = value + 1;
+      }
+    }
+  }
+
+  pub(crate) fn resume_next_tick_drain(&self) {
+    unsafe {
+      let ptr = self.tick_info.as_ptr() as *mut u8;
+      let value = *ptr.add(2);
+      if value > 0 {
+        *ptr.add(2) = value - 1;
+      }
+    }
+  }
+
   pub(crate) fn new(
     op_driver: Rc<OpDriverImpl>,
     isolate_ptr: v8::UnsafeRawIsolatePtr,
@@ -168,7 +189,7 @@ impl ContextState {
     Self {
       isolate: Some(isolate_ptr),
       exception_state: Default::default(),
-      tick_info: Box::new([0u8; 2]),
+      tick_info: Box::new([0u8; 3]),
       immediate_info: Box::new([0u32; 3]),
       js_event_loop_tick_cb: Default::default(),
       js_drain_next_tick_and_macrotasks_cb: Default::default(),

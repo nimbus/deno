@@ -1101,12 +1101,13 @@ pub fn host_import_module_with_phase_dynamically_callback<'s, 'i>(
     if !ModuleMap::load_dynamic_import(
       module_map_rc,
       tc_scope,
-      specifier_str,
+      specifier_str.clone(),
       referrer_name_str,
       requested_module_type,
       phase,
       resolver_handle,
       cped_handle,
+      phase == ModuleImportPhase::Evaluation && specifier_str.ends_with(".cjs"),
     ) {
       // Short-circuit if the module is already cached and we know it won't error.
       return Some(promise);

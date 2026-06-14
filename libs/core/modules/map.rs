@@ -85,7 +85,8 @@ fn is_commonjs_wrapper_source(source: &str) -> bool {
   source.starts_with(CJS_WRAPPER_MARKER)
     && source
       .contains("const require = __internalCreateRequire(import.meta.url);")
-    && source.contains("export default mod;\n")
+    && (source.contains("export default mod;\n")
+      || source.contains("export default __deno_cjs_exports__;\n"))
 }
 
 fn error_property_to_string<'s, 'i>(
@@ -285,6 +286,7 @@ struct DynImportState {
   resolver: v8::Global<v8::PromiseResolver>,
   cped: v8::Global<v8::Value>,
   phase: ModuleImportPhase,
+  defer_next_tick_drain: bool,
 }
 
 /// A collection of JS modules.
@@ -1798,6 +1800,7 @@ impl ModuleMap {
     phase: ModuleImportPhase,
     resolver_handle: v8::Global<v8::PromiseResolver>,
     cped_handle: v8::Global<v8::Value>,
+    defer_next_tick_drain: bool,
   ) -> bool {
     let resolve_response = self.resolve_with_scope_and_type(
       scope,
@@ -1843,6 +1846,14 @@ impl ModuleMap {
           return false;
         }
 
+        let is_commonjs_wrapper = self
+          .data
+          .borrow()
+          .info
+          .get(id)
+          .map(|info| info.is_commonjs_wrapper)
+          .unwrap_or(false);
+
         // No pending TLA, safe to resolve immediately
         let resolver = resolver_handle.open(scope);
         let module_namespace = Self::module_namespace_for_promise_resolve(
@@ -1850,6 +1861,11 @@ impl ModuleMap {
           module.get_module_namespace(),
         );
         resolver.resolve(scope, module_namespace).unwrap();
+        if is_commonjs_wrapper
+          || !JsRealm::state_from_scope(scope).has_tick_scheduled()
+        {
+          scope.perform_microtask_checkpoint();
+        }
 
         return false;
       }
@@ -1925,12 +1941,17 @@ impl ModuleMap {
       resolve_response,
     );
 
+    if defer_next_tick_drain {
+      JsRealm::state_from_scope(scope).defer_next_tick_drain();
+    }
+
     self.dynamic_import_map.borrow_mut().insert(
       load.id(),
       DynImportState {
         resolver: resolver_handle,
         cped: cped_handle,
         phase,
+        defer_next_tick_drain,
       },
     );
 
@@ -2436,13 +2457,12 @@ impl ModuleMap {
     exception: v8::Global<v8::Value>,
     root_module_id: Option<ModuleId>,
   ) {
-    let resolver_handle = self
+    let state = self
       .dynamic_import_map
       .borrow_mut()
       .remove(&id)
-      .expect("Invalid dynamic import id")
-      .resolver;
-    let resolver = resolver_handle.open(scope);
+      .expect("Invalid dynamic import id");
+    let resolver = state.resolver.open(scope);
 
     let exception = root_module_id
       .and_then(|root_module_id| {
@@ -2455,7 +2475,11 @@ impl ModuleMap {
       .unwrap_or(exception);
     let exception = v8::Local::new(scope, exception);
     resolver.reject(scope, exception).unwrap();
-    if !JsRealm::state_from_scope(scope).has_tick_scheduled() {
+    let context_state = JsRealm::state_from_scope(scope);
+    if state.defer_next_tick_drain {
+      scope.perform_microtask_checkpoint();
+      context_state.resume_next_tick_drain();
+    } else if !context_state.has_tick_scheduled() {
       scope.perform_microtask_checkpoint();
     }
   }
@@ -2557,13 +2581,12 @@ impl ModuleMap {
     id: ModuleLoadId,
     mod_id: ModuleId,
   ) {
-    let resolver_handle = self
+    let state = self
       .dynamic_import_map
       .borrow_mut()
       .remove(&id)
-      .expect("Invalid dynamic import id")
-      .resolver;
-    let resolver = resolver_handle.open(scope);
+      .expect("Invalid dynamic import id");
+    let resolver = state.resolver.open(scope);
 
     let module = self
       .data
@@ -2584,7 +2607,11 @@ impl ModuleMap {
     );
     resolver.resolve(scope, module_namespace).unwrap();
     self.dyn_module_evaluate_idle_counter.set(0);
-    if !JsRealm::state_from_scope(scope).has_tick_scheduled() {
+    let context_state = JsRealm::state_from_scope(scope);
+    if state.defer_next_tick_drain {
+      scope.perform_microtask_checkpoint();
+      context_state.resume_next_tick_drain();
+    } else if !context_state.has_tick_scheduled() {
       scope.perform_microtask_checkpoint();
     }
   }

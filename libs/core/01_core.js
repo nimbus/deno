@@ -325,9 +325,11 @@
   // Shared buffer with Rust - avoids JS-to-Rust op calls for tick scheduling.
   // Index 0: hasTickScheduled
   // Index 1: hasRejectionToWarn (set by Rust in promise_reject_callback)
+  // Index 2: nextTick drain deferral count
   // Set by Rust during store_js_callbacks via Deno.core.__tickInfo.
   const kHasTickScheduled = 0;
   const kHasRejectionToWarn = 1;
+  const kNextTickDrainDeferrals = 2;
   let tickInfo;
 
   function hasTickScheduled() {
@@ -346,15 +348,15 @@
     tickInfo[kHasTickScheduled] = value ? 1 : 0;
   }
 
-  let nextTickDrainDeferrals = 0;
-
   function deferNextTickDrain() {
-    nextTickDrainDeferrals++;
+    if (tickInfo[kNextTickDrainDeferrals] < 255) {
+      tickInfo[kNextTickDrainDeferrals]++;
+    }
   }
 
   function resumeNextTickDrain() {
-    if (nextTickDrainDeferrals > 0) {
-      nextTickDrainDeferrals--;
+    if (tickInfo[kNextTickDrainDeferrals] > 0) {
+      tickInfo[kNextTickDrainDeferrals]--;
     }
   }
 
@@ -488,9 +490,9 @@
         return;
       }
     }
-    if (nextTickDrainDeferrals > 0) {
+    if (tickInfo[kNextTickDrainDeferrals] > 0) {
       op_run_microtasks();
-      if (nextTickDrainDeferrals > 0) {
+      if (tickInfo[kNextTickDrainDeferrals] > 0) {
         return;
       }
     }

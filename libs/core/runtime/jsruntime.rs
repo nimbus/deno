@@ -1495,6 +1495,7 @@ impl JsRuntime {
       let tick = context_state.tick_info.as_ptr() as *mut u8;
       *tick = 0;
       *tick.add(1) = 0;
+      *tick.add(2) = 0;
       let imm = context_state.immediate_info.as_ptr() as *mut u32;
       *imm.add(IMM_IDX_COUNT) = 0;
       *imm.add(IMM_IDX_REF_COUNT) = 0;
@@ -1857,7 +1858,7 @@ impl JsRuntime {
         let backing_store = unsafe {
           v8::ArrayBuffer::new_backing_store_from_ptr(
             tick_info_ptr,
-            2,
+            3,
             _no_op_deleter,
             std::ptr::null_mut(),
           )
@@ -1865,7 +1866,7 @@ impl JsRuntime {
         let backing_store_shared = backing_store.make_shared();
         let ab =
           v8::ArrayBuffer::with_backing_store(scope, &backing_store_shared);
-        let tick_info_array = v8::Uint8Array::new(scope, ab, 0, 2).unwrap();
+        let tick_info_array = v8::Uint8Array::new(scope, ab, 0, 3).unwrap();
         let set_tick_info_fn: v8::Local<v8::Function> = bindings::get(
           scope,
           core_obj,
