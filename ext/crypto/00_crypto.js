@@ -118,6 +118,24 @@ const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
 const kKeyObject = internals.kKeyObject ?? Symbol("kKeyObject");
 internals.kKeyObject = kKeyObject;
 
+function tagNodeErrorCode(error, code) {
+  if (
+    (typeof error === "object" && error !== null) ||
+    typeof error === "function"
+  ) {
+    ObjectDefineProperty(error, "code", {
+      value: code,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return error;
+}
+
+function isNimbusNode22CompatLane() {
+  return globalThis.__nimbusNodeCompatLane === "node22";
+}
+
 const supportedNamedCurves = ["P-256", "P-384", "P-521"];
 const recognisedUsages = [
   "encrypt",
@@ -1324,12 +1342,26 @@ class SubtleCrypto {
     webidl.assertBranded(this, SubtleCryptoPrototype);
     const prefix = "Failed to execute 'importKey' on 'SubtleCrypto'";
     webidl.requiredArguments(arguments.length, 4, prefix);
-    format = webidl.converters.KeyFormat(format, prefix, "Argument 1");
-    keyData = webidl.converters["BufferSource or JsonWebKey"](
-      keyData,
-      prefix,
-      "Argument 2",
-    );
+    try {
+      format = webidl.converters.KeyFormat(format, prefix, "Argument 1");
+    } catch (error) {
+      throw tagNodeErrorCode(error, "ERR_INVALID_ARG_VALUE");
+    }
+    if (format === "jwk" && keyData === null) {
+      throw new DOMException("Invalid keyData", "DataError");
+    }
+    try {
+      keyData = webidl.converters["BufferSource or JsonWebKey"](
+        keyData,
+        prefix,
+        "Argument 2",
+      );
+    } catch (error) {
+      if (format !== "jwk") {
+        throw tagNodeErrorCode(error, "ERR_INVALID_ARG_TYPE");
+      }
+      throw error;
+    }
     algorithm = webidl.converters.AlgorithmIdentifier(
       algorithm,
       prefix,
@@ -1347,7 +1379,10 @@ class SubtleCrypto {
       if (ArrayBufferIsView(keyData) || isArrayBuffer(keyData)) {
         keyData = copyBuffer(keyData);
       } else {
-        throw new TypeError("Cannot import key: 'keyData' is a JsonWebKey");
+        throw tagNodeErrorCode(
+          new TypeError("Cannot import key: 'keyData' is a JsonWebKey"),
+          "ERR_INVALID_ARG_TYPE",
+        );
       }
     } else {
       if (ArrayBufferIsView(keyData) || isArrayBuffer(keyData)) {
@@ -1355,7 +1390,21 @@ class SubtleCrypto {
       }
     }
 
-    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "importKey");
+    let normalizedAlgorithm;
+    try {
+      normalizedAlgorithm = normalizeAlgorithm(algorithm, "importKey");
+    } catch (error) {
+      if (
+        algorithm !== null &&
+        typeof algorithm === "object" &&
+        typeof algorithm.name === "string" &&
+        StringPrototypeToUpperCase(algorithm.name) === "HMAC" &&
+        !ObjectHasOwn(algorithm, "hash")
+      ) {
+        throw tagNodeErrorCode(error, "ERR_MISSING_OPTION");
+      }
+      throw error;
+    }
 
     // 8.
     const result = await importKeyInner(
@@ -5417,7 +5466,12 @@ function importKeyHMAC(
       (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
     ) !== undefined
   ) {
-    throw new DOMException("Unsupported key usage", "SyntaxError");
+    throw new DOMException(
+      isNimbusNode22CompatLane()
+        ? "Unsupported key usage for an HMAC key"
+        : "Unsupported key usage for HMAC key",
+      "SyntaxError",
+    );
   }
 
   // 3.
@@ -5587,16 +5641,36 @@ function importKeyHMAC(
   let length = TypedArrayPrototypeGetByteLength(data) * 8;
   // 6.
   if (length === 0) {
-    throw new DOMException("Key length is zero", "DataError");
+    throw new DOMException(
+      isNimbusNode22CompatLane()
+        ? "Zero-length key is not supported"
+        : "HmacImportParams.length cannot be 0",
+      "DataError",
+    );
   }
   // 7.
   if (normalizedAlgorithm.length !== undefined) {
+    if (normalizedAlgorithm.length === 0) {
+      throw new DOMException(
+        isNimbusNode22CompatLane()
+          ? "Zero-length key is not supported"
+          : "HmacImportParams.length cannot be 0",
+        "DataError",
+      );
+    }
+    if (normalizedAlgorithm.length <= (length - 8)) {
+      throw new DOMException(
+        isNimbusNode22CompatLane()
+          ? "Unsupported algorithm.length"
+          : "Unsupported HmacImportParams.length",
+        "NotSupportedError",
+      );
+    }
     if (
-      normalizedAlgorithm.length > length ||
-      normalizedAlgorithm.length <= (length - 8)
+      normalizedAlgorithm.length > length
     ) {
       throw new DOMException(
-        "Key length is invalid",
+        "Invalid key length",
         "DataError",
       );
     }
