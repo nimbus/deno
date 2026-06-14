@@ -168,6 +168,16 @@ function isGenerateKeyMissingRequiredOption(algorithm) {
   }
 }
 
+function isHkdfDeriveBitsMissingRequiredOption(algorithm) {
+  return algorithm !== null &&
+    typeof algorithm === "object" &&
+    typeof algorithm.name === "string" &&
+    StringPrototypeToUpperCase(algorithm.name) === "HKDF" &&
+    (!ObjectHasOwn(algorithm, "salt") ||
+      !ObjectHasOwn(algorithm, "info") ||
+      !ObjectHasOwn(algorithm, "hash"));
+}
+
 function isUint8ArrayValue(value) {
   return isTypedArray(value) &&
     TypedArrayPrototypeGetSymbolToStringTag(value) === "Uint8Array";
@@ -362,6 +372,7 @@ const supportedAlgorithms = {
     "AES-CBC": "AesDerivedKeyParams",
     "AES-CTR": "AesDerivedKeyParams",
     "AES-GCM": "AesDerivedKeyParams",
+    "AES-OCB": "AesDerivedKeyParams",
     "AES-KW": "AesDerivedKeyParams",
     "HMAC": "HmacImportParams",
     "ChaCha20-Poly1305": null,
@@ -1601,17 +1612,25 @@ class SubtleCrypto {
     }
 
     // 2.
-    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "deriveBits");
+    let normalizedAlgorithm;
+    try {
+      normalizedAlgorithm = normalizeAlgorithm(algorithm, "deriveBits");
+    } catch (error) {
+      if (isHkdfDeriveBitsMissingRequiredOption(algorithm)) {
+        throw tagNodeErrorCode(error, "ERR_MISSING_OPTION");
+      }
+      throw error;
+    }
     // 4-6.
     const result = await deriveBits(normalizedAlgorithm, baseKey, length);
     // 7.
     if (normalizedAlgorithm.name !== baseKey[_algorithm].name) {
-      throw new DOMException("Invalid algorithm name", "InvalidAccessError");
+      throw new DOMException("Key algorithm mismatch", "InvalidAccessError");
     }
     // 8.
     if (!ArrayPrototypeIncludes(baseKey[_usages], "deriveBits")) {
       throw new DOMException(
-        "'baseKey' usages does not contain 'deriveBits'",
+        "baseKey does not have deriveBits usage",
         "InvalidAccessError",
       );
     }
@@ -1677,7 +1696,7 @@ class SubtleCrypto {
     // 11.
     if (normalizedAlgorithm.name !== baseKey[_algorithm].name) {
       throw new DOMException(
-        `Invalid algorithm name: ${normalizedAlgorithm.name}`,
+        "Key algorithm mismatch",
         "InvalidAccessError",
       );
     }
@@ -1685,7 +1704,7 @@ class SubtleCrypto {
     // 12.
     if (!ArrayPrototypeIncludes(baseKey[_usages], "deriveKey")) {
       throw new DOMException(
-        "'baseKey' usages does not contain 'deriveKey'",
+        "baseKey does not have deriveKey usage",
         "InvalidAccessError",
       );
     }
@@ -7809,8 +7828,17 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
   switch (normalizedAlgorithm.name) {
     case "PBKDF2": {
       // 1.
-      if (length == null || length == 0 || length % 8 !== 0) {
+      if (length === null) {
+        throw new DOMException("length cannot be null", "OperationError");
+      }
+      if (length === 0) {
         throw new DOMException("Invalid length", "OperationError");
+      }
+      if (length % 8 !== 0) {
+        throw new DOMException(
+          "length must be a multiple of 8",
+          "OperationError",
+        );
       }
 
       if (normalizedAlgorithm.iterations == 0) {
@@ -7898,8 +7926,17 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
     }
     case "HKDF": {
       // 1.
-      if (length === null || length === 0 || length % 8 !== 0) {
-        throw new DOMException("Invalid length", "OperationError");
+      if (length === null) {
+        throw new DOMException("length cannot be null", "OperationError");
+      }
+      if (length % 8 !== 0) {
+        throw new DOMException(
+          "length must be a multiple of 8",
+          "OperationError",
+        );
+      }
+      if (length === 0) {
+        return TypedArrayPrototypeGetBuffer(new Uint8Array(0));
       }
 
       const handle = baseKey[_handle];
