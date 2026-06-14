@@ -277,6 +277,62 @@ Deno.test({
 });
 
 Deno.test({
+  name:
+    "vm context importModuleDynamically handles indirect eval without referrer",
+  async fn() {
+    const seen: string[] = [];
+    const context = createContext({ Promise }, {
+      importModuleDynamically(specifier, referrer) {
+        seen.push(`${specifier}:${referrer === context}`);
+        return dynamicImportModule(`context default ${specifier}`);
+      },
+    });
+    const perScriptCallback = () => {
+      throw new Error("unexpected per-script callback");
+    };
+
+    const scriptResult = new Script(
+      `Promise.resolve("import('vm:ctx-eval')").then(eval)`,
+      { importModuleDynamically: perScriptCallback },
+    ).runInContext(context) as Promise<{ value: string }>;
+    assertEquals((await scriptResult).value, "context default vm:ctx-eval");
+
+    const module = new SourceTextModule(
+      `globalThis.p = Promise.resolve("import('vm:ctx-module-eval')").then(eval)`,
+      { context, importModuleDynamically: perScriptCallback },
+    );
+    await module.link(() => {
+      throw new Error("unexpected static import");
+    });
+    await module.evaluate();
+    assertEquals(
+      (await context.p as { value: string }).value,
+      "context default vm:ctx-module-eval",
+    );
+
+    assertEquals(seen, [
+      "vm:ctx-eval:true",
+      "vm:ctx-module-eval:true",
+    ]);
+
+    const missingContext = createContext({ Promise });
+    const missingResult = new Script(
+      `Promise.resolve("import('vm:ctx-missing')").then(eval)`,
+      { importModuleDynamically: perScriptCallback },
+    ).runInContext(missingContext) as Promise<unknown>;
+    const error = await assertRejects(
+      () => missingResult,
+      TypeError,
+      "A dynamic import callback was not specified.",
+    );
+    assertEquals(
+      (error as TypeError & { code?: string }).code,
+      "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING",
+    );
+  },
+});
+
+Deno.test({
   name: "vm SourceTextModule importModuleDynamically callback resolves modules",
   async fn() {
     let referrer: unknown;

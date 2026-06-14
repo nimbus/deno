@@ -40,6 +40,34 @@ fn vm_host_defined_options<'s>(
   }
 }
 
+fn set_context_vm_dynamic_import_options(
+  scope: &mut v8::PinScope<'_, '_>,
+  context: v8::Local<v8::Context>,
+  callback_id: i32,
+) {
+  match callback_id {
+    -1 => {}
+    0 => deno_core::set_context_vm_dynamic_import_options(
+      scope,
+      context,
+      deno_core::host_defined_options_kind::VM_DYNAMIC_IMPORT_MISSING,
+      None,
+    ),
+    id if id > 0 => deno_core::set_context_vm_dynamic_import_options(
+      scope,
+      context,
+      deno_core::host_defined_options_kind::VM_DYNAMIC_IMPORT_CALLBACK,
+      Some(id as u32),
+    ),
+    _ => deno_core::set_context_vm_dynamic_import_options(
+      scope,
+      context,
+      deno_core::host_defined_options_kind::VM_DYNAMIC_IMPORT_MISSING,
+      None,
+    ),
+  }
+}
+
 #[op2(fast)]
 pub fn op_vm_dynamic_import_callback_register(
   scope: &mut v8::PinScope<'_, '_>,
@@ -466,6 +494,7 @@ impl ContextifyContext {
     allow_code_gen_strings: bool,
     allow_code_gen_wasm: bool,
     own_microtask_queue: bool,
+    import_module_dynamically_id: i32,
   ) {
     let main_context = scope.get_current_context();
 
@@ -539,6 +568,11 @@ impl ContextifyContext {
         &raw const CONTEXTIFY_TAG as *mut _,
       );
     }
+    set_context_vm_dynamic_import_options(
+      scope,
+      context,
+      import_module_dynamically_id,
+    );
 
     keep_wrapper_alive(scope, context, wrapper);
 
@@ -564,6 +598,7 @@ impl ContextifyContext {
     allow_code_gen_strings: bool,
     allow_code_gen_wasm: bool,
     own_microtask_queue: bool,
+    import_module_dynamically_id: i32,
   ) -> v8::Local<'s, v8::Object> {
     let main_context = scope.get_current_context();
 
@@ -651,6 +686,11 @@ impl ContextifyContext {
         &raw const CONTEXTIFY_TAG as *mut _,
       );
     }
+    set_context_vm_dynamic_import_options(
+      scope,
+      context,
+      import_module_dynamically_id,
+    );
 
     keep_wrapper_alive(scope, context, wrapper);
 
@@ -1460,6 +1500,7 @@ pub fn op_vm_create_context(
   allow_code_gen_strings: bool,
   allow_code_gen_wasm: bool,
   own_microtask_queue: bool,
+  import_module_dynamically_id: i32,
 ) {
   // Don't allow contextifying a sandbox multiple times.
   assert!(!ContextifyContext::is_contextify_context(
@@ -1475,6 +1516,7 @@ pub fn op_vm_create_context(
     allow_code_gen_strings,
     allow_code_gen_wasm,
     own_microtask_queue,
+    import_module_dynamically_id,
   );
 }
 
@@ -1484,12 +1526,14 @@ pub fn op_vm_create_context_without_contextify<'s>(
   allow_code_gen_strings: bool,
   allow_code_gen_wasm: bool,
   own_microtask_queue: bool,
+  import_module_dynamically_id: i32,
 ) -> v8::Local<'s, v8::Value> {
   ContextifyContext::attach_vanilla(
     scope,
     allow_code_gen_strings,
     allow_code_gen_wasm,
     own_microtask_queue,
+    import_module_dynamically_id,
   )
   .into()
 }
@@ -2232,7 +2276,7 @@ pub fn op_vm_module_evaluate<'a>(
       reason = "isolated here and sending to separate thread"
     )]
     let timed_out = std::sync::Arc::new(AtomicBool::new(false));
-    let mut evaluate = || module.evaluate(scope);
+    let evaluate = || module.evaluate(scope);
     let r = if timeout != -1 {
       let timed_out = timed_out.clone();
       let (tx, rx) = std::sync::mpsc::channel();

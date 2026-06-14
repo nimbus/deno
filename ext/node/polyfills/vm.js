@@ -361,9 +361,11 @@ function createContext(
       "afterEvaluate",
       undefined,
     ]);
-    validateImportModuleDynamically(
+    const referrer = { value: undefined };
+    const importModuleDynamicallyId = getImportModuleDynamicallyId(
       importModuleDynamically,
       "options.importModuleDynamically",
+      () => referrer.value,
     );
     const microtaskQueue = microtaskMode === "afterEvaluate";
 
@@ -371,7 +373,9 @@ function createContext(
       strings,
       wasm,
       microtaskQueue,
+      importModuleDynamicallyId,
     );
+    referrer.value = context;
     WeakMapPrototypeSet(
       importModuleDynamicallyMap,
       context,
@@ -417,9 +421,10 @@ function createContext(
     "afterEvaluate",
     undefined,
   ]);
-  validateImportModuleDynamically(
+  const importModuleDynamicallyId = getImportModuleDynamicallyId(
     importModuleDynamically,
     "options.importModuleDynamically",
+    () => contextObject,
   );
   const microtaskQueue = microtaskMode === "afterEvaluate";
 
@@ -430,6 +435,7 @@ function createContext(
     strings,
     wasm,
     microtaskQueue,
+    importModuleDynamicallyId,
   );
   WeakMapPrototypeSet(
     importModuleDynamicallyMap,

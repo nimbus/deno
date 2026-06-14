@@ -12,6 +12,8 @@ use crate::JsRuntime;
 /// Index of the kind tag inside the host-defined-options PrimitiveArray.
 pub const HOST_DEFINED_OPTIONS_KIND_INDEX: usize = 0;
 pub const HOST_DEFINED_OPTIONS_KEY_INDEX: usize = 1;
+const VM_DYNAMIC_IMPORT_CONTEXT_KIND_SLOT_INDEX: i32 = 5;
+const VM_DYNAMIC_IMPORT_CONTEXT_KEY_SLOT_INDEX: i32 = 6;
 
 /// Kind tags written at [`HOST_DEFINED_OPTIONS_KIND_INDEX`].
 pub mod host_defined_options_kind {
@@ -101,6 +103,46 @@ pub fn read_host_defined_options_key(
   let value: v8::Local<v8::Value> = primitive.into();
   let int = v8::Local::<v8::Uint32>::try_from(value).ok()?;
   Some(int.value())
+}
+
+/// Store the context-level `node:vm` dynamic-import behavior used when V8
+/// reports a dynamic import without script/module host-defined options and
+/// without a concrete referrer.
+pub fn set_context_vm_dynamic_import_options(
+  scope: &mut PinScope<'_, '_>,
+  context: v8::Local<v8::Context>,
+  kind: u32,
+  key: Option<u32>,
+) {
+  let kind_value = v8::Integer::new_from_unsigned(scope, kind);
+  context.set_embedder_data(
+    VM_DYNAMIC_IMPORT_CONTEXT_KIND_SLOT_INDEX,
+    kind_value.into(),
+  );
+  let key_value = v8::Integer::new_from_unsigned(scope, key.unwrap_or(0));
+  context.set_embedder_data(
+    VM_DYNAMIC_IMPORT_CONTEXT_KEY_SLOT_INDEX,
+    key_value.into(),
+  );
+}
+
+/// Read the context-level `node:vm` dynamic-import behavior, if one was stored.
+pub fn read_context_vm_dynamic_import_options(
+  scope: &mut PinScope<'_, '_>,
+  context: v8::Local<v8::Context>,
+) -> Option<(u32, Option<u32>)> {
+  let kind_value = context
+    .get_embedder_data(scope, VM_DYNAMIC_IMPORT_CONTEXT_KIND_SLOT_INDEX)?;
+  let kind = v8::Local::<v8::Uint32>::try_from(kind_value).ok()?.value();
+  if kind == 0 {
+    return None;
+  }
+  let key = context
+    .get_embedder_data(scope, VM_DYNAMIC_IMPORT_CONTEXT_KEY_SLOT_INDEX)
+    .and_then(|key_value| v8::Local::<v8::Uint32>::try_from(key_value).ok())
+    .map(|key| key.value())
+    .filter(|key| *key != 0);
+  Some((kind, key))
 }
 
 /// Store a `node:vm` dynamic import trampoline in this runtime and return its
