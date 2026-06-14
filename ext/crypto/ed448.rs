@@ -14,6 +14,8 @@ use spki::der::Decode;
 use spki::der::Encode;
 use spki::der::asn1::BitString;
 
+use crate::key_store::CryptoKeyHandle;
+
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum Ed448Error {
   #[class("DOMExceptionOperationError")]
@@ -51,6 +53,49 @@ pub fn op_crypto_generate_ed448_keypair(
   let public_key = pair.verifying_key().to_bytes();
   pubkey.copy_from_slice(&public_key);
   true
+}
+
+#[op2(fast)]
+pub fn op_crypto_sign_ed448(
+  #[cppgc] key: &CryptoKeyHandle,
+  #[buffer] data: &[u8],
+  #[buffer] signature: &mut [u8],
+) -> bool {
+  if signature.len() != 114 {
+    return false;
+  }
+
+  let key = key.data().bytes();
+  let secret = match SecretKey::try_from(key) {
+    Ok(secret) => secret,
+    Err(_) => return false,
+  };
+  let pair = SigningKey::from(secret);
+  let sig = pair.sign_raw(data);
+  signature.copy_from_slice(&sig.to_bytes());
+  true
+}
+
+#[op2(fast)]
+pub fn op_crypto_verify_ed448(
+  #[cppgc] pubkey: &CryptoKeyHandle,
+  #[buffer] data: &[u8],
+  #[buffer] signature: &[u8],
+) -> bool {
+  let pubkey = pubkey.data().bytes();
+  let bytes: [u8; 57] = match pubkey.try_into() {
+    Ok(bytes) => bytes,
+    Err(_) => return false,
+  };
+  let verifying_key = match VerifyingKey::from_bytes(&bytes) {
+    Ok(verifying_key) => verifying_key,
+    Err(_) => return false,
+  };
+  let signature = match ed448_goldilocks::Signature::from_slice(signature) {
+    Ok(signature) => signature,
+    Err(_) => return false,
+  };
+  verifying_key.verify_raw(&signature, data).is_ok()
 }
 
 #[op2(fast)]

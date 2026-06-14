@@ -58,12 +58,14 @@ const {
   op_crypto_mldsa_from_seed,
   op_crypto_mldsa_from_spki,
   op_crypto_random_uuid,
+  op_crypto_sign_ed448,
   op_crypto_sign_ed25519,
   op_crypto_sign_key,
   op_crypto_sign_mldsa,
   op_crypto_subtle_digest,
   op_crypto_subtle_digest_xof,
   op_crypto_unwrap_key,
+  op_crypto_verify_ed448,
   op_crypto_verify_ed25519,
   op_crypto_verify_key,
   op_crypto_verify_mldsa,
@@ -170,6 +172,10 @@ function isGenerateKeyMissingRequiredOption(algorithm) {
   }
 }
 
+function isEdDsaAlgorithm(name) {
+  return name === "Ed25519" || name === "Ed448";
+}
+
 function isHkdfDeriveBitsMissingRequiredOption(algorithm) {
   return algorithm !== null &&
     typeof algorithm === "object" &&
@@ -253,6 +259,7 @@ const simpleAlgorithmDictionaries = {
     customization: "BufferSource",
   },
   TurboShakeParams: {},
+  EdDsaParams: { context: "BufferSource" },
   MlDsaParams: { context: "BufferSource" },
 };
 
@@ -304,6 +311,7 @@ const supportedAlgorithms = {
     "KMAC128": "KmacSignParams",
     "KMAC256": "KmacSignParams",
     "Ed25519": null,
+    "Ed448": "EdDsaParams",
     "ML-DSA-44": "MlDsaParams",
     "ML-DSA-65": "MlDsaParams",
     "ML-DSA-87": "MlDsaParams",
@@ -316,6 +324,7 @@ const supportedAlgorithms = {
     "KMAC128": "KmacSignParams",
     "KMAC256": "KmacSignParams",
     "Ed25519": null,
+    "Ed448": "EdDsaParams",
     "ML-DSA-44": "MlDsaParams",
     "ML-DSA-65": "MlDsaParams",
     "ML-DSA-87": "MlDsaParams",
@@ -1334,6 +1343,12 @@ class SubtleCrypto {
           "InvalidAccessError",
         );
       }
+      if (isEdDsaAlgorithm(normalizedAlgorithm.name)) {
+        throw new DOMException(
+          "Unable to use this key to sign",
+          "InvalidAccessError",
+        );
+      }
       throw new DOMException(
         "Signing algorithm does not match key algorithm",
         "InvalidAccessError",
@@ -1344,7 +1359,8 @@ class SubtleCrypto {
     if (!ArrayPrototypeIncludes(key[_usages], "sign")) {
       if (
         normalizedAlgorithm.name === "KMAC128" ||
-        normalizedAlgorithm.name === "KMAC256"
+        normalizedAlgorithm.name === "KMAC256" ||
+        isEdDsaAlgorithm(normalizedAlgorithm.name)
       ) {
         throw new DOMException(
           "Unable to use this key to sign",
@@ -1452,6 +1468,29 @@ class SubtleCrypto {
         const SIGNATURE_LEN = 32 * 2; // ELEM_LEN + SCALAR_LEN
         const signature = new Uint8Array(SIGNATURE_LEN);
         if (!op_crypto_sign_ed25519(handle.cppgc, data, signature)) {
+          throw new DOMException(
+            "Failed to sign",
+            "OperationError",
+          );
+        }
+        return TypedArrayPrototypeGetBuffer(signature);
+      }
+      case "Ed448": {
+        if (key[_type] !== "private") {
+          throw new DOMException(
+            "Key type not supported",
+            "InvalidAccessError",
+          );
+        }
+
+        const context = normalizedAlgorithm.context;
+        if (context !== undefined && context.byteLength !== 0) {
+          throw new TypeError("Non zero-length context is not supported");
+        }
+
+        const SIGNATURE_LEN = 114;
+        const signature = new Uint8Array(SIGNATURE_LEN);
+        if (!op_crypto_sign_ed448(handle.cppgc, data, signature)) {
           throw new DOMException(
             "Failed to sign",
             "OperationError",
@@ -1876,6 +1915,12 @@ class SubtleCrypto {
           "InvalidAccessError",
         );
       }
+      if (isEdDsaAlgorithm(normalizedAlgorithm.name)) {
+        throw new DOMException(
+          "Unable to use this key to verify",
+          "InvalidAccessError",
+        );
+      }
       throw new DOMException(
         "Verifying algorithm does not match key algorithm",
         "InvalidAccessError",
@@ -1885,7 +1930,8 @@ class SubtleCrypto {
     if (!ArrayPrototypeIncludes(key[_usages], "verify")) {
       if (
         normalizedAlgorithm.name === "KMAC128" ||
-        normalizedAlgorithm.name === "KMAC256"
+        normalizedAlgorithm.name === "KMAC256" ||
+        isEdDsaAlgorithm(normalizedAlgorithm.name)
       ) {
         throw new DOMException(
           "Unable to use this key to verify",
@@ -1975,6 +2021,21 @@ class SubtleCrypto {
         }
 
         return op_crypto_verify_ed25519(handle.cppgc, data, signature);
+      }
+      case "Ed448": {
+        if (key[_type] !== "public") {
+          throw new DOMException(
+            "Key type not supported",
+            "InvalidAccessError",
+          );
+        }
+
+        const context = normalizedAlgorithm.context;
+        if (context !== undefined && context.byteLength !== 0) {
+          throw new TypeError("Non zero-length context is not supported");
+        }
+
+        return op_crypto_verify_ed448(handle.cppgc, data, signature);
       }
       case "ML-DSA-44":
       case "ML-DSA-65":
@@ -9342,6 +9403,19 @@ const dictTurboShakeParams = [
 webidl.converters.TurboShakeParams = webidl.createDictionaryConverter(
   "TurboShakeParams",
   dictTurboShakeParams,
+);
+
+const dictEdDsaParams = [
+  ...new SafeArrayIterator(dictAlgorithm),
+  {
+    key: "context",
+    converter: webidl.converters["BufferSource"],
+  },
+];
+
+webidl.converters.EdDsaParams = webidl.createDictionaryConverter(
+  "EdDsaParams",
+  dictEdDsaParams,
 );
 
 const dictMlDsaParams = [
