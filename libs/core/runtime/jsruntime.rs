@@ -9,6 +9,7 @@ use std::ffi::c_void;
 use std::future::Future;
 use std::future::poll_fn;
 use std::mem::ManuallyDrop;
+use std::num::NonZeroI32;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::pin::Pin;
@@ -31,6 +32,7 @@ use super::bindings;
 use super::bindings::create_exports_for_ops_virtual_module;
 use super::bindings::watch_promise;
 use super::exception_state::ExceptionState;
+use super::host_defined_options::VmModuleImportMetaInitializer;
 use super::jsrealm::JsRealmInner;
 use super::op_driver::OpDriver;
 use super::setup;
@@ -476,6 +478,8 @@ pub struct JsRuntimeState {
   pub(crate) vm_dynamic_import_callbacks:
     RefCell<HashMap<u32, v8::Global<v8::Function>>>,
   pub(crate) next_vm_dynamic_import_callback_id: Cell<u32>,
+  pub(crate) vm_module_import_meta_initializers:
+    RefCell<HashMap<NonZeroI32, VmModuleImportMetaInitializer>>,
   pub(crate) eval_context_get_code_cache_cb:
     RefCell<Option<EvalContextGetCodeCacheCb>>,
   pub(crate) eval_context_code_cache_ready_cb:
@@ -871,6 +875,7 @@ impl JsRuntime {
       json_module_evaluation_cb: options.json_module_evaluation_cb,
       vm_dynamic_import_callbacks: Default::default(),
       next_vm_dynamic_import_callback_id: Cell::new(1),
+      vm_module_import_meta_initializers: Default::default(),
       eval_context_get_code_cache_cb: RefCell::new(
         eval_context_get_code_cache_cb,
       ),

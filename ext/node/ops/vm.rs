@@ -1738,6 +1738,11 @@ pub struct ContextifyModule {
   /// the JS wrapper to raise ERR_VM_MODULE_CACHED_DATA_REJECTED. Always false
   /// for synthetic modules and for source-text modules built without a cache.
   cached_data_rejected: Cell<bool>,
+  /// JS-side `initializeImportMeta` hook and module wrapper for
+  /// SourceTextModule. These are traced with the wrapper and registered with
+  /// deno_core only while the module graph is evaluating.
+  import_meta_callback: Option<v8::TracedReference<v8::Function>>,
+  import_meta_module_object: Option<v8::TracedReference<v8::Object>>,
   /// If this is a synthetic module, the V8 identity hash used as the key in
   /// `SYNTHETIC_CALLBACKS`. Stored separately so `Drop` can clean up the
   /// registry entry without needing a v8 scope.
@@ -1751,6 +1756,12 @@ unsafe impl v8::cppgc::GarbageCollected for ContextifyModule {
     visitor.trace(&self.context);
     for r in self.resolutions.borrow().values() {
       visitor.trace(r);
+    }
+    if let Some(callback) = &self.import_meta_callback {
+      visitor.trace(callback);
+    }
+    if let Some(module_object) = &self.import_meta_module_object {
+      visitor.trace(module_object);
     }
   }
 
@@ -1795,6 +1806,8 @@ pub fn op_vm_module_create_source_text_module<'a>(
   context_object: Option<v8::Local<'a, v8::Object>>,
   import_module_dynamically_id: i32,
   #[buffer] cached_data: Option<JsBuffer>,
+  initialize_import_meta: Option<v8::Local<'a, v8::Function>>,
+  module_object: v8::Local<'a, v8::Object>,
 ) -> Option<ContextifyModule> {
   let (context, microtask_queue) =
     resolve_module_context(scope, context_object)?;
@@ -1863,6 +1876,12 @@ pub fn op_vm_module_create_source_text_module<'a>(
     resolutions: RefCell::new(HashMap::new()),
     is_linked: Cell::new(false),
     cached_data_rejected: Cell::new(cached_data_rejected),
+    import_meta_callback: initialize_import_meta
+      .map(|callback| v8::TracedReference::new(scope, callback)),
+    import_meta_module_object: Some(v8::TracedReference::new(
+      scope,
+      module_object,
+    )),
     synthetic_identity_hash: None,
   })
 }
@@ -1936,6 +1955,8 @@ pub fn op_vm_module_create_synthetic_module<'a>(
     // from creation so `op_vm_module_instantiate` doesn't reject them.
     is_linked: Cell::new(true),
     cached_data_rejected: Cell::new(false),
+    import_meta_callback: None,
+    import_meta_module_object: None,
     synthetic_identity_hash: Some(hash),
   })
 }
@@ -2067,6 +2088,20 @@ pub fn op_vm_module_link<'a>(
   true
 }
 
+fn child_modules<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  cm: &ContextifyModule,
+) -> Vec<v8::Local<'s, v8::Object>> {
+  let resolutions = cm.resolutions.borrow();
+  let mut children = Vec::with_capacity(resolutions.len());
+  for tref in resolutions.values() {
+    if let Some(obj) = tref.get(scope) {
+      children.push(obj);
+    }
+  }
+  children
+}
+
 /// Recursively populates the `MODULE_RESOLUTIONS` and `MODULE_IDENTIFIERS`
 /// thread-locals for `cm` and every linked module reachable from it. The
 /// resolutions map is keyed by referrer identity hash so V8's
@@ -2125,6 +2160,77 @@ fn collect_link_graph<'s>(
   MODULE_RESOLUTIONS.with(|r| {
     r.borrow_mut().insert(hash, specifier_to_module);
   });
+}
+
+fn register_import_meta_initializers<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  cm: &ContextifyModule,
+  visited: &mut HashSet<NonZeroI32>,
+) {
+  let Some(module) = cm.module.get(scope) else {
+    return;
+  };
+  let hash = module.get_identity_hash();
+  if !visited.insert(hash) {
+    return;
+  }
+
+  let callback = cm
+    .import_meta_callback
+    .as_ref()
+    .and_then(|callback| callback.get(scope));
+  let module_object = cm
+    .import_meta_module_object
+    .as_ref()
+    .and_then(|module_object| module_object.get(scope));
+  if callback.is_some() || module_object.is_some() {
+    deno_core::register_vm_module_import_meta_initializer(
+      scope,
+      module,
+      callback,
+      module_object,
+    );
+  }
+
+  if !cm.is_linked.get() {
+    return;
+  }
+  for obj in child_modules(scope, cm) {
+    let Some(child) = deno_core::cppgc::try_unwrap_cppgc_object::<
+      ContextifyModule,
+    >(scope, obj.into()) else {
+      continue;
+    };
+    register_import_meta_initializers(scope, &child, visited);
+  }
+}
+
+fn clear_import_meta_initializers<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  cm: &ContextifyModule,
+  visited: &mut HashSet<NonZeroI32>,
+) {
+  let Some(module) = cm.module.get(scope) else {
+    return;
+  };
+  let hash = module.get_identity_hash();
+  if !visited.insert(hash) {
+    return;
+  }
+
+  deno_core::unregister_vm_module_import_meta_initializer(scope, module);
+
+  if !cm.is_linked.get() {
+    return;
+  }
+  for obj in child_modules(scope, cm) {
+    let Some(child) = deno_core::cppgc::try_unwrap_cppgc_object::<
+      ContextifyModule,
+    >(scope, obj.into()) else {
+      continue;
+    };
+    clear_import_meta_initializers(scope, &child, visited);
+  }
 }
 
 #[op2(fast, reentrant)]
@@ -2265,6 +2371,8 @@ pub fn op_vm_module_evaluate<'a>(
   let module = this.module.get(scope).unwrap();
   let outer_context = scope.get_current_context();
 
+  register_import_meta_initializers(scope, this, &mut HashSet::new());
+
   // Enter the module's context, evaluate the module, then come back out.
   let inner_result = {
     let scope = &mut v8::ContextScope::new(scope, inner_context);
@@ -2320,6 +2428,7 @@ pub fn op_vm_module_evaluate<'a>(
     }
 
     if scope.has_caught() {
+      clear_import_meta_initializers(scope, this, &mut HashSet::new());
       if !scope.has_terminated() {
         scope.rethrow();
       }
@@ -2327,7 +2436,10 @@ pub fn op_vm_module_evaluate<'a>(
     }
     r
   };
-  let inner_result = inner_result?;
+  let Some(inner_result) = inner_result else {
+    clear_import_meta_initializers(scope, this, &mut HashSet::new());
+    return None;
+  };
 
   // If the module's context has its own microtask queue (microtaskMode:
   // "afterEvaluate"), wrap the inner promise in an outer-context promise so
@@ -2354,6 +2466,14 @@ pub fn op_vm_module_evaluate<'a>(
   // Suppress unused warning when both contexts are the same.
   let _ = outer_context;
   Some(returned)
+}
+
+#[op2(fast)]
+pub fn op_vm_module_clear_import_meta(
+  scope: &mut v8::PinScope<'_, '_>,
+  #[cppgc] this: &ContextifyModule,
+) {
+  clear_import_meta_initializers(scope, this, &mut HashSet::new());
 }
 
 #[op2(fast)]

@@ -29,6 +29,11 @@ pub mod host_defined_options_kind {
   pub const VM_DYNAMIC_IMPORT_CALLBACK: u32 = 2;
 }
 
+pub(crate) struct VmModuleImportMetaInitializer {
+  callback: Option<v8::Global<v8::Function>>,
+  module_object: Option<v8::Global<v8::Object>>,
+}
+
 /// Build a host-defined-options PrimitiveArray with the given kind tag.
 pub fn create_host_defined_options_with_kind<'s>(
   scope: &mut PinScope<'s, '_>,
@@ -161,4 +166,83 @@ pub fn register_vm_dynamic_import_callback(
     .borrow_mut()
     .insert(id, v8::Global::new(scope, callback));
   id
+}
+
+/// Register a `node:vm` SourceTextModule import.meta initializer.
+///
+/// VM modules are compiled directly through V8 rather than through
+/// deno_core's module map. The normal host import-meta callback therefore
+/// cannot look them up by module handle. `ext/node` registers these external
+/// modules here while their evaluation is in flight so the core callback can
+/// initialize their import.meta objects without treating them as ordinary Deno
+/// modules.
+pub fn register_vm_module_import_meta_initializer<'s>(
+  scope: &mut PinScope<'s, '_>,
+  module: v8::Local<'s, v8::Module>,
+  callback: Option<v8::Local<'s, v8::Function>>,
+  module_object: Option<v8::Local<'s, v8::Object>>,
+) {
+  let state = JsRuntime::state_from(scope);
+  let entry = VmModuleImportMetaInitializer {
+    callback: callback.map(|callback| v8::Global::new(scope, callback)),
+    module_object: module_object
+      .map(|module_object| v8::Global::new(scope, module_object)),
+  };
+  state
+    .vm_module_import_meta_initializers
+    .borrow_mut()
+    .insert(module.get_identity_hash(), entry);
+}
+
+/// Clear a previously registered VM import.meta initializer if V8 did not use
+/// it while evaluating the module graph.
+pub fn unregister_vm_module_import_meta_initializer<'s>(
+  scope: &mut PinScope<'s, '_>,
+  module: v8::Local<'s, v8::Module>,
+) {
+  let state = JsRuntime::state_from(scope);
+  state
+    .vm_module_import_meta_initializers
+    .borrow_mut()
+    .remove(&module.get_identity_hash());
+}
+
+pub(crate) fn try_initialize_vm_module_import_meta<'s>(
+  scope: &mut PinScope<'s, '_>,
+  module: v8::Local<'s, v8::Module>,
+  meta: v8::Local<'s, v8::Object>,
+) -> bool {
+  let entry = {
+    let state = JsRuntime::state_from(scope);
+    state
+      .vm_module_import_meta_initializers
+      .borrow_mut()
+      .remove(&module.get_identity_hash())
+  };
+
+  let Some(entry) = entry else {
+    return false;
+  };
+
+  let null = v8::null(scope);
+  meta.set_prototype(scope, null.into());
+
+  let Some(callback) = entry.callback else {
+    return true;
+  };
+  let Some(module_object) = entry.module_object else {
+    return true;
+  };
+
+  v8::tc_scope!(tc_scope, scope);
+  let callback = v8::Local::new(tc_scope, callback);
+  let module_object = v8::Local::new(tc_scope, module_object);
+  let recv = v8::undefined(tc_scope).into();
+  let args = [meta.into(), module_object.into()];
+  let _ = callback.call(tc_scope, recv, &args);
+  if tc_scope.has_caught() && !tc_scope.has_terminated() {
+    tc_scope.rethrow();
+  }
+
+  true
 }

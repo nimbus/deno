@@ -1262,6 +1262,12 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
   let module_map = JsRealm::module_map_from(scope);
   let state = JsRealm::state_from_scope(scope);
 
+  if super::host_defined_options::try_initialize_vm_module_import_meta(
+    scope, module, meta,
+  ) {
+    return;
+  }
+
   let module_global = v8::Global::new(scope, module);
   let name = module_map
     .get_name_by_module(&module_global)

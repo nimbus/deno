@@ -20,6 +20,7 @@ const {
   op_vm_module_get_module_requests,
   op_vm_module_get_namespace,
   op_vm_module_cached_data_rejected,
+  op_vm_module_clear_import_meta,
   op_vm_module_create_cached_data,
   op_vm_module_get_status,
   op_vm_module_has_top_level_await,
@@ -35,6 +36,7 @@ const {
   validateArray,
   validateBoolean,
   validateBuffer,
+  validateFunction,
   validateInt32,
   validateObject,
   validateOneOf,
@@ -839,7 +841,10 @@ class Module {
       // Return the V8 Promise directly so that synthetic modules with sync
       // evaluation steps produce a synchronously-resolved Promise (matching
       // Node's behavior).
-      return op_vm_module_evaluate(this[kWrap], timeout);
+      const result = op_vm_module_evaluate(this[kWrap], timeout);
+      const clearImportMeta = () => op_vm_module_clear_import_meta(this[kWrap]);
+      PromisePrototypeThen(result, clearImportMeta, clearImportMeta);
+      return result;
     } catch (e) {
       return PromiseReject(e);
     }
@@ -859,6 +864,7 @@ class SourceTextModule extends Module {
       columnOffset = 0,
       importModuleDynamically,
       cachedData,
+      initializeImportMeta,
     } = options;
     if (context !== undefined) {
       validateContext(context);
@@ -870,6 +876,9 @@ class SourceTextModule extends Module {
     validateInt32(columnOffset, "options.columnOffset");
     if (cachedData !== undefined) {
       validateBuffer(cachedData, "options.cachedData");
+    }
+    if (initializeImportMeta !== undefined) {
+      validateFunction(initializeImportMeta, "options.initializeImportMeta");
     }
 
     const referrer = { value: undefined };
@@ -892,6 +901,8 @@ class SourceTextModule extends Module {
       context,
       importModuleDynamicallyId,
       cachedData,
+      initializeImportMeta,
+      this,
     );
     if (
       cachedData !== undefined &&
