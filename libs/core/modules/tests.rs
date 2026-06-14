@@ -1290,6 +1290,7 @@ export const foo = bytes;
         phase: crate::modules::ModuleImportPhase::Evaluation,
       }],
       module_type: ModuleType::Other("foobar".into()),
+      is_commonjs_wrapper: false,
     }
   );
   let info = data.info.get(mod_id - 1).unwrap();
@@ -1301,6 +1302,7 @@ export const foo = bytes;
       name: "file:///b.png".into_module_name(),
       requests: vec![],
       module_type: ModuleType::Other("foobar-synth".into()),
+      is_commonjs_wrapper: false,
     }
   );
 }
@@ -1458,6 +1460,52 @@ bar("foo");
       "#,
     )
     .expect_err("should throw range error");
+}
+
+#[tokio::test]
+async fn dyn_import_without_referrer_rejects_missing_callback() {
+  let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::with(
+    Url::parse("file:///b.js").unwrap(),
+    ascii_str!("export const loaded = true;"),
+  )));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    module_loader: Some(loader.clone()),
+    ..Default::default()
+  });
+  poll_fn(move |cx| {
+    runtime
+      .execute_script(
+        "file:///dyn_import_no_referrer.js",
+        r#"
+        globalThis.__result = Promise.resolve('import("file:///b.js")')
+          .then(eval)
+          .then(
+            () => {
+              throw new Error("no-referrer dynamic import should reject");
+            },
+            (error) => {
+              if (error?.code !== "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING") {
+                throw new Error("unexpected code " + error?.code);
+              }
+            },
+          );
+        "#,
+      )
+      .unwrap();
+
+    match runtime.poll_event_loop(cx, Default::default()) {
+      Poll::Ready(Ok(_)) => {}
+      Poll::Ready(Err(error)) => {
+        panic!("no-referrer dynamic import probe failed: {error:?}");
+      }
+      Poll::Pending => {
+        panic!("no-referrer dynamic import probe stalled")
+      }
+    }
+    assert_eq!(loader.counts(), ModuleLoadEventCounts::new(0, 0, 0, 0));
+    Poll::Ready(())
+  })
+  .await;
 }
 
 #[tokio::test]

@@ -970,39 +970,44 @@ pub fn host_import_module_with_phase_dynamically_callback<'s, 'i>(
       host_defined_options,
     );
 
-  if host_defined_options_kind.is_none()
-    && resource_name.is_undefined()
-    && let Some((context_options_kind, context_callback_id)) =
+  if host_defined_options_kind.is_none() && resource_name.is_undefined() {
+    if let Some((context_options_kind, context_callback_id)) =
       crate::runtime::host_defined_options::read_context_vm_dynamic_import_options(
         scope,
         scope.get_current_context(),
       )
-  {
-    match context_options_kind {
-      crate::runtime::host_defined_options::host_defined_options_kind::VM_DYNAMIC_IMPORT_MISSING => {
-        let resolver = v8::PromiseResolver::new(scope).unwrap();
-        let promise = resolver.get_promise(scope);
-        let exception = vm_dynamic_import_callback_missing_exception(scope);
-        resolver.reject(scope, exception);
-        return Some(promise);
-      }
-      crate::runtime::host_defined_options::host_defined_options_kind::VM_DYNAMIC_IMPORT_CALLBACK => {
-        if let Some(callback_id) = context_callback_id {
-          return Some(host_import_module_with_vm_dynamic_import_callback_id(
-            scope,
-            callback_id,
-            specifier,
-            import_attributes,
-          ));
+    {
+      match context_options_kind {
+        crate::runtime::host_defined_options::host_defined_options_kind::VM_DYNAMIC_IMPORT_MISSING => {
+          let resolver = v8::PromiseResolver::new(scope).unwrap();
+          let promise = resolver.get_promise(scope);
+          let exception = vm_dynamic_import_callback_missing_exception(scope);
+          resolver.reject(scope, exception);
+          return Some(promise);
         }
-        let resolver = v8::PromiseResolver::new(scope).unwrap();
-        let promise = resolver.get_promise(scope);
-        let exception = vm_dynamic_import_callback_missing_exception(scope);
-        resolver.reject(scope, exception);
-        return Some(promise);
+        crate::runtime::host_defined_options::host_defined_options_kind::VM_DYNAMIC_IMPORT_CALLBACK => {
+          if let Some(callback_id) = context_callback_id {
+            return Some(host_import_module_with_vm_dynamic_import_callback_id(
+              scope,
+              callback_id,
+              specifier,
+              import_attributes,
+            ));
+          }
+          let resolver = v8::PromiseResolver::new(scope).unwrap();
+          let promise = resolver.get_promise(scope);
+          let exception = vm_dynamic_import_callback_missing_exception(scope);
+          resolver.reject(scope, exception);
+          return Some(promise);
+        }
+        _ => {}
       }
-      _ => {}
     }
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let exception = vm_dynamic_import_callback_missing_exception(scope);
+    resolver.reject(scope, exception);
+    return Some(promise);
   }
 
   // Scripts compiled by `node:vm` without an `importModuleDynamically`
