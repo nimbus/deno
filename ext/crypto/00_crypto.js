@@ -563,7 +563,7 @@ function usageIntersection(a, b) {
 }
 
 /**
- * Throw a SyntaxError if any requested usage is not valid for a public key of
+ * Throw a SyntaxError if any requested usage is unsupported for a public key of
  * the algorithm (i.e. is not present in `allowed`).
  *
  * @param {string[]} requested
@@ -572,7 +572,7 @@ function usageIntersection(a, b) {
 function validatePublicKeyUsages(requested, allowed) {
   for (let i = 0; i < requested.length; i++) {
     if (!ArrayPrototypeIncludes(allowed, requested[i])) {
-      throw new DOMException("Invalid key usage", "SyntaxError");
+      throw new DOMException("Unsupported key usage", "SyntaxError");
     }
   }
 }
@@ -1365,7 +1365,9 @@ class SubtleCrypto {
       ArrayPrototypeIncludes(["private", "secret"], result[_type]) &&
       keyUsages.length == 0
     ) {
-      throw new SyntaxError("Invalid key usage");
+      throw new SyntaxError(
+        `Usages cannot be empty when importing a ${result[_type]} key.`,
+      );
     }
 
     return result;
@@ -1450,7 +1452,7 @@ class SubtleCrypto {
 
     if (key.extractable === false) {
       throw new DOMException(
-        "Key is not extractable",
+        "key is not extractable",
         "InvalidAccessError",
       );
     }
@@ -1595,7 +1597,9 @@ class SubtleCrypto {
       ArrayPrototypeIncludes(["private", "secret"], result[_type]) &&
       keyUsages.length == 0
     ) {
-      throw new SyntaxError("Invalid key usage");
+      throw new SyntaxError(
+        `Usages cannot be empty when importing a ${result[_type]} key.`,
+      );
     }
     // 17.
     return result;
@@ -1793,7 +1797,7 @@ class SubtleCrypto {
     // 11.
     if (key[_extractable] === false) {
       throw new DOMException(
-        "Key is not extractable",
+        "key is not extractable",
         "InvalidAccessError",
       );
     }
@@ -2069,13 +2073,19 @@ class SubtleCrypto {
     if (ObjectPrototypeIsPrototypeOf(CryptoKeyPrototype, result)) {
       const type = result[_type];
       if ((type === "secret" || type === "private") && usages.length === 0) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException(
+          "Usages cannot be empty when creating a key.",
+          "SyntaxError",
+        );
       }
     } else if (
       ObjectPrototypeIsPrototypeOf(CryptoKeyPrototype, result.privateKey)
     ) {
       if (result.privateKey[_usages].length === 0) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException(
+          "Usages cannot be empty when creating a key.",
+          "SyntaxError",
+        );
       }
     }
 
@@ -2999,7 +3009,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
           (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2.
@@ -3058,7 +3068,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
             ], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2.
@@ -3114,7 +3124,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
           (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2-3.
@@ -3174,7 +3184,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
           (u) => !ArrayPrototypeIncludes(["deriveKey", "deriveBits"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2-3.
@@ -3241,7 +3251,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
             ], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const keyData = await op_crypto_generate_key({
@@ -3275,7 +3285,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
           (u) => !ArrayPrototypeIncludes(["wrapKey", "unwrapKey"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const keyData = await op_crypto_generate_key({
@@ -3308,7 +3318,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
           (u) => !ArrayPrototypeIncludes(["deriveKey", "deriveBits"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
       const privateKeyData = new Uint8Array(56);
       const publicKeyData = new Uint8Array(56);
@@ -3350,7 +3360,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
           (u) => !ArrayPrototypeIncludes(["deriveKey", "deriveBits"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
       const privateKeyData = new Uint8Array(32);
       const publicKeyData = new Uint8Array(32);
@@ -3391,7 +3401,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
           (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const ED25519_SEED_LEN = 32;
@@ -3441,7 +3451,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
           (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const variant = mldsaVariantId(algorithmName);
@@ -3497,7 +3507,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
             ], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2. ChaCha20-Poly1305 keys are always 256 bits.
@@ -3531,7 +3541,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
           (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2.
@@ -3594,7 +3604,7 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
             usages[i],
           )
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
 
@@ -3647,7 +3657,7 @@ function importKeyX448(
     case "raw": {
       // 1.
       if (keyUsages.length > 0) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       if (TypedArrayPrototypeGetByteLength(keyData) !== 56) {
@@ -3674,7 +3684,7 @@ function importKeyX448(
     case "spki": {
       // 1.
       if (keyUsages.length > 0) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const publicKeyData = new Uint8Array(56);
@@ -3705,7 +3715,7 @@ function importKeyX448(
           (u) => !ArrayPrototypeIncludes(["deriveKey", "deriveBits"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const privateKeyData = new Uint8Array(56);
@@ -3744,13 +3754,13 @@ function importKeyX448(
               ),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
 
       // 3.
       if (jwk.d === undefined && keyUsages.length > 0) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 4.
@@ -3879,7 +3889,7 @@ function importKeyEd25519(
           (u) => !ArrayPrototypeIncludes(["verify"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       if (TypedArrayPrototypeGetByteLength(keyData) !== 32) {
@@ -3911,7 +3921,7 @@ function importKeyEd25519(
           (u) => !ArrayPrototypeIncludes(["verify"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const publicKeyData = new Uint8Array(32);
@@ -3942,7 +3952,7 @@ function importKeyEd25519(
           (u) => !ArrayPrototypeIncludes(["sign"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const privateKeyData = new Uint8Array(32);
@@ -3981,7 +3991,7 @@ function importKeyEd25519(
               ),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       } else {
         if (
@@ -3994,7 +4004,7 @@ function importKeyEd25519(
               ),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
 
@@ -4119,7 +4129,7 @@ function importKeyX25519(
     case "raw": {
       // 1.
       if (keyUsages.length > 0) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       if (TypedArrayPrototypeGetByteLength(keyData) !== 32) {
@@ -4146,7 +4156,7 @@ function importKeyX25519(
     case "spki": {
       // 1.
       if (keyUsages.length > 0) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const publicKeyData = new Uint8Array(32);
@@ -4177,7 +4187,7 @@ function importKeyX25519(
           (u) => !ArrayPrototypeIncludes(["deriveKey", "deriveBits"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       const privateKeyData = new Uint8Array(32);
@@ -4216,13 +4226,13 @@ function importKeyX25519(
               ),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
 
       // 3.
       if (jwk.d === undefined && keyUsages.length > 0) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 4.
@@ -4493,7 +4503,7 @@ function importKeyMlKem(
       }
       for (let i = 0; i < keyUsages.length; i++) {
         if (!ArrayPrototypeIncludes(ML_KEM_PUBLIC_USAGES, keyUsages[i])) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
       if (
@@ -4507,7 +4517,7 @@ function importKeyMlKem(
       // FIPS 203 64-byte seed (d || z).
       for (let i = 0; i < keyUsages.length; i++) {
         if (!ArrayPrototypeIncludes(ML_KEM_PRIVATE_USAGES, keyUsages[i])) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
       if (TypedArrayPrototypeGetByteLength(keyData) !== 64) {
@@ -4525,7 +4535,7 @@ function importKeyMlKem(
     case "spki": {
       for (let i = 0; i < keyUsages.length; i++) {
         if (!ArrayPrototypeIncludes(ML_KEM_PUBLIC_USAGES, keyUsages[i])) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
       let imported;
@@ -4545,7 +4555,7 @@ function importKeyMlKem(
     case "pkcs8": {
       for (let i = 0; i < keyUsages.length; i++) {
         if (!ArrayPrototypeIncludes(ML_KEM_PRIVATE_USAGES, keyUsages[i])) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
       let imported;
@@ -4585,7 +4595,7 @@ function importKeyMlKem(
             (u) => !ArrayPrototypeIncludes(ML_KEM_PRIVATE_USAGES, u),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       } else {
         if (
@@ -4594,7 +4604,7 @@ function importKeyMlKem(
             (u) => !ArrayPrototypeIncludes(ML_KEM_PUBLIC_USAGES, u),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
 
@@ -4811,7 +4821,7 @@ function importKeyChaCha20Poly1305(
       (u) => !ArrayPrototypeIncludes(supportedKeyUsages, u),
     ) !== undefined
   ) {
-    throw new DOMException("Invalid key usage", "SyntaxError");
+    throw new DOMException("Unsupported key usage", "SyntaxError");
   }
 
   let data;
@@ -4949,7 +4959,7 @@ function importKeyAES(
       (u) => !ArrayPrototypeIncludes(supportedKeyUsages, u),
     ) !== undefined
   ) {
-    throw new DOMException("Invalid key usage", "SyntaxError");
+    throw new DOMException("Unsupported key usage", "SyntaxError");
   }
 
   const algorithmName = normalizedAlgorithm.name;
@@ -5129,7 +5139,7 @@ function importKeyHMAC(
       (u) => !ArrayPrototypeIncludes(["sign", "verify"], u),
     ) !== undefined
   ) {
-    throw new DOMException("Invalid key usage", "SyntaxError");
+    throw new DOMException("Unsupported key usage", "SyntaxError");
   }
 
   // 3.
@@ -5375,7 +5385,7 @@ function importKeyEC(
             ),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 3.
@@ -5416,7 +5426,7 @@ function importKeyEC(
             ),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2-9.
@@ -5456,10 +5466,10 @@ function importKeyEC(
               ),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       } else if (keyUsages.length != 0) {
-        throw new DOMException("Key usage must be empty", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2-12
@@ -5499,7 +5509,7 @@ function importKeyEC(
           (u) => !ArrayPrototypeIncludes(supportedUsages[keyType], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 3.
@@ -5516,7 +5526,7 @@ function importKeyEC(
         jwk.use !== supportedUsages.jwkUse
       ) {
         throw new DOMException(
-          `'use' property of JsonWebKey must be '${supportedUsages.jwkUse}'`,
+          'Invalid JWK "use" Parameter',
           "DataError",
         );
       }
@@ -5557,6 +5567,13 @@ function importKeyEC(
         );
       }
 
+      if (jwk.crv !== normalizedAlgorithm.namedCurve) {
+        throw new DOMException(
+          'JWK "crv" does not match the requested algorithm',
+          "DataError",
+        );
+      }
+
       // 9.
       if (jwk.alg !== undefined && normalizedAlgorithm.name == "ECDSA") {
         let algNamedCurve;
@@ -5574,33 +5591,26 @@ function importKeyEC(
             algNamedCurve = "P-521";
             break;
           }
-          default:
-            throw new DOMException(
-              "Curve algorithm not supported",
-              "DataError",
-            );
         }
 
-        if (algNamedCurve) {
-          if (algNamedCurve !== normalizedAlgorithm.namedCurve) {
-            throw new DOMException(
-              "Mismatched curve algorithm",
-              "DataError",
-            );
-          }
+        if (algNamedCurve !== normalizedAlgorithm.namedCurve) {
+          throw new DOMException(
+            'JWK "alg" does not match the requested algorithm',
+            "DataError",
+          );
         }
       }
 
       // Validate that this is a valid public key.
       if (jwk.x === undefined) {
         throw new DOMException(
-          "'x' property of JsonWebKey is required for EC keys",
+          "Invalid keyData",
           "DataError",
         );
       }
       if (jwk.y === undefined) {
         throw new DOMException(
-          "'y' property of JsonWebKey is required for EC keys",
+          "Invalid keyData",
           "DataError",
         );
       }
@@ -5710,7 +5720,7 @@ function importKeyMlDsa(
           (u) => !ArrayPrototypeIncludes(["sign"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
       if (TypedArrayPrototypeGetByteLength(keyData) !== 32) {
         throw new DOMException("Invalid key data", "DataError");
@@ -5731,7 +5741,7 @@ function importKeyMlDsa(
           (u) => !ArrayPrototypeIncludes(["verify"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
       const expected = mldsaPublicKeyLen(variant);
       if (TypedArrayPrototypeGetByteLength(keyData) !== expected) {
@@ -5746,7 +5756,7 @@ function importKeyMlDsa(
           (u) => !ArrayPrototypeIncludes(["sign"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
       let res;
       try {
@@ -5778,7 +5788,7 @@ function importKeyMlDsa(
           (u) => !ArrayPrototypeIncludes(["verify"], u),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
       let pub;
       try {
@@ -5800,7 +5810,7 @@ function importKeyMlDsa(
             (u) => !ArrayPrototypeIncludes(["sign"], u),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       } else {
         if (
@@ -5809,7 +5819,7 @@ function importKeyMlDsa(
             (u) => !ArrayPrototypeIncludes(["verify"], u),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       }
 
@@ -6177,7 +6187,7 @@ function importKeyRSA(
             ),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2-9.
@@ -6222,7 +6232,7 @@ function importKeyRSA(
             ),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 2-9.
@@ -6271,7 +6281,7 @@ function importKeyRSA(
               ),
           ) !== undefined
         ) {
-          throw new DOMException("Invalid key usage", "SyntaxError");
+          throw new DOMException("Unsupported key usage", "SyntaxError");
         }
       } else if (
         ArrayPrototypeFind(
@@ -6283,7 +6293,7 @@ function importKeyRSA(
             ),
         ) !== undefined
       ) {
-        throw new DOMException("Invalid key usage", "SyntaxError");
+        throw new DOMException("Unsupported key usage", "SyntaxError");
       }
 
       // 3.
@@ -6301,9 +6311,7 @@ function importKeyRSA(
           SUPPORTED_KEY_USAGES[normalizedAlgorithm.name].jwkUse
       ) {
         throw new DOMException(
-          `'use' property of JsonWebKey must be '${
-            SUPPORTED_KEY_USAGES[normalizedAlgorithm.name].jwkUse
-          }'`,
+          'Invalid JWK "use" Parameter',
           "DataError",
         );
       }
@@ -6374,7 +6382,7 @@ function importKeyRSA(
             break;
           default:
             throw new DOMException(
-              `'alg' property of JsonWebKey must be one of 'RS1', 'RS256', 'RS384', 'RS512', 'RS3-256', 'RS3-384', 'RS3-512': received ${jwk.alg}`,
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
         }
@@ -6406,7 +6414,7 @@ function importKeyRSA(
             break;
           default:
             throw new DOMException(
-              `'alg' property of JsonWebKey must be one of 'PS1', 'PS256', 'PS384', 'PS512', 'PS3-256', 'PS3-384', 'PS3-512': received ${jwk.alg}`,
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
         }
@@ -6438,7 +6446,7 @@ function importKeyRSA(
             break;
           default:
             throw new DOMException(
-              `'alg' property of JsonWebKey must be one of 'RSA-OAEP', 'RSA-OAEP-256', 'RSA-OAEP-384', 'RSA-OAEP-512', 'RSA-OAEP3-256', 'RSA-OAEP3-384', or 'RSA-OAEP3-512': received ${jwk.alg}`,
+              'JWK "alg" does not match the requested algorithm',
               "DataError",
             );
         }
@@ -6452,7 +6460,7 @@ function importKeyRSA(
         // 9.2.
         if (normalizedHash.name !== normalizedAlgorithm.hash.name) {
           throw new DOMException(
-            `'alg' property of JsonWebKey must be '${normalizedAlgorithm.name}': received ${jwk.alg}`,
+            'JWK "alg" does not match the requested algorithm',
             "DataError",
           );
         }
@@ -6533,13 +6541,13 @@ function importKeyRSA(
         // Validate that this is a valid public key.
         if (jwk.n === undefined) {
           throw new DOMException(
-            "'n' property of JsonWebKey is required for public keys",
+            "Invalid keyData",
             "DataError",
           );
         }
         if (jwk.e === undefined) {
           throw new DOMException(
-            "'e' property of JsonWebKey is required for public keys",
+            "Invalid keyData",
             "DataError",
           );
         }
@@ -6596,7 +6604,7 @@ function importKeyHKDF(
       (u) => !ArrayPrototypeIncludes(["deriveKey", "deriveBits"], u),
     ) !== undefined
   ) {
-    throw new DOMException("Invalid key usage", "SyntaxError");
+    throw new DOMException("Unsupported key usage", "SyntaxError");
   }
 
   // 2.
@@ -6649,7 +6657,7 @@ function importKeyPBKDF2(
       (u) => !ArrayPrototypeIncludes(["deriveKey", "deriveBits"], u),
     ) !== undefined
   ) {
-    throw new DOMException("Invalid key usage", "SyntaxError");
+    throw new DOMException("Unsupported key usage", "SyntaxError");
   }
 
   // 3.

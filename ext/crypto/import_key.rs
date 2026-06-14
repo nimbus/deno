@@ -6,6 +6,7 @@ use deno_core::ToV8;
 use deno_core::convert::Uint8Array;
 use deno_core::op2;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
+use p256::pkcs8::DecodePrivateKey;
 use p256::pkcs8::EncodePrivateKey;
 use rsa::pkcs1::UintRef;
 use rsa::pkcs8::der::Encode;
@@ -46,7 +47,7 @@ pub enum ImportKeyError {
   InvalidRSAPublicKey,
   #[error("invalid RSA private key")]
   InvalidRSAPrivateKey,
-  #[error("unsupported algorithm")]
+  #[error("Invalid key type")]
   UnsupportedAlgorithm,
   #[error("public key is invalid (too long)")]
   PublicKeyTooLong,
@@ -68,7 +69,7 @@ pub enum ImportKeyError {
   CurveMismatch,
   #[error("Unsupported named curve")]
   UnsupportedNamedCurve,
-  #[error("invalid key data")]
+  #[error("Invalid keyData")]
   InvalidKeyData,
   #[error("invalid JWK private key")]
   InvalidJWKPrivateKey,
@@ -682,6 +683,10 @@ fn import_key_ec(
     KeyData::Pkcs8(data) => {
       let pk = PrivateKeyInfo::from_der(data.as_ref())
         .map_err(|_| ImportKeyError::ExpectedValidPkcs8Data)?;
+      // id-ecPublicKey
+      if pk.algorithm.oid != elliptic_curve::ALGORITHM_OID {
+        return Err(ImportKeyError::UnsupportedAlgorithm);
+      }
       let named_curve_alg = pk
         .algorithm
         .parameters
@@ -701,6 +706,21 @@ fn import_key_ec(
 
       if pk_named_curve != Some(named_curve) {
         return Err(ImportKeyError::CurveMismatch);
+      }
+
+      match named_curve {
+        EcNamedCurve::P256 => {
+          p256::SecretKey::from_pkcs8_der(data.as_ref())
+            .map_err(|_| ImportKeyError::InvalidKeyData)?;
+        }
+        EcNamedCurve::P384 => {
+          p384::SecretKey::from_pkcs8_der(data.as_ref())
+            .map_err(|_| ImportKeyError::InvalidKeyData)?;
+        }
+        EcNamedCurve::P521 => {
+          p521::SecretKey::from_pkcs8_der(data.as_ref())
+            .map_err(|_| ImportKeyError::InvalidKeyData)?;
+        }
       }
 
       Ok(ImportKeyResult::Ec {
