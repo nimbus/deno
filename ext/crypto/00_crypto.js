@@ -83,6 +83,8 @@ const {
   ObjectDefineProperty,
   ObjectHasOwn,
   ObjectPrototypeIsPrototypeOf,
+  Promise,
+  PromisePrototypeThen,
   SafeArrayIterator,
   SafeWeakMap,
   StringFromCharCode,
@@ -2052,10 +2054,16 @@ class SubtleCrypto {
     const usages = keyUsages;
 
     const normalizedAlgorithm = normalizeAlgorithm(algorithm, "generateKey");
-    const result = await generateKey(
-      normalizedAlgorithm,
-      extractable,
-      usages,
+    const result = await new Promise((resolve, reject) =>
+      PromisePrototypeThen(
+        generateKey(
+          normalizedAlgorithm,
+          extractable,
+          usages,
+        ),
+        resolve,
+        reject,
+      )
     );
 
     if (ObjectPrototypeIsPrototypeOf(CryptoKeyPrototype, result)) {
@@ -3236,7 +3244,28 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
         throw new DOMException("Invalid key usage", "SyntaxError");
       }
 
-      return generateKeyAES(normalizedAlgorithm, extractable, usages);
+      const keyData = await op_crypto_generate_key({
+        algorithm: "AES",
+        length: normalizedAlgorithm.length,
+      });
+      const handle = {};
+      setKeyData(handle, {
+        type: "secret",
+        data: keyData,
+      });
+
+      const algorithm = {
+        name: algorithmName,
+        length: normalizedAlgorithm.length,
+      };
+
+      return constructKey(
+        "secret",
+        extractable,
+        usages,
+        algorithm,
+        handle,
+      );
     }
     case "AES-KW": {
       // 1.
@@ -3249,7 +3278,28 @@ async function generateKey(normalizedAlgorithm, extractable, usages) {
         throw new DOMException("Invalid key usage", "SyntaxError");
       }
 
-      return generateKeyAES(normalizedAlgorithm, extractable, usages);
+      const keyData = await op_crypto_generate_key({
+        algorithm: "AES",
+        length: normalizedAlgorithm.length,
+      });
+      const handle = {};
+      setKeyData(handle, {
+        type: "secret",
+        data: keyData,
+      });
+
+      const algorithm = {
+        name: algorithmName,
+        length: normalizedAlgorithm.length,
+      };
+
+      return constructKey(
+        "secret",
+        extractable,
+        usages,
+        algorithm,
+        handle,
+      );
     }
     case "X448": {
       if (
@@ -7197,47 +7247,6 @@ function exportKeyEC(format, key, innerKey) {
     default:
       throw new DOMException("Not implemented", "NotSupportedError");
   }
-}
-
-async function generateKeyAES(normalizedAlgorithm, extractable, usages) {
-  const algorithmName = normalizedAlgorithm.name;
-
-  // 2.
-  if (!ArrayPrototypeIncludes([128, 192, 256], normalizedAlgorithm.length)) {
-    throw new DOMException(
-      `Invalid key length: ${normalizedAlgorithm.length}`,
-      "OperationError",
-    );
-  }
-
-  // 3.
-  const keyData = await op_crypto_generate_key({
-    algorithm: "AES",
-    length: normalizedAlgorithm.length,
-  });
-  const handle = {};
-  setKeyData(handle, {
-    type: "secret",
-    data: keyData,
-  });
-
-  // 6-8.
-  const algorithm = {
-    name: algorithmName,
-    length: normalizedAlgorithm.length,
-  };
-
-  // 9-11.
-  const key = constructKey(
-    "secret",
-    extractable,
-    usages,
-    algorithm,
-    handle,
-  );
-
-  // 12.
-  return key;
 }
 
 async function deriveBits(normalizedAlgorithm, baseKey, length) {
