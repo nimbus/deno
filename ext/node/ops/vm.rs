@@ -2378,6 +2378,18 @@ pub fn op_vm_module_is_graph_async(
   module.is_graph_async()
 }
 
+// Backs `vm.SourceTextModule.prototype.hasTopLevelAwait()` (Node 24+). V8's
+// `Module::HasTopLevelAwait` reports whether this module itself contains
+// top-level await, without walking requested-module dependencies.
+#[op2(fast)]
+pub fn op_vm_module_has_top_level_await(
+  #[cppgc] this: &ContextifyModule,
+  scope: &mut v8::PinScope<'_, '_>,
+) -> bool {
+  let module = this.module.get(scope).unwrap();
+  module.has_top_level_await()
+}
+
 // Backs `vm.SourceTextModule.prototype.createCachedData()`. V8 exposes the
 // compiled module's code cache through its unbound module script. The JS
 // wrapper rejects the call after evaluation

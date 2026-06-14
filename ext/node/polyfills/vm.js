@@ -22,6 +22,7 @@ const {
   op_vm_module_cached_data_rejected,
   op_vm_module_create_cached_data,
   op_vm_module_get_status,
+  op_vm_module_has_top_level_await,
   op_vm_module_instantiate,
   op_vm_module_is_graph_async,
   op_vm_module_link,
@@ -975,6 +976,10 @@ class SourceTextModule extends Module {
       throw new ERR_VM_MODULE_STATUS("must not be unlinked or linking");
     }
     return op_vm_module_is_graph_async(this[kWrap]);
+  }
+
+  hasTopLevelAwait() {
+    return op_vm_module_has_top_level_await(this[kWrap]);
   }
 
   createCachedData() {
