@@ -95,6 +95,7 @@ const {
   SafeWeakMap,
   StringFromCharCode,
   StringPrototypeCharCodeAt,
+  StringPrototypeRepeat,
   StringPrototypeToLowerCase,
   StringPrototypeToUpperCase,
   Symbol,
@@ -1919,7 +1920,7 @@ class SubtleCrypto {
     // 8.
     if (normalizedAlgorithm.name !== wrappingKey[_algorithm].name) {
       throw new DOMException(
-        "Wrapping algorithm does not match key algorithm",
+        "Key algorithm mismatch",
         "InvalidAccessError",
       );
     }
@@ -1927,7 +1928,7 @@ class SubtleCrypto {
     // 9.
     if (!ArrayPrototypeIncludes(wrappingKey[_usages], "wrapKey")) {
       throw new DOMException(
-        "The requested operation is not valid for the provided key",
+        "Unable to use this key to wrapKey",
         "InvalidAccessError",
       );
     }
@@ -1949,7 +1950,10 @@ class SubtleCrypto {
     if (format !== "jwk") {
       bytes = new Uint8Array(exportedKey);
     } else {
-      const jwk = JSONStringify(exportedKey);
+      let jwk = JSONStringify(exportedKey);
+      if (normalizedAlgorithm.name === "AES-KW" && jwk.length % 8 !== 0) {
+        jwk += StringPrototypeRepeat(" ", 8 - (jwk.length % 8));
+      }
       const ret = new Uint8Array(jwk.length);
       for (let i = 0; i < jwk.length; i++) {
         ret[i] = StringPrototypeCharCodeAt(jwk, i);
@@ -2073,7 +2077,7 @@ class SubtleCrypto {
     // 11.
     if (normalizedAlgorithm.name !== unwrappingKey[_algorithm].name) {
       throw new DOMException(
-        "Unwrapping algorithm does not match key algorithm",
+        "Key algorithm mismatch",
         "InvalidAccessError",
       );
     }
@@ -2081,7 +2085,7 @@ class SubtleCrypto {
     // 12.
     if (!ArrayPrototypeIncludes(unwrappingKey[_usages], "unwrapKey")) {
       throw new DOMException(
-        "The requested operation is not valid for the provided key",
+        "Unable to use this key to unwrapKey",
         "InvalidAccessError",
       );
     }
@@ -7690,8 +7694,8 @@ function exportKeyEC(format, key, innerKey) {
       // 1.
       if (key[_type] !== "public") {
         throw new DOMException(
-          "Key is not a public key",
-          "InvalidAccessError",
+          `Unable to export ${key[_algorithm].name} private key using raw format`,
+          "NotSupportedError",
         );
       }
 
@@ -7708,8 +7712,8 @@ function exportKeyEC(format, key, innerKey) {
       // 1.
       if (key[_type] !== "private") {
         throw new DOMException(
-          "Key is not a private key",
-          "InvalidAccessError",
+          `Unable to export ${key[_algorithm].name} public key using pkcs8 format`,
+          "NotSupportedError",
         );
       }
 
@@ -7726,8 +7730,8 @@ function exportKeyEC(format, key, innerKey) {
       // 1.
       if (key[_type] !== "public") {
         throw new DOMException(
-          "Key is not a public key",
-          "InvalidAccessError",
+          `Unable to export ${key[_algorithm].name} private key using spki format`,
+          "NotSupportedError",
         );
       }
 
