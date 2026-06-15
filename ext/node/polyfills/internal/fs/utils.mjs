@@ -540,6 +540,8 @@ const lazyDateFields = {
       ObjectDefineProperty(this, "atime", {
         __proto__: null,
         value,
+        enumerable: true,
+        configurable: true,
         writable: true,
       });
     },
@@ -555,6 +557,8 @@ const lazyDateFields = {
       ObjectDefineProperty(this, "mtime", {
         __proto__: null,
         value,
+        enumerable: true,
+        configurable: true,
         writable: true,
       });
     },
@@ -570,6 +574,8 @@ const lazyDateFields = {
       ObjectDefineProperty(this, "ctime", {
         __proto__: null,
         value,
+        enumerable: true,
+        configurable: true,
         writable: true,
       });
     },
@@ -585,6 +591,8 @@ const lazyDateFields = {
       ObjectDefineProperty(this, "birthtime", {
         __proto__: null,
         value,
+        enumerable: true,
+        configurable: true,
         writable: true,
       });
     },
@@ -1096,6 +1104,13 @@ export const validateRmdirOptions = hideStackFrames(
       return defaults;
     }
     validateObject(options, "options");
+    if (defaults === defaultRmdirOptions && options.recursive !== undefined) {
+      throw new ERR_INVALID_ARG_VALUE(
+        "options.recursive",
+        options.recursive,
+        "is no longer supported",
+      );
+    }
 
     options = { ...defaults, ...options };
 

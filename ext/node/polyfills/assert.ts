@@ -853,7 +853,7 @@ async function rejects(
   const stackReceiverName = this?.[nimbusRejectsStackReceiverName] ??
     (assert as Record<string, unknown>)[nimbusRejectsStackReceiverName];
   if (
-    stackReceiverName === "Function" &&
+    typeof stackReceiverName === "string" &&
     actual !== null &&
     typeof actual === "object" &&
     typeof actual.stack === "string"
@@ -861,7 +861,7 @@ async function rejects(
     actual.stack = StringPrototypeReplace(
       actual.stack,
       "at async ok.rejects",
-      "at async Function.rejects",
+      `at async ${stackReceiverName}.rejects`,
     );
   }
   expectsError(

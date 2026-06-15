@@ -46,13 +46,16 @@ const assert = core.loadExtScript(
 const {
   denoErrorToNodeError,
   ERR_INVALID_STATE,
+  ERR_OUT_OF_RANGE,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { readableStreamCancel } = core.loadExtScript(
   "ext:deno_web/06_streams.js",
 );
 const {
+  validateAbortSignal,
   validateBuffer,
   validateBoolean,
+  validateInteger,
   validateObject,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const { isDataView } = core.loadExtScript(
@@ -85,11 +88,14 @@ const fsyncPromise = (fd: number): Promise<void> => {
 };
 
 const {
+  ArrayPrototypePush,
   DataViewPrototypeGetByteLength,
   Error,
+  MathMin,
   ObjectAssign,
   ObjectPrototypeIsPrototypeOf,
   Promise,
+  PromiseReject,
   PromisePrototypeCatch,
   PromisePrototypeThen,
   SafePromisePrototypeFinally,
@@ -97,8 +103,12 @@ const {
   SafeArrayIterator,
   Symbol,
   SymbolAsyncDispose,
+  SymbolDispose,
+  SymbolIterator,
+  SymbolAsyncIterator,
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
+  TypedArrayPrototypeSubarray,
   Uint8ArrayPrototype,
 } = primordials;
 
@@ -115,6 +125,31 @@ const kCloseReject = Symbol("kCloseReject");
 export const kRef = Symbol("kRef");
 export const kUnref = Symbol("kUnref");
 const kLocked = Symbol("kLocked");
+const kCloseSync = Symbol("kCloseSync");
+const kDefaultStreamIterChunkSize = 131072;
+const kNoPosition = -1;
+const kNullProto = { __proto__: null };
+
+let _streamIterPull: any;
+let _streamIterPullSync: any;
+let _streamIterParsePullArgs: any;
+let _streamIterToUint8Array: any;
+let _streamIterConvertChunks: any;
+function lazyStreamIter() {
+  if (_streamIterPull === undefined) {
+    const pullModule = core.loadExtScript(
+      "ext:deno_node/internal/streams/iter/pull.js",
+    );
+    const utils = core.loadExtScript(
+      "ext:deno_node/internal/streams/iter/utils.js",
+    );
+    _streamIterPull = pullModule.pull;
+    _streamIterPullSync = pullModule.pullSync;
+    _streamIterParsePullArgs = utils.parsePullArgs;
+    _streamIterToUint8Array = utils.toUint8Array;
+    _streamIterConvertChunks = utils.convertChunks;
+  }
+}
 
 // See `fchmodPromise` above for why these are deferred.
 let _ftruncatePromise: any;
@@ -319,6 +354,16 @@ export class FileHandle extends EventEmitter {
     });
   }
 
+  [kCloseSync]() {
+    if (this.#rid === -1) return;
+    if (this[kClosePromise]) {
+      throw new ERR_INVALID_STATE("The FileHandle is closing");
+    }
+    op_node_fs_close(this.#rid);
+    this.#rid = -1;
+    this.emit("close");
+  }
+
   close(): Promise<void> {
     if (this.#rid === -1) {
       return PromiseResolve();
@@ -492,6 +537,535 @@ export class FileHandle extends EventEmitter {
     );
   }
 }
+
+(FileHandle.prototype as any).pull = function pull(
+  this: FileHandle,
+  ...args: any[]
+) {
+  if (this.fd === kNoPosition) {
+    throw new ERR_INVALID_STATE("The FileHandle is closed");
+  }
+  if (this[kClosePromise]) {
+    throw new ERR_INVALID_STATE("The FileHandle is closing");
+  }
+  if (this[kLocked]) {
+    throw new ERR_INVALID_STATE("The FileHandle is locked");
+  }
+
+  lazyStreamIter();
+  const { transforms, options = kNullProto } = _streamIterParsePullArgs(args);
+
+  const {
+    autoClose = false,
+    chunkSize: readSize = kDefaultStreamIterChunkSize,
+    signal,
+  } = options;
+  let {
+    start: pos = kNoPosition,
+    limit: remaining = kNoPosition,
+  } = options;
+
+  validateBoolean(autoClose, "options.autoClose");
+  if (pos !== kNoPosition) validateInteger(pos, "options.start", 0);
+  if (remaining !== kNoPosition) {
+    validateInteger(remaining, "options.limit", 1);
+  }
+  if (readSize !== undefined) {
+    validateInteger(readSize, "options.chunkSize", 1);
+  }
+  if (signal !== undefined) validateAbortSignal(signal, "options.signal");
+
+  const handle = this;
+  this[kLocked] = true;
+
+  const source = {
+    __proto__: null,
+    async *[SymbolAsyncIterator]() {
+      handle[kRef]();
+      try {
+        while (remaining !== 0) {
+          if (signal?.aborted) {
+            throw signal.reason;
+          }
+          const toRead = remaining > 0
+            ? MathMin(readSize, remaining)
+            : readSize;
+          const buf = lazyBuffer().Buffer.allocUnsafe(toRead);
+          const { bytesRead } = await handle.read(
+            buf,
+            0,
+            toRead,
+            pos >= 0 ? pos : null,
+          );
+          if (bytesRead === 0) break;
+          if (pos >= 0) pos += bytesRead;
+          if (remaining > 0) remaining -= bytesRead;
+          yield [
+            bytesRead < toRead
+              ? TypedArrayPrototypeSubarray(buf, 0, bytesRead)
+              : buf,
+          ];
+        }
+      } finally {
+        handle[kLocked] = false;
+        handle[kUnref]();
+        if (autoClose) {
+          await PromisePrototypeCatch(handle.close(), () => {});
+        }
+      }
+    },
+  };
+
+  if (transforms.length > 0) {
+    const pullArgs = [...new SafeArrayIterator(transforms)];
+    if (options) ArrayPrototypePush(pullArgs, options);
+    return _streamIterPull(source, ...new SafeArrayIterator(pullArgs));
+  }
+  return source;
+};
+
+(FileHandle.prototype as any).pullSync = function pullSync(
+  this: FileHandle,
+  ...args: any[]
+) {
+  if (this.fd === kNoPosition) {
+    throw new ERR_INVALID_STATE("The FileHandle is closed");
+  }
+  if (this[kClosePromise]) {
+    throw new ERR_INVALID_STATE("The FileHandle is closing");
+  }
+  if (this[kLocked]) {
+    throw new ERR_INVALID_STATE("The FileHandle is locked");
+  }
+
+  lazyStreamIter();
+  const { transforms, options = kNullProto } = _streamIterParsePullArgs(args);
+
+  const {
+    autoClose = false,
+    chunkSize: readSize = kDefaultStreamIterChunkSize,
+  } = options;
+  let {
+    start: pos = kNoPosition,
+    limit: remaining = kNoPosition,
+  } = options;
+
+  validateBoolean(autoClose, "options.autoClose");
+  if (pos !== kNoPosition) validateInteger(pos, "options.start", 0);
+  if (remaining !== kNoPosition) {
+    validateInteger(remaining, "options.limit", 1);
+  }
+  if (readSize !== undefined) {
+    validateInteger(readSize, "options.chunkSize", 1);
+  }
+
+  const handle = this;
+  const fd = this.fd;
+  this[kLocked] = true;
+  handle[kRef]();
+
+  function cleanup() {
+    handle[kLocked] = false;
+    handle[kUnref]();
+    if (autoClose) handle[kCloseSync]();
+  }
+
+  const source = {
+    __proto__: null,
+    [SymbolIterator]() {
+      let done = false;
+      return {
+        __proto__: null,
+        next() {
+          if (done || remaining === 0) {
+            if (!done) {
+              done = true;
+              cleanup();
+            }
+            return { __proto__: null, done: true, value: undefined };
+          }
+          const toRead = remaining > 0
+            ? MathMin(readSize, remaining)
+            : readSize;
+          const buf = lazyBuffer().Buffer.allocUnsafe(toRead);
+          let bytesRead;
+          try {
+            bytesRead = lazyFs().readSync(
+              fd,
+              buf,
+              0,
+              toRead,
+              pos >= 0 ? pos : null,
+            ) || 0;
+          } catch (err) {
+            done = true;
+            cleanup();
+            throw err;
+          }
+          if (bytesRead === 0) {
+            done = true;
+            cleanup();
+            return { __proto__: null, done: true, value: undefined };
+          }
+          if (pos >= 0) pos += bytesRead;
+          if (remaining > 0) remaining -= bytesRead;
+          const chunk = bytesRead < toRead
+            ? TypedArrayPrototypeSubarray(buf, 0, bytesRead)
+            : buf;
+          return { __proto__: null, done: false, value: [chunk] };
+        },
+        return() {
+          if (!done) {
+            done = true;
+            cleanup();
+          }
+          return { __proto__: null, done: true, value: undefined };
+        },
+      };
+    },
+  };
+
+  if (transforms.length > 0) {
+    return _streamIterPullSync(source, ...new SafeArrayIterator(transforms));
+  }
+  return source;
+};
+
+(FileHandle.prototype as any).writer = function writer(
+  this: FileHandle,
+  options = kNullProto,
+) {
+  if (this.fd === kNoPosition) {
+    throw new ERR_INVALID_STATE("The FileHandle is closed");
+  }
+  if (this[kClosePromise]) {
+    throw new ERR_INVALID_STATE("The FileHandle is closing");
+  }
+  if (this[kLocked]) {
+    throw new ERR_INVALID_STATE("The FileHandle is locked");
+  }
+
+  lazyStreamIter();
+  validateObject(options, "options");
+  const {
+    autoClose = false,
+    chunkSize: syncWriteThreshold = kDefaultStreamIterChunkSize,
+  } = options;
+  let {
+    start: pos = kNoPosition,
+    limit: bytesRemaining = kNoPosition,
+  } = options;
+
+  validateBoolean(autoClose, "options.autoClose");
+  if (pos !== kNoPosition) validateInteger(pos, "options.start", 0);
+  if (bytesRemaining !== kNoPosition) {
+    validateInteger(bytesRemaining, "options.limit", 1);
+  }
+  if (syncWriteThreshold !== undefined) {
+    validateInteger(syncWriteThreshold, "options.chunkSize", 1);
+  }
+
+  const handle = this;
+  const fd = this.fd;
+  let totalBytesWritten = 0;
+  let closed = false;
+  let closing = false;
+  let pendingEndPromise: Promise<number> | null = null;
+  let error: Error | null = null;
+  let asyncPending = false;
+
+  this[kLocked] = true;
+  handle[kRef]();
+
+  async function writeAll(
+    buf: Uint8Array,
+    offset: number,
+    length: number,
+    position: number,
+    signal?: AbortSignal,
+  ) {
+    asyncPending = true;
+    try {
+      while (length > 0) {
+        const { bytesWritten } = await handle.write(
+          buf,
+          offset,
+          length,
+          position >= 0 ? position : null,
+        );
+        signal?.throwIfAborted();
+        totalBytesWritten += bytesWritten;
+        offset += bytesWritten;
+        length -= bytesWritten;
+        if (position >= 0) position += bytesWritten;
+        if (bytesWritten === 0 && length > 0) {
+          throw new ERR_INVALID_STATE("write made no progress");
+        }
+      }
+    } finally {
+      asyncPending = false;
+    }
+  }
+
+  async function writevAll(
+    buffers: Uint8Array[],
+    position: number,
+    signal?: AbortSignal,
+  ) {
+    asyncPending = true;
+    try {
+      let totalSize = 0;
+      for (let i = 0; i < buffers.length; i++) {
+        totalSize += TypedArrayPrototypeGetByteLength(buffers[i]);
+      }
+      if (totalSize === 0) return;
+      const { bytesWritten } = await handle.writev(
+        buffers,
+        position >= 0 ? position : null,
+      );
+      signal?.throwIfAborted();
+      totalBytesWritten += bytesWritten;
+      if (bytesWritten < totalSize) {
+        const remaining = lazyBuffer().Buffer.concat(buffers);
+        await writeAll(
+          remaining,
+          bytesWritten,
+          totalSize - bytesWritten,
+          position >= 0 ? position + bytesWritten : kNoPosition,
+          signal,
+        );
+      }
+    } finally {
+      asyncPending = false;
+    }
+  }
+
+  function writeSyncAll(
+    buf: Uint8Array,
+    offset: number,
+    length: number,
+    position: number,
+  ) {
+    while (length > 0) {
+      const bytesWritten = lazyFs().writeSync(
+        fd,
+        buf,
+        offset,
+        length,
+        position >= 0 ? position : null,
+      ) || 0;
+      totalBytesWritten += bytesWritten;
+      offset += bytesWritten;
+      length -= bytesWritten;
+      if (position >= 0) position += bytesWritten;
+      if (bytesWritten === 0 && length > 0) {
+        throw new ERR_INVALID_STATE("write made no progress");
+      }
+    }
+  }
+
+  async function cleanup() {
+    if (closed) return;
+    closed = true;
+    handle[kLocked] = false;
+    handle[kUnref]();
+    if (autoClose) await handle.close();
+  }
+
+  function cleanupSync() {
+    if (closed) return;
+    closed = true;
+    handle[kLocked] = false;
+    handle[kUnref]();
+    if (autoClose) handle[kCloseSync]();
+  }
+
+  return {
+    __proto__: null,
+    write(chunk: Uint8Array | string, options = kNullProto) {
+      if (error) return PromiseReject(error);
+      if (closed) {
+        return PromiseReject(
+          new ERR_INVALID_STATE.TypeError("The writer is closed"),
+        );
+      }
+      validateObject(options, "options");
+      const { signal } = options;
+      if (signal !== undefined) {
+        validateAbortSignal(signal, "options.signal");
+        if (signal.aborted) return PromiseReject(signal.reason);
+      }
+      chunk = _streamIterToUint8Array(chunk);
+      if (
+        bytesRemaining >= 0 &&
+        TypedArrayPrototypeGetByteLength(chunk) > bytesRemaining
+      ) {
+        return PromiseReject(
+          new ERR_OUT_OF_RANGE(
+            "write",
+            `<= ${bytesRemaining} bytes`,
+            TypedArrayPrototypeGetByteLength(chunk),
+          ),
+        );
+      }
+      if (bytesRemaining > 0) {
+        bytesRemaining -= TypedArrayPrototypeGetByteLength(chunk);
+      }
+      const position = pos;
+      if (pos >= 0) pos += TypedArrayPrototypeGetByteLength(chunk);
+      return writeAll(
+        chunk,
+        0,
+        TypedArrayPrototypeGetByteLength(chunk),
+        position,
+        signal,
+      );
+    },
+
+    writev(chunks: Uint8Array[], options = kNullProto) {
+      if (error) return PromiseReject(error);
+      if (closed) {
+        return PromiseReject(
+          new ERR_INVALID_STATE.TypeError("The writer is closed"),
+        );
+      }
+      validateObject(options, "options");
+      const { signal } = options;
+      if (signal !== undefined) {
+        validateAbortSignal(signal, "options.signal");
+        if (signal.aborted) return PromiseReject(signal.reason);
+      }
+      chunks = _streamIterConvertChunks(chunks);
+      let totalSize = 0;
+      for (let i = 0; i < chunks.length; i++) {
+        totalSize += TypedArrayPrototypeGetByteLength(chunks[i]);
+      }
+      if (bytesRemaining >= 0 && totalSize > bytesRemaining) {
+        return PromiseReject(
+          new ERR_OUT_OF_RANGE(
+            "writev",
+            `<= ${bytesRemaining} bytes`,
+            totalSize,
+          ),
+        );
+      }
+      if (bytesRemaining > 0) bytesRemaining -= totalSize;
+      const position = pos;
+      if (pos >= 0) pos += totalSize;
+      return writevAll(chunks, position, signal);
+    },
+
+    writeSync(chunk: Uint8Array | string) {
+      if (error || closed || asyncPending) return false;
+      chunk = _streamIterToUint8Array(chunk);
+      const length = TypedArrayPrototypeGetByteLength(chunk);
+      if (length > syncWriteThreshold) return false;
+      if (length === 0) return true;
+      if (bytesRemaining >= 0 && length > bytesRemaining) return false;
+      const position = pos;
+      try {
+        const bytesWritten = lazyFs().writeSync(
+          fd,
+          chunk,
+          0,
+          length,
+          position >= 0 ? position : null,
+        ) || 0;
+        totalBytesWritten += bytesWritten;
+        if (position >= 0) pos = position + bytesWritten;
+        if (bytesWritten !== length) {
+          writeSyncAll(
+            chunk,
+            bytesWritten,
+            length - bytesWritten,
+            position >= 0 ? position + bytesWritten : kNoPosition,
+          );
+        }
+        if (bytesRemaining > 0) bytesRemaining -= length;
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    writevSync(chunks: Uint8Array[]) {
+      if (error || closed || asyncPending) return false;
+      chunks = _streamIterConvertChunks(chunks);
+      let totalSize = 0;
+      for (let i = 0; i < chunks.length; i++) {
+        totalSize += TypedArrayPrototypeGetByteLength(chunks[i]);
+      }
+      if (totalSize > syncWriteThreshold) return false;
+      if (totalSize === 0) return true;
+      if (bytesRemaining >= 0 && totalSize > bytesRemaining) return false;
+      const position = pos;
+      try {
+        const bytesWritten = lazyFs().writevSync(
+          fd,
+          chunks,
+          position >= 0 ? position : null,
+        ) || 0;
+        totalBytesWritten += bytesWritten;
+        if (position >= 0) pos = position + bytesWritten;
+        if (bytesWritten !== totalSize) {
+          const rest = lazyBuffer().Buffer.concat(chunks);
+          writeSyncAll(
+            rest,
+            bytesWritten,
+            totalSize - bytesWritten,
+            position >= 0 ? position + bytesWritten : kNoPosition,
+          );
+        }
+        if (bytesRemaining > 0) bytesRemaining -= totalSize;
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    end(options = kNullProto) {
+      if (error) return PromiseReject(error);
+      if (closed) return PromiseResolve(totalBytesWritten);
+      if (closing) return pendingEndPromise;
+      validateObject(options, "options");
+      const { signal } = options;
+      if (signal !== undefined) {
+        validateAbortSignal(signal, "options.signal");
+        if (signal.aborted) return PromiseReject(signal.reason);
+      }
+      closing = true;
+      pendingEndPromise = PromisePrototypeThen(
+        cleanup(),
+        () => totalBytesWritten,
+      );
+      return pendingEndPromise;
+    },
+
+    endSync() {
+      if (error) return -1;
+      if (closed) return totalBytesWritten;
+      if (asyncPending) return -1;
+      cleanupSync();
+      return totalBytesWritten;
+    },
+
+    fail(reason?: Error) {
+      if (closed || error) return;
+      error = reason ?? new ERR_INVALID_STATE("Failed");
+      cleanupSync();
+    },
+
+    [SymbolAsyncDispose]() {
+      if (closing) return pendingEndPromise ?? PromiseResolve();
+      if (!closed && !error) this.fail();
+      return PromiseResolve();
+    },
+
+    [SymbolDispose]() {
+      this.fail();
+    },
+  };
+};
 
 function readPromise(
   rid: number,
