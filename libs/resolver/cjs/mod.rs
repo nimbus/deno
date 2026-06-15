@@ -1,5 +1,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::path::Component;
+use std::path::Path;
+use std::path::PathBuf;
+
 use deno_maybe_sync::MaybeDashMap;
 use deno_media_type::MediaType;
 use node_resolver::InNpmPackageChecker;
@@ -343,8 +347,10 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       let Ok(path) = deno_path_util::url_to_file_path(specifier) else {
         return Ok(ResolutionMode::Require);
       };
-      if let Some(pkg_json) =
-        self.pkg_json_resolver.get_closest_package_json(&path)?
+      if let Some(pkg_json) = self
+        .pkg_json_resolver
+        .get_closest_package_json(&path)?
+        .filter(|pkg_json| package_json_applies_to_path(&path, &pkg_json.path))
       {
         if pkg_json.typ == "module" {
           return Ok(ResolutionMode::Import);
@@ -367,8 +373,10 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       let Ok(path) = deno_path_util::url_to_file_path(specifier) else {
         return Ok(ResolutionMode::Require);
       };
-      if let Some(pkg_json) =
-        self.pkg_json_resolver.get_closest_package_json(&path)?
+      if let Some(pkg_json) = self
+        .pkg_json_resolver
+        .get_closest_package_json(&path)?
+        .filter(|pkg_json| package_json_applies_to_path(&path, &pkg_json.path))
       {
         let is_file_location_cjs = pkg_json.typ != "module";
         Ok(if is_file_location_cjs || path.extension().is_none() {
@@ -437,8 +445,12 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         let Ok(path) = deno_path_util::url_to_file_path(specifier) else {
           return Ok(ResolutionMode::Import);
         };
-        let Some(pkg_json) =
-          self.pkg_json_resolver.get_closest_package_json(&path)?
+        let Some(pkg_json) = self
+          .pkg_json_resolver
+          .get_closest_package_json(&path)?
+          .filter(|pkg_json| {
+            package_json_applies_to_path(&path, &pkg_json.path)
+          })
         else {
           return Ok(ResolutionMode::Require);
         };
@@ -450,6 +462,35 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       }
     }
   }
+}
+
+fn find_package_root_from_node_modules(path: &Path) -> Option<PathBuf> {
+  let components: Vec<_> = path.components().collect();
+  let node_modules_index = components.iter().rposition(
+    |component| matches!(component, Component::Normal(part) if *part == "node_modules"),
+  )?;
+  let package_name_index = node_modules_index + 1;
+  let package_name = components.get(package_name_index)?;
+  let mut package_root = PathBuf::new();
+  for component in &components[..=node_modules_index] {
+    package_root.push(component);
+  }
+  package_root.push(package_name);
+  if matches!(package_name, Component::Normal(part) if part.to_string_lossy().starts_with('@'))
+  {
+    package_root.push(components.get(package_name_index + 1)?);
+  }
+  Some(package_root)
+}
+
+fn package_json_applies_to_path(path: &Path, package_json_path: &Path) -> bool {
+  let Some(package_json_dir) = package_json_path.parent() else {
+    return false;
+  };
+  let Some(package_root) = find_package_root_from_node_modules(path) else {
+    return true;
+  };
+  package_json_dir.starts_with(package_root)
 }
 
 /// Returns true if the given package `exports` value contains an `"import"`
@@ -498,6 +539,33 @@ mod tests {
 
   fn parse(json: &str) -> serde_json::Map<String, Value> {
     serde_json::from_str(json).unwrap()
+  }
+
+  #[test]
+  fn package_json_scope_does_not_cross_node_modules_package_root() {
+    let path = Path::new(
+      "/project/fixtures/package-type-module/node_modules/dep-without-package-json/dep.js",
+    );
+    let parent_package_json =
+      Path::new("/project/fixtures/package-type-module/package.json");
+    let dependency_package_json = Path::new(
+      "/project/fixtures/package-type-module/node_modules/dep-without-package-json/package.json",
+    );
+
+    assert!(!package_json_applies_to_path(path, parent_package_json));
+    assert!(package_json_applies_to_path(path, dependency_package_json));
+  }
+
+  #[test]
+  fn scoped_package_json_scope_uses_full_scoped_package_root() {
+    let path = Path::new("/project/node_modules/@scope/pkg/lib/dep.js");
+    let scope_package_json =
+      Path::new("/project/node_modules/@scope/pkg/package.json");
+    let sibling_package_json =
+      Path::new("/project/node_modules/@scope/other/package.json");
+
+    assert!(package_json_applies_to_path(path, scope_package_json));
+    assert!(!package_json_applies_to_path(path, sibling_package_json));
   }
 
   #[test]

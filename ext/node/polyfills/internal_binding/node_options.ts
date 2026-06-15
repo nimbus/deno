@@ -65,6 +65,7 @@ let execArgvOptionsMapCacheKey: string | undefined;
 
 function setOptionSourceExecArgv(execArgv: string[]) {
   execArgvSnapshot = ArrayPrototypeSlice(execArgv);
+  nodeOptionsSnapshot = undefined;
   optionsMap = undefined;
   execArgvOptionsMap = undefined;
   optionsMapCacheKey = undefined;
@@ -74,6 +75,8 @@ function setOptionSourceExecArgv(execArgv: string[]) {
 function createDefaultOptions() {
   return new SafeMap([
     ["--warnings", { value: true }],
+    ["--no-deprecation", { value: false }],
+    ["--throw-deprecation", { value: false }],
     ["--pending-deprecation", { value: false }],
     ["--expose-internals", { value: false }],
     ["--async-context-frame", { value: true }],
@@ -107,6 +110,15 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
   switch (arg) {
     case "--no-warnings":
       options.set("--warnings", { value: false });
+      break;
+    case "--no-deprecation":
+      options.set("--no-deprecation", { value: true });
+      break;
+    case "--throw-deprecation":
+      options.set("--throw-deprecation", { value: true });
+      break;
+    case "--no-throw-deprecation":
+      options.set("--throw-deprecation", { value: false });
       break;
     case "--pending-deprecation":
       options.set("--pending-deprecation", { value: true });

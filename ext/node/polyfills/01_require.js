@@ -1460,6 +1460,43 @@ function findPackageRootFromNodeModules(filepath) {
   return StringPrototypeSlice(filepath, 0, afterNm) + parts[0];
 }
 
+function packageJsonAppliesToPath(filepath, packageJsonPath) {
+  const packageRoot = findPackageRootFromNodeModules(filepath);
+  if (packageRoot === null) return true;
+  const packageDir = tryPathDirname(packageJsonPath);
+  if (packageDir === undefined) return false;
+  return packageDir === packageRoot ||
+    StringPrototypeStartsWith(packageDir, packageRoot + "/") ||
+    StringPrototypeStartsWith(packageDir, packageRoot + "\\");
+}
+
+function tryPathDirname(filepath) {
+  try {
+    return pathDirname(filepath);
+  } catch {
+    return undefined;
+  }
+}
+
+function findClosestApplicablePackageScope(filepath) {
+  let currentPath = stat(filepath) === 1 ? filepath : tryPathDirname(filepath);
+  if (currentPath === undefined) return undefined;
+
+  while (true) {
+    const packageJsonPath = pathResolve(currentPath, "package.json");
+    const pkg = op_require_read_package_scope(packageJsonPath);
+    if (pkg && packageJsonAppliesToPath(filepath, packageJsonPath)) {
+      return pkg;
+    }
+
+    const parentPath = tryPathDirname(currentPath);
+    if (parentPath === undefined || parentPath === currentPath) {
+      return undefined;
+    }
+    currentPath = parentPath;
+  }
+}
+
 function shouldPreserveSymlinks(isMain) {
   return getOptionValue(
     isMain ? "--preserve-symlinks-main" : "--preserve-symlinks",
@@ -2039,6 +2076,19 @@ Module._resolveLookupPaths = function (request, parent) {
   return paths;
 };
 
+function loadNativeModuleWithoutUserHooks(id, request) {
+  const wasInsideResolveHook = insideResolveHook;
+  const wasInsideLoadHook = insideLoadHook;
+  insideResolveHook = true;
+  insideLoadHook = true;
+  try {
+    return loadNativeModule(id, request);
+  } finally {
+    insideResolveHook = wasInsideResolveHook;
+    insideLoadHook = wasInsideLoadHook;
+  }
+}
+
 Module._load = function (request, parent, isMain) {
   // A `node:`-prefixed `require()` of a specifier that isn't a user-requirable
   // builtin throws ERR_UNKNOWN_BUILTIN_MODULE. This covers unknown ids and
@@ -2217,7 +2267,7 @@ Module._load = function (request, parent, isMain) {
         return mod.exports;
       }
       if (result.format === "builtin") {
-        const module = loadNativeModule(id, id);
+        const module = loadNativeModuleWithoutUserHooks(id, id);
         if (module) {
           return module.exports;
         }
@@ -2234,7 +2284,7 @@ Module._load = function (request, parent, isMain) {
     }
 
     maybeEmitNativeModuleDeprecation(id);
-    const module = loadNativeModule(id, id);
+    const module = loadNativeModuleWithoutUserHooks(id, id);
     if (!module) {
       // TODO:
       // throw new ERR_UNKNOWN_BUILTIN_MODULE(filename);
@@ -2260,7 +2310,7 @@ Module._load = function (request, parent, isMain) {
     request !== "test/reporters"
   ) {
     maybeEmitNativeModuleDeprecation(filename);
-    const mod = loadNativeModule(filename, request);
+    const mod = loadNativeModuleWithoutUserHooks(filename, request);
     if (mod) {
       return mod.exports;
     }
@@ -2674,7 +2724,9 @@ Module.prototype.load = function (filename) {
         fileUrl = this.filename;
       } else if (
         StringPrototypeStartsWith(this.filename, "file://") ||
-        StringPrototypeIncludes(this.filename, "://")
+        StringPrototypeIncludes(this.filename, "://") ||
+        (RegExpPrototypeTest(RE_URL_SCHEME, this.filename) &&
+          !isAbsolute(this.filename))
       ) {
         // Already a URL (e.g. from a resolve hook returning a virtual URL)
         fileUrl = this.filename;
@@ -3512,7 +3564,24 @@ Module._extensions[".wasm"] = loadESMFromCJS;
 
 function loadMaybeCjs(module, filename) {
   const content = op_require_read_file(filename);
-  const format = op_require_is_maybe_cjs(filename) ? undefined : "module";
+  let format = "module";
+  let packageScope;
+  let preserveSymlinkMainDefaultCjs = false;
+  if (isMainModule(module) && getOptionValue("--preserve-symlinks-main")) {
+    packageScope = findClosestApplicablePackageScope(filename);
+    preserveSymlinkMainDefaultCjs = packageScope === undefined;
+  }
+  if (op_require_is_maybe_cjs(filename) || preserveSymlinkMainDefaultCjs) {
+    packageScope ??= findClosestApplicablePackageScope(filename);
+    if (
+      packageScope?.type === "commonjs" ||
+      preserveSymlinkMainDefaultCjs
+    ) {
+      format = "commonjs";
+    } else {
+      format = undefined;
+    }
+  }
   module._compile(content, filename, format);
 }
 
@@ -3582,8 +3651,14 @@ function loadESMFromCJS(
         ? op_import_sync_main_with_source(specifier, code)
         : op_import_sync_main(specifier);
     } else {
+      const parentModule = moduleParentCache.get(module);
+      const allowPendingDynamicImports = sourceFromHook ||
+        parentModule?.[kSourceURL] !== undefined ||
+        pendingCommonJsDynamicImports === 0;
       namespace = sourceFromHook && code !== undefined
-        ? op_import_sync_with_source(specifier, code)
+        ? op_import_sync_for_module_register(specifier, code)
+        : allowPendingDynamicImports
+        ? op_import_sync_for_module_register(specifier)
         : op_import_sync(specifier);
     }
   } catch (e) {
@@ -3785,6 +3860,13 @@ function requireBuiltinModule(id) {
     mod.filename = "internal/process/get_builtin";
     mod.paths = [];
     getBuiltinModuleRequire = makeRequireFunction(mod);
+  }
+  const normalizedId = StringPrototypeStartsWith(id, "node:")
+    ? StringPrototypeSlice(id, 5)
+    : id;
+  const module = loadNativeModuleWithoutUserHooks(normalizedId, id);
+  if (module) {
+    return module.exports;
   }
   return getBuiltinModuleRequire(id);
 }
@@ -4743,12 +4825,56 @@ function resolveRegisterSpecifier(specifier, parentUrl, options) {
   }
 }
 
+let moduleRegisterDeprecationEmitted = false;
+function emitModuleRegisterDeprecationWarning() {
+  if (moduleRegisterDeprecationEmitted) return;
+  moduleRegisterDeprecationEmitted = true;
+  const execArgv = ArrayIsArray(process.execArgv) ? process.execArgv : [];
+  if (ArrayPrototypeIncludes(execArgv, "--no-deprecation")) return;
+  if (ArrayPrototypeIncludes(execArgv, "--throw-deprecation")) {
+    const previousThrowDeprecation = ObjectGetOwnPropertyDescriptor(
+      process,
+      "throwDeprecation",
+    );
+    ObjectDefineProperty(process, "throwDeprecation", {
+      __proto__: null,
+      configurable: true,
+      enumerable: false,
+      value: true,
+    });
+    try {
+      process.emitWarning(
+        "`module.register()` is deprecated. Use `module.registerHooks()` instead.",
+        "DeprecationWarning",
+        "DEP0205",
+      );
+    } finally {
+      if (previousThrowDeprecation) {
+        ObjectDefineProperty(
+          process,
+          "throwDeprecation",
+          previousThrowDeprecation,
+        );
+      } else {
+        delete process.throwDeprecation;
+      }
+    }
+    return;
+  }
+  process.emitWarning(
+    "`module.register()` is deprecated. Use `module.registerHooks()` instead.",
+    "DeprecationWarning",
+    "DEP0205",
+  );
+}
+
 /**
  * @param {string | URL} specifier
  * @param {string | URL} parentUrl
  * @param {{ parentURL: string | URL, data: any, transferList: any[] }} [options]
  */
 export function register(specifier, parentUrl, options) {
+  emitModuleRegisterDeprecationWarning();
   const loaderUrl = resolveRegisterSpecifier(specifier, parentUrl, options);
   let hookSource;
   if (StringPrototypeStartsWith(loaderUrl, "file://")) {

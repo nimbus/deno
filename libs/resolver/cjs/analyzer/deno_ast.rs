@@ -14,6 +14,8 @@ use deno_ast::swc::ast::Lit;
 use deno_ast::swc::ast::MemberExpr;
 use deno_ast::swc::ast::MemberProp;
 use deno_ast::swc::ast::ModuleItem;
+use deno_ast::swc::ast::Prop;
+use deno_ast::swc::ast::PropName;
 use deno_ast::swc::ast::SimpleAssignTarget;
 use deno_ast::swc::ast::Stmt;
 use deno_error::JsErrorBox;
@@ -78,9 +80,20 @@ impl super::ModuleForExportAnalysis for ParsedSource {
 
   fn analyze_cjs(&self) -> super::ModuleExportsAndReExports {
     let analysis = ParsedSource::analyze_cjs(self);
-    let exports = analysis.exports;
+    let mut exports = analysis.exports;
     let reexports = analysis.reexports;
     let mut member_reexports = Vec::new();
+
+    // Node's CJS named-export lexer accepts some direct object-literal
+    // `module.exports = { ... }` forms (such as shorthand properties and
+    // function/class values) but not arbitrary literal/accessor properties.
+    // Deno's analyzer is broader, so trim only the names Node would reject.
+    let unsupported_object_literal_exports =
+      find_unsupported_module_exports_object_literal_names(self);
+    if !unsupported_object_literal_exports.is_empty() {
+      exports
+        .retain(|export| !unsupported_object_literal_exports.contains(export));
+    }
 
     // Fallback for the shape `module.exports = require("./inner").MEMBER;`
     // (e.g. graphql-tag@2's main entry). deno_ast's CJS analyzer
@@ -157,6 +170,96 @@ impl super::ModuleForExportAnalysis for ParsedSource {
       out.insert(member, props);
     }
     out
+  }
+}
+
+fn find_unsupported_module_exports_object_literal_names(
+  ps: &ParsedSource,
+) -> Vec<String> {
+  let mut names = Vec::new();
+  match ps.program_ref() {
+    ProgramRef::Module(m) => {
+      for item in &m.body {
+        if let ModuleItem::Stmt(stmt) = item {
+          names.extend(match_unsupported_module_exports_object_literal_names(
+            stmt,
+          ));
+        }
+      }
+    }
+    ProgramRef::Script(s) => {
+      for stmt in &s.body {
+        names
+          .extend(match_unsupported_module_exports_object_literal_names(stmt));
+      }
+    }
+  }
+  names.sort();
+  names.dedup();
+  names
+}
+
+fn match_unsupported_module_exports_object_literal_names(
+  stmt: &Stmt,
+) -> Vec<String> {
+  let Some(assign) = (match stmt {
+    Stmt::Expr(e) => e.expr.as_assign(),
+    _ => None,
+  }) else {
+    return Vec::new();
+  };
+  if assign.op != AssignOp::Assign {
+    return Vec::new();
+  }
+  let target_member = match &assign.left {
+    AssignTarget::Simple(SimpleAssignTarget::Member(m)) => m,
+    _ => return Vec::new(),
+  };
+  if !is_module_exports_member(target_member) {
+    return Vec::new();
+  }
+  let Expr::Object(object) = &*assign.right else {
+    return Vec::new();
+  };
+  object
+    .props
+    .iter()
+    .filter_map(|prop_or_spread| {
+      let prop = prop_or_spread.as_prop()?;
+      match &**prop {
+        Prop::Shorthand(_) | Prop::Method(_) => None,
+        Prop::KeyValue(key_value)
+          if is_supported_object_literal_export_value(&key_value.value) =>
+        {
+          None
+        }
+        Prop::KeyValue(key_value) => prop_name_to_static_string(&key_value.key),
+        Prop::Getter(getter) => prop_name_to_static_string(&getter.key),
+        Prop::Setter(setter) => prop_name_to_static_string(&setter.key),
+        Prop::Assign(assign) => Some(assign.key.sym.to_string()),
+      }
+    })
+    .collect()
+}
+
+fn is_supported_object_literal_export_value(value: &Expr) -> bool {
+  matches!(value, Expr::Ident(_) | Expr::Fn(_) | Expr::Class(_))
+}
+
+fn prop_name_to_static_string(prop_name: &PropName) -> Option<String> {
+  match prop_name {
+    PropName::Ident(ident) => Some(ident.sym.to_string()),
+    PropName::Str(str) => str.value.as_str().map(|value| value.to_string()),
+    PropName::Num(num) => Some(num.value.to_string()),
+    PropName::BigInt(big_int) => Some(big_int.value.to_string()),
+    PropName::Computed(computed) => match &*computed.expr {
+      Expr::Lit(Lit::Str(str)) => {
+        str.value.as_str().map(|value| value.to_string())
+      }
+      Expr::Lit(Lit::Num(num)) => Some(num.value.to_string()),
+      Expr::Lit(Lit::BigInt(big_int)) => Some(big_int.value.to_string()),
+      _ => None,
+    },
   }
 }
 
@@ -354,5 +457,49 @@ mod tests {
         .contains(&"assertDirEquivalent".to_string())
     );
     assert!(analysis.exports.contains(&"collectEntries".to_string()));
+  }
+
+  #[test]
+  fn cjs_analysis_strips_literal_module_exports_object_literal_names() {
+    let parsed = parse_source(
+      r#"
+      module.exports = {
+        comeOn: "fhqwhgads",
+        everybody: "to the limit",
+      };
+      "#,
+    );
+
+    let analysis =
+      <ParsedSource as super::super::ModuleForExportAnalysis>::analyze_cjs(
+        &parsed,
+      );
+
+    assert!(!analysis.exports.contains(&"comeOn".to_string()));
+    assert!(!analysis.exports.contains(&"everybody".to_string()));
+  }
+
+  #[test]
+  fn cjs_analysis_keeps_identifier_and_method_object_literal_names() {
+    let parsed = parse_source(
+      r#"
+      function local() {}
+      class LocalClass {}
+      module.exports = {
+        exported: local,
+        classExport: LocalClass,
+        methodExport() {},
+      };
+      "#,
+    );
+
+    let analysis =
+      <ParsedSource as super::super::ModuleForExportAnalysis>::analyze_cjs(
+        &parsed,
+      );
+
+    assert!(analysis.exports.contains(&"exported".to_string()));
+    assert!(analysis.exports.contains(&"classExport".to_string()));
+    assert!(analysis.exports.contains(&"methodExport".to_string()));
   }
 }
