@@ -3706,6 +3706,9 @@ function createStylizeWithColor(styles, colors) {
   return function stylizeWithColor(str, styleType) {
     const style = styles[styleType];
     if (style !== undefined) {
+      if (typeof style === "function") {
+        return style(str);
+      }
       const color = colors[style];
       if (color !== undefined) {
         return `\u001b[${color[0]}m${str}\u001b[${color[1]}m`;
