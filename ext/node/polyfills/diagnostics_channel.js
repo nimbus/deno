@@ -22,17 +22,15 @@ const {
   ArrayPrototypeSplice,
   ObjectDefineProperty,
   ObjectGetPrototypeOf,
-  ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
-  PromisePrototype,
   PromisePrototypeThen,
   PromiseReject,
-  PromiseResolve,
   ReflectApply,
   SafeArrayIterator,
   SafeFinalizationRegistry,
   SafeMap,
   SafeMapIterator,
+  SymbolDispose,
   SymbolHasInstance,
 } = primordials;
 const { WeakReference } = core.loadExtScript(
@@ -88,27 +86,51 @@ function maybeMarkInactive(channel) {
   }
 }
 
-function defaultTransform(data) {
-  return data;
+function triggerUncaughtException(err) {
+  nextTick(() => {
+    if (globalThis.process?._fatalException?.(err, false)) {
+      return;
+    }
+    throw err;
+  });
 }
 
-function wrapStoreRun(store, data, next, transform = defaultTransform) {
-  return () => {
-    let context;
-    try {
-      context = transform(data);
-    } catch (err) {
-      nextTick(() => {
-        // TODO(bartlomieju): in Node.js this is using `triggerUncaughtException` API, need
-        // to clarify if we need that or if just throwing the error is enough here.
-        throw err;
-        // triggerUncaughtException(err, false);
-      });
-      return next();
+class RunStoresScope {
+  #scopes = [];
+  #disposed = false;
+
+  constructor(activeChannel, data) {
+    if (activeChannel._stores) {
+      for (const entry of new SafeMapIterator(activeChannel._stores)) {
+        const store = entry[0];
+        const transform = entry[1];
+
+        let context = data;
+        if (transform) {
+          try {
+            context = transform(data);
+          } catch (err) {
+            triggerUncaughtException(err);
+            continue;
+          }
+        }
+
+        ArrayPrototypePush(this.#scopes, store.withScope(context));
+      }
     }
 
-    return store.run(context, next);
-  };
+    activeChannel.publish(data);
+  }
+
+  [SymbolDispose]() {
+    if (this.#disposed) {
+      return;
+    }
+    this.#disposed = true;
+    for (let i = this.#scopes.length - 1; i >= 0; i--) {
+      this.#scopes[i][SymbolDispose]();
+    }
+  }
 }
 
 class ActiveChannel {
@@ -174,29 +196,22 @@ class ActiveChannel {
         const onMessage = subscribers[i];
         onMessage(data, this.name);
       } catch (err) {
-        nextTick(() => {
-          // TODO(bartlomieju): in Node.js this is using `triggerUncaughtException` API, need
-          // to clarify if we need that or if just throwing the error is enough here.
-          throw err;
-          // triggerUncaughtException(err, false);
-        });
+        triggerUncaughtException(err);
       }
     }
   }
 
+  withStoreScope(data) {
+    return new RunStoresScope(this, data);
+  }
+
   runStores(data, fn, thisArg, ...args) {
-    let run = () => {
-      this.publish(data);
+    const scope = this.withStoreScope(data);
+    try {
       return ReflectApply(fn, thisArg, args);
-    };
-
-    for (const entry of new SafeMapIterator(this._stores)) {
-      const store = entry[0];
-      const transform = entry[1];
-      run = wrapStoreRun(store, data, run, transform);
+    } finally {
+      scope[SymbolDispose]();
     }
-
-    return run();
   }
 }
 
@@ -242,6 +257,12 @@ class Channel {
   runStores(_data, fn, thisArg, ...args) {
     return ReflectApply(fn, thisArg, args);
   }
+
+  withStoreScope() {
+    return {
+      [SymbolDispose]() {},
+    };
+  }
 }
 
 const channels = new WeakRefMap();
@@ -272,12 +293,9 @@ function hasSubscribers(name) {
   return ch.hasSubscribers;
 }
 
-const traceEvents = [
+const boundedEvents = [
   "start",
   "end",
-  "asyncStart",
-  "asyncEnd",
-  "error",
 ];
 
 function assertChannel(value, name) {
@@ -290,7 +308,14 @@ function assertChannel(value, name) {
   }
 }
 
-function tracingChannelFrom(nameOrChannels, name) {
+function emitNonThenableWarning(fn) {
+  globalThis.process?.emitWarning?.(
+    `tracePromise was called with the function '${fn.name || "<anonymous>"}', ` +
+      "which returned a non-thenable.",
+  );
+}
+
+function channelFromMap(nameOrChannels, name, className) {
   if (typeof nameOrChannels === "string") {
     return channel(`tracing:${nameOrChannels}:${name}`);
   }
@@ -304,30 +329,53 @@ function tracingChannelFrom(nameOrChannels, name) {
   throw new ERR_INVALID_ARG_TYPE("nameOrChannels", [
     "string",
     "object",
-    "TracingChannel",
+    className,
   ], nameOrChannels);
 }
 
-class TracingChannel {
+class BoundedChannelScope {
+  #context;
+  #end;
+  #scope;
+
+  constructor(boundedChannel, context) {
+    if (!boundedChannel.hasSubscribers) {
+      return;
+    }
+
+    const { start, end } = boundedChannel;
+    this.#context = context;
+    this.#end = end;
+    this.#scope = new RunStoresScope(start, context);
+  }
+
+  [SymbolDispose]() {
+    if (!this.#scope) {
+      return;
+    }
+
+    this.#end.publish(this.#context);
+    this.#scope[SymbolDispose]();
+    this.#scope = undefined;
+  }
+}
+
+class BoundedChannel {
   constructor(nameOrChannels) {
-    for (const eventName of new SafeArrayIterator(traceEvents)) {
+    for (const eventName of new SafeArrayIterator(boundedEvents)) {
       ObjectDefineProperty(this, eventName, {
         __proto__: null,
-        value: tracingChannelFrom(nameOrChannels, eventName),
+        value: channelFromMap(nameOrChannels, eventName, "BoundedChannel"),
       });
     }
   }
 
   get hasSubscribers() {
-    return this.start.hasSubscribers ||
-      this.end.hasSubscribers ||
-      this.asyncStart.hasSubscribers ||
-      this.asyncEnd.hasSubscribers ||
-      this.error.hasSubscribers;
+    return this.start?.hasSubscribers || this.end?.hasSubscribers;
   }
 
   subscribe(handlers) {
-    for (const name of new SafeArrayIterator(traceEvents)) {
+    for (const name of new SafeArrayIterator(boundedEvents)) {
       if (!handlers[name]) continue;
 
       this[name]?.subscribe(handlers[name]);
@@ -337,7 +385,7 @@ class TracingChannel {
   unsubscribe(handlers) {
     let done = true;
 
-    for (const name of new SafeArrayIterator(traceEvents)) {
+    for (const name of new SafeArrayIterator(boundedEvents)) {
       if (!handlers[name]) continue;
 
       if (!this[name]?.unsubscribe(handlers[name])) {
@@ -348,68 +396,196 @@ class TracingChannel {
     return done;
   }
 
+  withScope(context = { __proto__: null }) {
+    return new BoundedChannelScope(this, context);
+  }
+
+  run(context, fn, thisArg, ...args) {
+    context ??= { __proto__: null };
+    const scope = this.withScope(context);
+    try {
+      return ReflectApply(fn, thisArg, args);
+    } finally {
+      scope[SymbolDispose]();
+    }
+  }
+}
+
+function boundedChannel(nameOrChannels) {
+  return new BoundedChannel(nameOrChannels);
+}
+
+class TracingChannel {
+  #callWindow;
+  #continuationWindow;
+
+  constructor(nameOrChannels) {
+    if (typeof nameOrChannels === "string") {
+      this.#callWindow = new BoundedChannel(nameOrChannels);
+      this.#continuationWindow = new BoundedChannel({
+        start: channel(`tracing:${nameOrChannels}:asyncStart`),
+        end: channel(`tracing:${nameOrChannels}:asyncEnd`),
+      });
+    } else if (typeof nameOrChannels === "object") {
+      this.#callWindow = new BoundedChannel({
+        start: nameOrChannels.start,
+        end: nameOrChannels.end,
+      });
+      this.#continuationWindow = new BoundedChannel({
+        start: nameOrChannels.asyncStart,
+        end: nameOrChannels.asyncEnd,
+      });
+    }
+
+    ObjectDefineProperty(this, "error", {
+      __proto__: null,
+      value: channelFromMap(nameOrChannels, "error", "TracingChannel"),
+    });
+  }
+
+  get start() {
+    return this.#callWindow.start;
+  }
+
+  get end() {
+    return this.#callWindow.end;
+  }
+
+  get asyncStart() {
+    return this.#continuationWindow.start;
+  }
+
+  get asyncEnd() {
+    return this.#continuationWindow.end;
+  }
+
+  get hasSubscribers() {
+    return this.#callWindow.hasSubscribers ||
+      this.#continuationWindow.hasSubscribers ||
+      this.error?.hasSubscribers;
+  }
+
+  subscribe(handlers) {
+    if (handlers.start || handlers.end) {
+      this.#callWindow.subscribe({
+        start: handlers.start,
+        end: handlers.end,
+      });
+    }
+
+    if (handlers.asyncStart || handlers.asyncEnd) {
+      this.#continuationWindow.subscribe({
+        start: handlers.asyncStart,
+        end: handlers.asyncEnd,
+      });
+    }
+
+    if (handlers.error) {
+      this.error.subscribe(handlers.error);
+    }
+  }
+
+  unsubscribe(handlers) {
+    let done = true;
+
+    if (handlers.start || handlers.end) {
+      if (!this.#callWindow.unsubscribe({
+        start: handlers.start,
+        end: handlers.end,
+      })) {
+        done = false;
+      }
+    }
+
+    if (handlers.asyncStart || handlers.asyncEnd) {
+      if (!this.#continuationWindow.unsubscribe({
+        start: handlers.asyncStart,
+        end: handlers.asyncEnd,
+      })) {
+        done = false;
+      }
+    }
+
+    if (handlers.error && !this.error.unsubscribe(handlers.error)) {
+      done = false;
+    }
+
+    return done;
+  }
+
   traceSync(fn, context = { __proto__: null }, thisArg, ...args) {
     if (!this.hasSubscribers) {
       return ReflectApply(fn, thisArg, args);
     }
 
-    const { start, end, error } = this;
+    const { error } = this;
 
-    return start.runStores(context, () => {
-      try {
-        const result = ReflectApply(fn, thisArg, args);
-        context.result = result;
-        return result;
-      } catch (err) {
-        context.error = err;
-        error.publish(context);
-        throw err;
-      } finally {
-        end.publish(context);
-      }
-    });
+    const scope = this.#callWindow.withScope(context);
+    try {
+      const result = ReflectApply(fn, thisArg, args);
+      context.result = result;
+      return result;
+    } catch (err) {
+      context.error = err;
+      error.publish(context);
+      throw err;
+    } finally {
+      scope[SymbolDispose]();
+    }
   }
 
   tracePromise(fn, context = { __proto__: null }, thisArg, ...args) {
     if (!this.hasSubscribers) {
-      return ReflectApply(fn, thisArg, args);
+      const result = ReflectApply(fn, thisArg, args);
+      if (typeof result?.then !== "function") {
+        emitNonThenableWarning(fn);
+      }
+      return result;
     }
 
-    const { start, end, asyncStart, asyncEnd, error } = this;
+    const { error } = this;
+    const continuationWindow = this.#continuationWindow;
 
     function reject(err) {
       context.error = err;
       error.publish(context);
-      asyncStart.publish(context);
-      // TODO: Is there a way to have asyncEnd _after_ the continuation?
-      asyncEnd.publish(context);
-      return PromiseReject(err);
+      const scope = continuationWindow.withScope(context);
+      try {
+        return PromiseReject(err);
+      } finally {
+        scope[SymbolDispose]();
+      }
     }
 
     function resolve(result) {
       context.result = result;
-      asyncStart.publish(context);
-      // TODO: Is there a way to have asyncEnd _after_ the continuation?
-      asyncEnd.publish(context);
-      return result;
+      const scope = continuationWindow.withScope(context);
+      try {
+        return result;
+      } finally {
+        scope[SymbolDispose]();
+      }
     }
 
-    return start.runStores(context, () => {
-      try {
-        let promise = ReflectApply(fn, thisArg, args);
-        // Convert thenables to native promises
-        if (!ObjectPrototypeIsPrototypeOf(PromisePrototype, promise)) {
-          promise = PromiseResolve(promise);
-        }
-        return PromisePrototypeThen(promise, resolve, reject);
-      } catch (err) {
-        context.error = err;
-        error.publish(context);
-        throw err;
-      } finally {
-        end.publish(context);
+    const scope = this.#callWindow.withScope(context);
+    try {
+      const result = ReflectApply(fn, thisArg, args);
+      if (typeof result?.then !== "function") {
+        emitNonThenableWarning(fn);
+        context.result = result;
+        return result;
       }
-    });
+      if (core.isPromise(result)) {
+        return PromisePrototypeThen(result, resolve, reject);
+      }
+      return result.then(resolve, reject);
+    } catch (err) {
+      context.error = err;
+      error.publish(context);
+      throw err;
+    } finally {
+      scope[SymbolDispose]();
+    }
   }
 
   traceCallback(
@@ -423,7 +599,8 @@ class TracingChannel {
       return ReflectApply(fn, thisArg, args);
     }
 
-    const { start, end, asyncStart, asyncEnd, error } = this;
+    const { error } = this;
+    const continuationWindow = this.#continuationWindow;
 
     function wrappedCallback(err, res) {
       if (err) {
@@ -433,31 +610,28 @@ class TracingChannel {
         context.result = res;
       }
 
-      // Using runStores here enables manual context failure recovery
-      asyncStart.runStores(context, () => {
-        try {
-          return ReflectApply(callback, this, arguments);
-        } finally {
-          asyncEnd.publish(context);
-        }
-      });
+      const scope = continuationWindow.withScope(context);
+      try {
+        return ReflectApply(callback, this, arguments);
+      } finally {
+        scope[SymbolDispose]();
+      }
     }
 
     const callback = ArrayPrototypeAt(args, position);
     validateFunction(callback, "callback");
     ArrayPrototypeSplice(args, position, 1, wrappedCallback);
 
-    return start.runStores(context, () => {
-      try {
-        return ReflectApply(fn, thisArg, args);
-      } catch (err) {
-        context.error = err;
-        error.publish(context);
-        throw err;
-      } finally {
-        end.publish(context);
-      }
-    });
+    const scope = this.#callWindow.withScope(context);
+    try {
+      return ReflectApply(fn, thisArg, args);
+    } catch (err) {
+      context.error = err;
+      error.publish(context);
+      throw err;
+    } finally {
+      scope[SymbolDispose]();
+    }
   }
 }
 
@@ -472,13 +646,17 @@ return {
     subscribe,
     tracingChannel,
     unsubscribe,
+    boundedChannel,
     Channel,
+    BoundedChannel,
   },
   channel,
   hasSubscribers,
   subscribe,
   tracingChannel,
   unsubscribe,
+  boundedChannel,
   Channel,
+  BoundedChannel,
 };
 })();

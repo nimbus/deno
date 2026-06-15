@@ -258,6 +258,21 @@ const onServerStreamErrorChannel = dc.channel("http2.server.stream.error");
 const onServerStreamFinishChannel = dc.channel("http2.server.stream.finish");
 const onServerStreamCloseChannel = dc.channel("http2.server.stream.close");
 
+function publishClientStreamCreatedAndStart(stream, headers) {
+  if (onClientStreamCreatedChannel.hasSubscribers) {
+    onClientStreamCreatedChannel.publish({
+      stream,
+      headers,
+    });
+  }
+  if (onClientStreamStartChannel.hasSubscribers) {
+    onClientStreamStartChannel.publish({
+      stream,
+      headers,
+    });
+  }
+}
+
 const { debuglog } = core.loadExtScript(
   "ext:deno_node/internal/util/debuglog.ts",
 );
@@ -1597,18 +1612,7 @@ function onSessionHeaders(
     } else {
       // eslint-disable-next-line no-use-before-define
       stream = new ClientHttp2Stream(session, handle, id, {});
-      if (onClientStreamCreatedChannel.hasSubscribers) {
-        onClientStreamCreatedChannel.publish({
-          stream,
-          headers: obj,
-        });
-      }
-      if (onClientStreamStartChannel.hasSubscribers) {
-        onClientStreamStartChannel.publish({
-          stream,
-          headers: obj,
-        });
-      }
+      process.nextTick(publishClientStreamCreatedAndStart, stream, obj);
       if (endOfStream) {
         // deno-lint-ignore prefer-primordials
         stream.push(null);

@@ -38,6 +38,7 @@ const {
   NumberIsSafeInteger,
   SafeFinalizationRegistry,
   SafeArrayIterator,
+  SymbolDispose,
 } = primordials;
 
 const {
@@ -51,6 +52,30 @@ const {
 const asyncResourceRegistry = new SafeFinalizationRegistry(
   (asyncId: number) => emitDestroyHook(asyncId),
 );
+
+class RunScope {
+  #storage: AsyncLocalStorage;
+  #previousStore: unknown;
+  #disposed = false;
+
+  constructor(storage: AsyncLocalStorage, store: unknown) {
+    this.#storage = storage;
+    this.#previousStore = storage.getStore();
+    storage.enterWith(store);
+  }
+
+  dispose() {
+    if (this.#disposed) {
+      return;
+    }
+    this.#disposed = true;
+    this.#storage.enterWith(this.#previousStore);
+  }
+
+  [SymbolDispose]() {
+    this.dispose();
+  }
+}
 
 class AsyncResource {
   type: string;
@@ -247,6 +272,10 @@ class AsyncLocalStorage {
     }
     const value = this.#variable.get();
     return value === undefined ? this.#defaultValue : value;
+  }
+
+  withScope(store: unknown) {
+    return new RunScope(this, store);
   }
 
   enterWith(store: unknown) {
