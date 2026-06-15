@@ -2713,9 +2713,11 @@ class SubtleCrypto {
       throw new SyntaxError("Invalid key type");
     }
     // 17.
-    result[_extractable] = extractable;
+    const resultSlots = assertCryptoKey(result);
+    resultSlots.extractable = extractable;
     // 18.
-    result[_usages] = usageIntersection(keyUsages, recognisedUsages);
+    resultSlots.usages = usageIntersection(keyUsages, recognisedUsages);
+    resultSlots.publicUsages = undefined;
     // 19.
     return result;
   }
