@@ -654,6 +654,12 @@ function setupBuiltinModules() {
     if (StringPrototypeStartsWith(name, "internal/")) {
       return;
     }
+    if (
+      (name === "stream/iter" || name === "zlib/iter") &&
+      !getOptionValue("--experimental-stream-iter")
+    ) {
+      return;
+    }
     if (SetPrototypeHas(schemelessBlockList, name)) {
       ArrayPrototypePush(builtinModules, `node:${name}`);
     } else {
