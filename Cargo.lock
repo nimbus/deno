@@ -2225,6 +2225,7 @@ dependencies = [
  "aes-gcm",
  "aes-kw",
  "aws-lc-rs",
+ "aws-lc-sys",
  "base64 0.22.1",
  "cbc",
  "const-oid 0.9.6",

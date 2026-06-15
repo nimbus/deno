@@ -18,6 +18,7 @@ const {
   ObjectHasOwn,
   ObjectPrototypeIsPrototypeOf,
   StringPrototypeStartsWith,
+  Symbol,
   SymbolToStringTag,
   TypeError,
   TypedArrayPrototypeGetByteLength,
@@ -59,6 +60,8 @@ const { kHandle } = core.loadExtScript(
 // Lazy import of cipher.ts to break circular dependency
 const lazyCipher = () =>
   core.loadExtScript("ext:deno_node/internal/crypto/cipher.ts");
+const lazyProcess = core.createLazyLoader("node:process");
+let warnedCryptoKeyDeprecation = false;
 
 const {
   ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS,
@@ -145,6 +148,15 @@ const kConsumePublic = 0;
 const kConsumePrivate = 1;
 const kCreatePublic = 2;
 const kCreatePrivate = 3;
+const kWebCryptoKeyData = Symbol("kWebCryptoKeyData");
+const kWebCryptoKeyFormat = Symbol("kWebCryptoKeyFormat");
+
+const ML_WEBCRYPTO_OID_PREFIXES = [
+  // 2.16.840.1.101.3.4.4.{1,2,3}: ML-KEM-512/768/1024.
+  [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x04],
+  // 2.16.840.1.101.3.4.3.{17,18,19}: ML-DSA-44/65/87.
+  [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03],
+];
 
 class KeyObject {
   [kKeyType]: any;
@@ -337,6 +349,74 @@ function isStringOrBuffer(val: unknown): boolean {
     Buffer.isBuffer(val);
 }
 
+function isUnsupportedKeyDecoderError(err: unknown): boolean {
+  return err !== null &&
+    typeof err === "object" &&
+    typeof (err as { message?: unknown }).message === "string" &&
+    (
+      (err as { message: string }).message === "unsupported" ||
+      StringPrototypeStartsWith(
+        (err as { message: string }).message,
+        "error:1E08010C:DECODER routines::unsupported",
+      )
+    );
+}
+
+function pemOrDerToDer(data: any, format: string): Buffer {
+  const bytes = Buffer.from(data);
+  if (format !== "pem") {
+    return bytes;
+  }
+  const pem = bytes.toString("utf8");
+  const base64 = pem
+    .replace(/-----BEGIN [^-]+-----/g, "")
+    .replace(/-----END [^-]+-----/g, "")
+    .replace(/\s+/g, "");
+  return Buffer.from(base64, "base64");
+}
+
+function containsMlWebCryptoOid(data: Uint8Array): boolean {
+  for (const prefix of ML_WEBCRYPTO_OID_PREFIXES) {
+    for (let i = 0; i <= data.length - prefix.length - 1; i++) {
+      let matched = true;
+      for (let j = 0; j < prefix.length; j++) {
+        if (data[i + j] !== prefix[j]) {
+          matched = false;
+          break;
+        }
+      }
+      if (!matched) {
+        continue;
+      }
+      const variant = data[i + prefix.length];
+      if (
+        (prefix[prefix.length - 1] === 0x04 &&
+          (variant === 0x01 || variant === 0x02 || variant === 0x03)) ||
+        (prefix[prefix.length - 1] === 0x03 &&
+          (variant === 0x11 || variant === 0x12 || variant === 0x13))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function createWebCryptoAsymmetricKeyObject(
+  res: any,
+  keyType: "public" | "private",
+): WebCryptoAsymmetricKeyObject | undefined {
+  const der = pemOrDerToDer(res.data, res.format);
+  if (!containsMlWebCryptoOid(der)) {
+    return undefined;
+  }
+  return new WebCryptoAsymmetricKeyObject(
+    keyType,
+    der,
+    keyType === "public" ? "spki" : "pkcs8",
+  );
+}
+
 function prepareAsymmetricKey(
   key: any,
   ctx: number,
@@ -348,6 +428,7 @@ function prepareAsymmetricKey(
       handle: getKeyObjectHandle(key, ctx),
     };
   } else if (isCryptoKey(key)) {
+    emitCryptoKeyDeprecationWarning();
     return {
       // @ts-ignore __proto__ is magic
       __proto__: null,
@@ -369,6 +450,7 @@ function prepareAsymmetricKey(
         handle: getKeyObjectHandle(data, ctx),
       };
     } else if (isCryptoKey(data)) {
+      emitCryptoKeyDeprecationWarning();
       return {
         // @ts-ignore __proto__ is magic
         __proto__: null,
@@ -409,6 +491,18 @@ function prepareAsymmetricKey(
     "key",
     getKeyTypes(ctx !== kCreatePrivate),
     key,
+  );
+}
+
+function emitCryptoKeyDeprecationWarning() {
+  if (warnedCryptoKeyDeprecation) {
+    return;
+  }
+  warnedCryptoKeyDeprecation = true;
+  lazyProcess().default.emitWarning(
+    "Passing a CryptoKey to node:crypto functions is deprecated.",
+    "DeprecationWarning",
+    "DEP0203",
   );
 }
 
@@ -614,6 +708,12 @@ function createPrivateKey(
         res.passphrase,
       );
     } catch (err) {
+      if (isUnsupportedKeyDecoderError(err)) {
+        const keyObject = createWebCryptoAsymmetricKeyObject(res, "private");
+        if (keyObject !== undefined) {
+          return keyObject;
+        }
+      }
       throw decorateOsslDecoderError(err);
     }
     return new PrivateKeyObject(handle);
@@ -647,6 +747,12 @@ function createPublicKey(
         res.passphrase,
       );
     } catch (err) {
+      if (isUnsupportedKeyDecoderError(err)) {
+        const keyObject = createWebCryptoAsymmetricKeyObject(res, "public");
+        if (keyObject !== undefined) {
+          return keyObject;
+        }
+      }
       throw decorateOsslDecoderError(err);
     }
     return new PublicKeyObject(handle);
@@ -683,10 +789,12 @@ function prepareSecretKey(
       }
       return key[kHandle];
     } else if (isCryptoKey(key)) {
-      if (key.type !== "secret") {
-        throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(key.type, "secret");
+      emitCryptoKeyDeprecationWarning();
+      const { type, data } = cryptoKeyExportNodeKeyMaterial(key);
+      if (type !== "secret") {
+        throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(type, "secret");
       }
-      return KeyObject.from(key)[kHandle];
+      return op_node_create_secret_key(data);
     }
   }
   if (
@@ -863,6 +971,55 @@ class AsymmetricKeyObject extends KeyObject {
 
   get asymmetricKeyDetails() {
     return { ...op_node_get_asymmetric_key_details(this[kHandle]) };
+  }
+}
+
+class WebCryptoAsymmetricKeyObject extends AsymmetricKeyObject {
+  [kWebCryptoKeyData]: Uint8Array;
+  [kWebCryptoKeyFormat]: "spki" | "pkcs8";
+
+  constructor(
+    type: "public" | "private",
+    data: Uint8Array,
+    format: "spki" | "pkcs8",
+  ) {
+    super(type, { __proto__: null, webCryptoKeyObject: true });
+    this[kWebCryptoKeyData] = data;
+    this[kWebCryptoKeyFormat] = format;
+  }
+
+  get asymmetricKeyType() {
+    return undefined;
+  }
+
+  get asymmetricKeyDetails() {
+    return {};
+  }
+
+  [core.hostObjectBrand]() {
+    return {
+      type: "NodeCryptoKeyObject",
+      keyType: this.type,
+      keyData: new Uint8Array(this[kWebCryptoKeyData]),
+    };
+  }
+
+  toCryptoKey(
+    algorithm: string | object,
+    extractable: boolean,
+    usages: string[],
+  ): CryptoKey {
+    return importCryptoKeySync(
+      this[kWebCryptoKeyFormat],
+      this[kWebCryptoKeyData],
+      algorithm,
+      extractable,
+      usages,
+    );
+  }
+
+  export(_options?: unknown): string | Buffer | JsonWebKey {
+    notImplemented("crypto.KeyObject.prototype.export");
   }
 }
 
@@ -1061,10 +1218,11 @@ function createSecretKey(
   encoding?: string,
 ): KeyObject {
   if (isCryptoKey(key)) {
-    if (key.type !== "secret") {
-      throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(key.type, "secret");
+    const { type, data } = cryptoKeyExportNodeKeyMaterial(key);
+    if (type !== "secret") {
+      throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(type, "secret");
     }
-    return KeyObject.from(key);
+    return new SecretKeyObject(op_node_create_secret_key(data));
   }
   const preparedKey = prepareSecretKey(key, encoding, true);
   if (isArrayBufferView(preparedKey) || isAnyArrayBuffer(preparedKey)) {

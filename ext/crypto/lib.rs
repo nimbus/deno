@@ -718,6 +718,154 @@ fn encode_integer(value: u64, left: bool) -> Vec<u8> {
   out
 }
 
+fn turbo_shake_128(
+  data: &[u8],
+  domain_separation: u8,
+  out_len: usize,
+) -> Vec<u8> {
+  use sha3::digest::ExtendableOutput;
+  use sha3::digest::Update;
+  use sha3::digest::XofReader;
+  use sha3::digest::core_api::CoreWrapper;
+
+  let core = sha3::TurboShake128Core::new(domain_separation);
+  let mut h: sha3::TurboShake128 = CoreWrapper::from_core(core);
+  h.update(data);
+  let mut out = vec![0u8; out_len];
+  h.finalize_xof().read(&mut out);
+  out
+}
+
+fn turbo_shake_256(
+  data: &[u8],
+  domain_separation: u8,
+  out_len: usize,
+) -> Vec<u8> {
+  use sha3::digest::ExtendableOutput;
+  use sha3::digest::Update;
+  use sha3::digest::XofReader;
+  use sha3::digest::core_api::CoreWrapper;
+
+  let core = sha3::TurboShake256Core::new(domain_separation);
+  let mut h: sha3::TurboShake256 = CoreWrapper::from_core(core);
+  h.update(data);
+  let mut out = vec![0u8; out_len];
+  h.finalize_xof().read(&mut out);
+  out
+}
+
+fn k12_length_encode(value: usize) -> Vec<u8> {
+  if value == 0 {
+    return vec![0];
+  }
+
+  let bytes = value.to_be_bytes();
+  let first = bytes
+    .iter()
+    .position(|b| *b != 0)
+    .unwrap_or(bytes.len() - 1);
+  let encoded_len = bytes.len() - first;
+  let mut out = Vec::with_capacity(encoded_len + 1);
+  out.extend_from_slice(&bytes[first..]);
+  out.push(encoded_len as u8);
+  out
+}
+
+fn kangaroo_twelve(
+  data: &[u8],
+  customization: &[u8],
+  out_len: usize,
+  cv_len: usize,
+  turbo_shake: fn(&[u8], u8, usize) -> Vec<u8>,
+) -> Result<Vec<u8>, CryptoError> {
+  const CHUNK_SIZE: usize = 8192;
+
+  let length_encode = k12_length_encode(customization.len());
+  let s_len = data
+    .len()
+    .checked_add(customization.len())
+    .and_then(|len| len.checked_add(length_encode.len()))
+    .ok_or(CryptoError::InvalidXofParameters)?;
+
+  let read_s = |mut offset: usize, buf: &mut [u8]| {
+    let mut copied = 0;
+    if offset < data.len() && copied < buf.len() {
+      let available = data.len() - offset;
+      let to_copy = available.min(buf.len() - copied);
+      buf[copied..copied + to_copy]
+        .copy_from_slice(&data[offset..offset + to_copy]);
+      copied += to_copy;
+      offset += to_copy;
+    }
+
+    let customization_start = data.len();
+    if offset < customization_start + customization.len() && copied < buf.len()
+    {
+      let offset_in_customization = offset - customization_start;
+      let available = customization.len() - offset_in_customization;
+      let to_copy = available.min(buf.len() - copied);
+      buf[copied..copied + to_copy].copy_from_slice(
+        &customization
+          [offset_in_customization..offset_in_customization + to_copy],
+      );
+      copied += to_copy;
+      offset += to_copy;
+    }
+
+    let length_encode_start = data.len() + customization.len();
+    if offset < length_encode_start + length_encode.len() && copied < buf.len()
+    {
+      let offset_in_length_encode = offset - length_encode_start;
+      let available = length_encode.len() - offset_in_length_encode;
+      let to_copy = available.min(buf.len() - copied);
+      buf[copied..copied + to_copy].copy_from_slice(
+        &length_encode
+          [offset_in_length_encode..offset_in_length_encode + to_copy],
+      );
+    }
+  };
+
+  if s_len <= CHUNK_SIZE {
+    let mut s = vec![0u8; s_len];
+    read_s(0, &mut s);
+    return Ok(turbo_shake(&s, 0x07, out_len));
+  }
+
+  let mut first_chunk = vec![0u8; CHUNK_SIZE];
+  read_s(0, &mut first_chunk);
+
+  let mut final_node = Vec::with_capacity(
+    CHUNK_SIZE
+      .checked_add(8)
+      .and_then(|len| {
+        len.checked_add((s_len / CHUNK_SIZE).saturating_mul(cv_len))
+      })
+      .and_then(|len| len.checked_add(16))
+      .ok_or(CryptoError::InvalidXofParameters)?,
+  );
+  final_node.extend_from_slice(&first_chunk);
+  final_node.push(0x03);
+  final_node.extend_from_slice(&[0; 7]);
+
+  let mut offset = CHUNK_SIZE;
+  let mut num_blocks = 0usize;
+  while offset < s_len {
+    let block_size = (s_len - offset).min(CHUNK_SIZE);
+    let mut chunk = vec![0u8; block_size];
+    read_s(offset, &mut chunk);
+    let cv = turbo_shake(&chunk, 0x0B, cv_len);
+    final_node.extend_from_slice(&cv);
+    num_blocks += 1;
+    offset += block_size;
+  }
+
+  final_node.extend_from_slice(&k12_length_encode(num_blocks));
+  final_node.push(0xFF);
+  final_node.push(0xFF);
+
+  Ok(turbo_shake(&final_node, 0x06, out_len))
+}
+
 fn fixed_time_eq(a: &[u8], b: &[u8]) -> bool {
   if a.len() != b.len() {
     return false;
@@ -1241,6 +1389,18 @@ pub enum SubtleDigestXof {
     output_length: u32,
     domain_separation: Option<u8>,
   },
+  #[serde(rename = "KT128", rename_all = "camelCase")]
+  Kt128 {
+    output_length: u32,
+    #[serde(with = "serde_bytes", default)]
+    customization: Option<Vec<u8>>,
+  },
+  #[serde(rename = "KT256", rename_all = "camelCase")]
+  Kt256 {
+    output_length: u32,
+    #[serde(with = "serde_bytes", default)]
+    customization: Option<Vec<u8>>,
+  },
 }
 
 #[op2]
@@ -1257,7 +1417,9 @@ pub async fn op_crypto_subtle_digest_xof(
       SubtleDigestXof::CShake128 { output_length, .. }
       | SubtleDigestXof::CShake256 { output_length, .. }
       | SubtleDigestXof::TurboShake128 { output_length, .. }
-      | SubtleDigestXof::TurboShake256 { output_length, .. } => *output_length,
+      | SubtleDigestXof::TurboShake256 { output_length, .. }
+      | SubtleDigestXof::Kt128 { output_length, .. }
+      | SubtleDigestXof::Kt256 { output_length, .. } => *output_length,
     };
     if !length_bits.is_multiple_of(8) {
       return Err(CryptoError::InvalidXofParameters);
@@ -1297,28 +1459,38 @@ pub async fn op_crypto_subtle_digest_xof(
       SubtleDigestXof::TurboShake128 {
         domain_separation, ..
       } => {
-        use sha3::digest::core_api::CoreWrapper;
         let d = domain_separation.unwrap_or(0x1F);
         if !(0x01..=0x7F).contains(&d) {
           return Err(CryptoError::InvalidXofParameters);
         }
-        let core = sha3::TurboShake128Core::new(d);
-        let mut h: sha3::TurboShake128 = CoreWrapper::from_core(core);
-        h.update(&data);
-        h.finalize_xof().read(&mut out);
+        out = turbo_shake_128(&data, d, out_len);
       }
       SubtleDigestXof::TurboShake256 {
         domain_separation, ..
       } => {
-        use sha3::digest::core_api::CoreWrapper;
         let d = domain_separation.unwrap_or(0x1F);
         if !(0x01..=0x7F).contains(&d) {
           return Err(CryptoError::InvalidXofParameters);
         }
-        let core = sha3::TurboShake256Core::new(d);
-        let mut h: sha3::TurboShake256 = CoreWrapper::from_core(core);
-        h.update(&data);
-        h.finalize_xof().read(&mut out);
+        out = turbo_shake_256(&data, d, out_len);
+      }
+      SubtleDigestXof::Kt128 { customization, .. } => {
+        out = kangaroo_twelve(
+          &data,
+          customization.as_deref().unwrap_or(&[]),
+          out_len,
+          32,
+          turbo_shake_128,
+        )?;
+      }
+      SubtleDigestXof::Kt256 { customization, .. } => {
+        out = kangaroo_twelve(
+          &data,
+          customization.as_deref().unwrap_or(&[]),
+          out_len,
+          64,
+          turbo_shake_256,
+        )?;
       }
     }
 

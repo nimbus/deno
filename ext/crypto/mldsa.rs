@@ -1,16 +1,11 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use aws_lc_rs::signature::KeyPair;
-use aws_lc_rs::signature::UnparsedPublicKey;
-use aws_lc_rs::unstable::signature::ML_DSA_44;
 use aws_lc_rs::unstable::signature::ML_DSA_44_SIGNING;
-use aws_lc_rs::unstable::signature::ML_DSA_65;
 use aws_lc_rs::unstable::signature::ML_DSA_65_SIGNING;
-use aws_lc_rs::unstable::signature::ML_DSA_87;
 use aws_lc_rs::unstable::signature::ML_DSA_87_SIGNING;
 use aws_lc_rs::unstable::signature::PqdsaKeyPair;
 use aws_lc_rs::unstable::signature::PqdsaSigningAlgorithm;
-use aws_lc_rs::unstable::signature::PqdsaVerificationAlgorithm;
 use deno_core::ToJsBuffer;
 use deno_core::convert::Uint8Array;
 use deno_core::op2;
@@ -31,9 +26,6 @@ pub enum MlDsaError {
   #[class("DOMExceptionOperationError")]
   #[error("Signing failed")]
   SigningFailed,
-  #[class("DOMExceptionNotSupportedError")]
-  #[error("Non-empty context is not supported")]
-  ContextNotSupported,
   #[class("DOMExceptionNotSupportedError")]
   #[error("unsupported ML-DSA PKCS#8 private key format")]
   UnsupportedPkcs8Format,
@@ -56,7 +48,6 @@ const ML_DSA_87_OID: const_oid::ObjectIdentifier =
 #[derive(Clone, Copy)]
 struct MlDsaParams {
   signing: &'static PqdsaSigningAlgorithm,
-  verifying: &'static PqdsaVerificationAlgorithm,
   oid: const_oid::ObjectIdentifier,
   pub_key_len: usize,
   #[allow(
@@ -66,34 +57,126 @@ struct MlDsaParams {
   )]
   priv_key_len: usize,
   sig_len: usize,
+  sign: unsafe extern "C" fn(
+    *const u8,
+    *mut u8,
+    *mut usize,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+  ) -> i32,
+  verify: unsafe extern "C" fn(
+    *const u8,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+  ) -> i32,
 }
 
 const ML_DSA_44_PARAMS: MlDsaParams = MlDsaParams {
   signing: &ML_DSA_44_SIGNING,
-  verifying: &ML_DSA_44,
   oid: ML_DSA_44_OID,
   pub_key_len: 1312,
   priv_key_len: 2560,
   sig_len: 2420,
+  sign: ml_dsa_44_sign,
+  verify: ml_dsa_44_verify,
 };
 
 const ML_DSA_65_PARAMS: MlDsaParams = MlDsaParams {
   signing: &ML_DSA_65_SIGNING,
-  verifying: &ML_DSA_65,
   oid: ML_DSA_65_OID,
   pub_key_len: 1952,
   priv_key_len: 4032,
   sig_len: 3309,
+  sign: ml_dsa_65_sign,
+  verify: ml_dsa_65_verify,
 };
 
 const ML_DSA_87_PARAMS: MlDsaParams = MlDsaParams {
   signing: &ML_DSA_87_SIGNING,
-  verifying: &ML_DSA_87,
   oid: ML_DSA_87_OID,
   pub_key_len: 2592,
   priv_key_len: 4896,
   sig_len: 4627,
+  sign: ml_dsa_87_sign,
+  verify: ml_dsa_87_verify,
 };
+
+// aws-lc-rs exposes ML-DSA signing, but its high-level API does not expose the
+// optional FIPS 204 context string. The generic EVP pure-mode wrapper currently
+// drops that context, so bind the native ML-DSA primitives directly here.
+unsafe extern "C" {
+  #[link_name = "aws_lc_0_40_0_ml_dsa_44_sign"]
+  fn ml_dsa_44_sign(
+    private_key: *const u8,
+    sig: *mut u8,
+    sig_len: *mut usize,
+    message: *const u8,
+    message_len: usize,
+    ctx_string: *const u8,
+    ctx_string_len: usize,
+  ) -> i32;
+
+  #[link_name = "aws_lc_0_40_0_ml_dsa_44_verify"]
+  fn ml_dsa_44_verify(
+    public_key: *const u8,
+    sig: *const u8,
+    sig_len: usize,
+    message: *const u8,
+    message_len: usize,
+    ctx_string: *const u8,
+    ctx_string_len: usize,
+  ) -> i32;
+
+  #[link_name = "aws_lc_0_40_0_ml_dsa_65_sign"]
+  fn ml_dsa_65_sign(
+    private_key: *const u8,
+    sig: *mut u8,
+    sig_len: *mut usize,
+    message: *const u8,
+    message_len: usize,
+    ctx_string: *const u8,
+    ctx_string_len: usize,
+  ) -> i32;
+
+  #[link_name = "aws_lc_0_40_0_ml_dsa_65_verify"]
+  fn ml_dsa_65_verify(
+    public_key: *const u8,
+    sig: *const u8,
+    sig_len: usize,
+    message: *const u8,
+    message_len: usize,
+    ctx_string: *const u8,
+    ctx_string_len: usize,
+  ) -> i32;
+
+  #[link_name = "aws_lc_0_40_0_ml_dsa_87_sign"]
+  fn ml_dsa_87_sign(
+    private_key: *const u8,
+    sig: *mut u8,
+    sig_len: *mut usize,
+    message: *const u8,
+    message_len: usize,
+    ctx_string: *const u8,
+    ctx_string_len: usize,
+  ) -> i32;
+
+  #[link_name = "aws_lc_0_40_0_ml_dsa_87_verify"]
+  fn ml_dsa_87_verify(
+    public_key: *const u8,
+    sig: *const u8,
+    sig_len: usize,
+    message: *const u8,
+    message_len: usize,
+    ctx_string: *const u8,
+    ctx_string_len: usize,
+  ) -> i32;
+}
 
 fn params(variant: u8) -> Result<MlDsaParams, MlDsaError> {
   match variant {
@@ -102,6 +185,69 @@ fn params(variant: u8) -> Result<MlDsaParams, MlDsaError> {
     2 => Ok(ML_DSA_87_PARAMS),
     _ => Err(MlDsaError::UnknownVariant),
   }
+}
+
+fn optional_ptr(data: &[u8]) -> *const u8 {
+  if data.is_empty() {
+    std::ptr::null()
+  } else {
+    data.as_ptr()
+  }
+}
+
+fn sign_mldsa_with_context(
+  p: MlDsaParams,
+  private_key_bytes: &[u8],
+  data: &[u8],
+  context: &[u8],
+) -> Result<Vec<u8>, MlDsaError> {
+  if private_key_bytes.len() != p.priv_key_len {
+    return Err(MlDsaError::InvalidKeyData);
+  }
+
+  let mut signature = vec![0u8; p.sig_len];
+  let mut signature_len = signature.len();
+  let signed = unsafe {
+    (p.sign)(
+      private_key_bytes.as_ptr(),
+      signature.as_mut_ptr(),
+      &mut signature_len,
+      data.as_ptr(),
+      data.len(),
+      optional_ptr(context),
+      context.len(),
+    )
+  };
+  if signed != 1 || signature_len > signature.len() {
+    return Err(MlDsaError::SigningFailed);
+  }
+  signature.truncate(signature_len);
+  Ok(signature)
+}
+
+fn verify_mldsa_with_context(
+  p: MlDsaParams,
+  public_key_bytes: &[u8],
+  data: &[u8],
+  signature: &[u8],
+  context: &[u8],
+) -> bool {
+  if public_key_bytes.len() != p.pub_key_len || signature.len() != p.sig_len {
+    return false;
+  }
+
+  let init = unsafe {
+    (p.verify)(
+      public_key_bytes.as_ptr(),
+      signature.as_ptr(),
+      signature.len(),
+      data.as_ptr(),
+      data.len(),
+      optional_ptr(context),
+      context.len(),
+    )
+  };
+  init == 1
 }
 
 #[derive(Serialize)]
@@ -373,19 +519,12 @@ pub fn op_crypto_sign_mldsa(
 ) -> Result<Uint8Array, MlDsaError> {
   let private_key_bytes = key.data().expanded_private_key();
   let p = params(variant)?;
-  // aws-lc-rs 1.16 does not expose a way to set the FIPS 204 §5.2 context
-  // parameter for ML-DSA. The empty context is signed by default; reject
-  // non-empty contexts until the underlying API supports them.
-  if context.is_some_and(|c| !c.is_empty()) {
-    return Err(MlDsaError::ContextNotSupported);
-  }
-  let key_pair =
-    PqdsaKeyPair::from_raw_private_key(p.signing, private_key_bytes)
-      .map_err(|_| MlDsaError::InvalidKeyData)?;
-  let mut signature = vec![0u8; p.sig_len];
-  key_pair
-    .sign(data, &mut signature)
-    .map_err(|_| MlDsaError::SigningFailed)?;
+  let signature = sign_mldsa_with_context(
+    p,
+    private_key_bytes,
+    data,
+    context.unwrap_or(&[]),
+  )?;
   Ok(signature.into())
 }
 
@@ -401,14 +540,13 @@ pub fn op_crypto_verify_mldsa(
   let Ok(p) = params(variant) else {
     return false;
   };
-  // Match the limitation in op_crypto_sign_mldsa: only empty context is
-  // currently supported.
-  if context.is_some_and(|c| !c.is_empty()) {
-    return false;
-  }
-  UnparsedPublicKey::new(p.verifying, public_key_bytes)
-    .verify(data, signature)
-    .is_ok()
+  verify_mldsa_with_context(
+    p,
+    public_key_bytes,
+    data,
+    signature,
+    context.unwrap_or(&[]),
+  )
 }
 
 trait AsRawBytesVec {
