@@ -1,0 +1,46 @@
+// Copyright 2018-2026 the Deno authors. MIT license.
+import { core } from "ext:core/mod.js";
+const mod = core.loadExtScript("ext:deno_node/stream/iter.js");
+
+export const {
+  Broadcast,
+  Share,
+  Stream,
+  SyncShare,
+  array,
+  arrayBuffer,
+  arrayBufferSync,
+  arraySync,
+  broadcast,
+  broadcastProtocol,
+  bytes,
+  bytesSync,
+  drainableProtocol,
+  duplex,
+  from,
+  fromReadable,
+  fromSync,
+  fromWritable,
+  merge,
+  ondrain,
+  pipeTo,
+  pipeToSync,
+  pull,
+  pullSync,
+  push,
+  share,
+  shareProtocol,
+  shareSync,
+  shareSyncProtocol,
+  tap,
+  tapSync,
+  text,
+  textSync,
+  toAsyncStreamable,
+  toReadable,
+  toReadableSync,
+  toStreamable,
+  toWritable,
+} = mod;
+
+export default mod;

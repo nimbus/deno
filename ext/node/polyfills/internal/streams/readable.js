@@ -53,6 +53,7 @@ const {
   AbortError,
   aggregateTwoErrors,
   codes: {
+    ERR_STREAM_ITER_MISSING_FLAG,
     ERR_INVALID_ARG_TYPE,
     ERR_METHOD_NOT_IMPLEMENTED,
     ERR_OUT_OF_RANGE,
@@ -98,6 +99,7 @@ const {
   Symbol,
   SymbolAsyncDispose,
   SymbolAsyncIterator,
+  SymbolFor,
   SymbolSpecies,
   TypedArrayPrototypeSet,
 } = primordials;
@@ -687,6 +689,11 @@ function howMuchToRead(n, state) {
     return 1;
   }
   if (NumberIsNaN(n)) {
+    // Fast path for buffers.
+    if ((state[kState] & kDecoder) === 0 && state.length) {
+      return state.buffer[state.bufferIndex].length;
+    }
+
     // Only flow one buffer at a time.
     if ((state[kState] & kFlowing) !== 0 && state.length) {
       return state.buffer[state.bufferIndex].length;
@@ -931,7 +938,10 @@ function emitReadable_(stream) {
 // However, if we're not ended, or reading, and the length < hwm,
 // then go ahead and try to read some more preemptively.
 function maybeReadMore(stream, state) {
-  if ((state[kState] & (kReadingMore | kConstructed)) === kConstructed) {
+  if (
+    (state[kState] & (kReadingMore | kReading | kConstructed)) ===
+      kConstructed
+  ) {
     state[kState] |= kReadingMore;
     process.nextTick(maybeReadMore_, stream, state);
   }
@@ -1872,6 +1882,37 @@ Readable.wrap = function (src, options) {
     },
   }).wrap(src);
 };
+
+{
+  const toAsyncStreamable = SymbolFor("Stream.toAsyncStreamable");
+  let createBatchedAsyncIterator;
+  let normalizeBatch;
+  let kValidatedSource;
+
+  Readable.prototype[toAsyncStreamable] = function () {
+    if (createBatchedAsyncIterator === undefined) {
+      const { getOptionValue } = core.loadExtScript(
+        "ext:deno_node/internal/options.ts",
+      );
+      if (!getOptionValue("--experimental-stream-iter")) {
+        throw new ERR_STREAM_ITER_MISSING_FLAG();
+      }
+      ({
+        createBatchedAsyncIterator,
+        normalizeBatch,
+      } = core.loadExtScript("ext:deno_node/internal/streams/iter/classic.js"));
+      ({ kValidatedSource } = core.loadExtScript(
+        "ext:deno_node/internal/streams/iter/types.js",
+      ));
+    }
+    const state = this._readableState;
+    const normalize = state.objectMode || state.encoding ? normalizeBatch : null;
+    const iter = createBatchedAsyncIterator(this, normalize);
+    iter[kValidatedSource] = true;
+    iter.stream = this;
+    return iter;
+  };
+}
 
 return { default: Readable, Readable };
 })();

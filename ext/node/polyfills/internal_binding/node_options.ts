@@ -76,7 +76,9 @@ function createDefaultOptions() {
     ["--warnings", { value: true }],
     ["--pending-deprecation", { value: false }],
     ["--expose-internals", { value: false }],
+    ["--async-context-frame", { value: true }],
     ["--experimental-require-module", { value: true }],
+    ["--experimental-stream-iter", { value: false }],
     ["--experimental-vm-modules", { value: false }],
     ["--preserve-symlinks", { value: false }],
     ["--preserve-symlinks-main", { value: false }],
@@ -115,6 +117,12 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     case "--no-enable-source-maps":
       options.set("--enable-source-maps", { value: false });
       break;
+    case "--async-context-frame":
+      options.set("--async-context-frame", { value: true });
+      break;
+    case "--no-async-context-frame":
+      options.set("--async-context-frame", { value: false });
+      break;
     case "--expose-internals":
     case "--expose_internals":
       options.set("--expose-internals", { value: true });
@@ -122,6 +130,9 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     case "--experimental-require-module":
     case "--require-module":
       options.set("--experimental-require-module", { value: true });
+      break;
+    case "--experimental-stream-iter":
+      options.set("--experimental-stream-iter", { value: true });
       break;
     case "--no-experimental-require-module":
     case "--no-require-module":

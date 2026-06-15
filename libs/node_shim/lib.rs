@@ -158,6 +158,7 @@ pub struct EnvironmentOptions {
   pub experimental_fetch: bool,
   pub experimental_websocket: bool,
   pub experimental_sqlite: bool,
+  pub experimental_stream_iter: bool,
   pub experimental_webstorage: bool,
   pub experimental_quic: bool,
   pub localstorage_file: String,
@@ -295,6 +296,7 @@ impl Default for EnvironmentOptions {
       experimental_fetch: true,
       experimental_websocket: true,
       experimental_sqlite: true,
+      experimental_stream_iter: false,
       experimental_webstorage: false,
       experimental_quic: false,
       localstorage_file: String::new(),
@@ -902,6 +904,13 @@ impl OptionsParser {
       OptionType::Boolean,
       OptionEnvvarSettings::AllowedInEnvvar,
       true,
+    );
+    self.add_option(
+      "--experimental-stream-iter",
+      "Allow loading the experimental stream/iter and zlib/iter builtins.",
+      OptionType::Boolean,
+      OptionEnvvarSettings::AllowedInEnvvar,
+      false,
     );
     self.add_option(
       "--diagnostic-dir",
@@ -2362,6 +2371,9 @@ impl OptionsParser {
       }
       "--experimental-sqlite" => {
         options.per_isolate.per_env.experimental_sqlite = value
+      }
+      "--experimental-stream-iter" => {
+        options.per_isolate.per_env.experimental_stream_iter = value
       }
       "--experimental-quic" => {
         options.per_isolate.per_env.experimental_quic = value
@@ -4823,7 +4835,7 @@ mod tests {
   #[test]
   fn test_translate_inspect_port_injects_debug_port_for_print() {
     // `--inspect-port=N` without `--inspect[-brk|-wait]` should make
-    // `process.debugPort` equal N — matching Node — even though Deno
+    // `process.debugPort` equal N - matching Node - even though Deno
     // has no equivalent runtime flag. The translator injects the
     // assignment into the eval code used by `-p`/`-e`.
     let parsed =

@@ -285,6 +285,7 @@ const internalRepl = core.createLazyLoader(
 const sea = core.createLazyLoader("node:sea");
 const lazyStream = core.createLazyLoader("node:stream");
 const streamConsumers = core.loadExtScript("ext:deno_node/stream/consumers.js");
+const lazyStreamIter = core.createLazyLoader("node:stream/iter");
 const lazyStreamPromises = core.createLazyLoader("node:stream/promises");
 const test = core.loadExtScript("ext:deno_node/testing.ts").default;
 const timers = core.loadExtScript("ext:deno_node/timers.ts");
@@ -292,6 +293,7 @@ const tls = core.createLazyLoader("node:tls");
 const lazyTty = core.createLazyLoader("node:tty");
 const url = core.loadExtScript("ext:deno_node/url.ts");
 const util = core.loadExtScript("ext:deno_node/util.ts");
+const lazyZlibIter = core.createLazyLoader("node:zlib/iter");
 const workerThreads = core.loadExtScript(
   "ext:deno_node/worker_threads.ts",
 );
@@ -375,22 +377,53 @@ const lazyNodeModules = {
   "sea": () => sea().default,
   "internal/child_process": () =>
     core.loadExtScript("ext:deno_node/internal/child_process.ts").default,
-  // Inactive AsyncContextFrame shim. The fork propagates async context through
-  // AsyncVariable (V8 ContinuationPreservedEmbedderData), not Node's
-  // AsyncContextFrame, and that model never retains a frame->AsyncLocalStorage
-  // strong reference. Reporting `enabled: false` lets fixtures skip the extra
-  // disable() whose sole purpose is breaking that Node-specific reference
-  // (test/async-hooks/test-async-local-storage-gcable.js).
-  "internal/async_context_frame": () => ({
-    enabled: false,
-    current() {
-      return undefined;
-    },
-    set() {},
-    exchange() {
-      return undefined;
-    },
-  }),
+  "internal/async_context_frame": () => {
+    const { getOptionValue } = core.loadExtScript(
+      "ext:deno_node/internal/options.ts",
+    );
+    const enabled = getOptionValue("--async-context-frame") !== false;
+    return class AsyncContextFrame extends SafeMap {
+      static get enabled() {
+        return enabled;
+      }
+
+      static current() {
+        return enabled ? core.getAsyncContext() : undefined;
+      }
+
+      static set(frame) {
+        if (enabled) {
+          core.setAsyncContext(frame);
+        }
+      }
+
+      static exchange(frame) {
+        const prior = this.current();
+        this.set(frame);
+        return prior;
+      }
+
+      static disable(store) {
+        const frame = this.current();
+        if (typeof frame?.disable === "function") {
+          frame.disable(store);
+        } else if (typeof frame?.delete === "function") {
+          frame.delete(store);
+        }
+      }
+
+      constructor(store, data) {
+        super();
+        if (store !== undefined) {
+          this.set(store, data);
+        }
+      }
+
+      disable(store) {
+        this.delete(store);
+      }
+    };
+  },
   "stream/web": () => core.loadExtScript("ext:deno_node/stream/web.js"),
   "inspector": () => core.loadExtScript("ext:deno_node/inspector.js"),
   "inspector/promises": () =>
@@ -418,9 +451,41 @@ const lazyNodeModules = {
   "path/posix": () => lazyPathPosix().default,
   "path/win32": () => lazyPathWin32().default,
   "stream": () => lazyStream().default,
+  "stream/iter": () => lazyStreamIter().default,
   "stream/promises": () => lazyStreamPromises().default,
   "tty": () => lazyTty().default,
+  "zlib/iter": () => lazyZlibIter().default,
   "internal/tty": () => lazyInternalTty(),
+  "internal/abort_controller": () =>
+    core.loadExtScript("ext:deno_node/internal/abort_controller.js"),
+  "internal/encoding": () =>
+    core.loadExtScript("ext:deno_node/internal/encoding.js"),
+  "internal/process/task_queues": () =>
+    core.loadExtScript("ext:deno_node/internal/process/task_queues.js"),
+  "internal/streams/iter/_require": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/_require.js"),
+  "internal/streams/iter/broadcast": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/broadcast.js"),
+  "internal/streams/iter/classic": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/classic.js"),
+  "internal/streams/iter/consumers": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/consumers.js"),
+  "internal/streams/iter/duplex": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/duplex.js"),
+  "internal/streams/iter/from": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/from.js"),
+  "internal/streams/iter/pull": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/pull.js"),
+  "internal/streams/iter/push": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/push.js"),
+  "internal/streams/iter/ringbuffer": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/ringbuffer.js"),
+  "internal/streams/iter/share": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/share.js"),
+  "internal/streams/iter/types": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/types.js"),
+  "internal/streams/iter/utils": () =>
+    core.loadExtScript("ext:deno_node/internal/streams/iter/utils.js"),
   "internal/js_stream_socket": () =>
     core.loadExtScript("ext:deno_node/internal/js_stream_socket.js").default,
   "_stream_duplex": () =>
@@ -1981,7 +2046,7 @@ Module._load = function (request, parent, isMain) {
   ) {
     const id = StringPrototypeSlice(request, 5);
     if (
-      !(id in nativeModuleExports) ||
+      !nativeModuleCanBeRequiredByUsers(id) ||
       StringPrototypeStartsWith(id, "internal/")
     ) {
       throw new internalErrors.ERR_UNKNOWN_BUILTIN_MODULE(request);
@@ -2375,7 +2440,7 @@ Module._resolveFilename = function (
 
   if (StringPrototypeStartsWith(request, "node:")) {
     const id = StringPrototypeSlice(request, 5);
-    if (id in nativeModuleExports) {
+    if (nativeModuleCanBeRequiredByUsers(id)) {
       return request;
     }
     if (hookEntries.length > 0 && !insideResolveHook) {
@@ -3701,7 +3766,7 @@ function isBuiltin(moduleName) {
     return false;
   }
 
-  return moduleName in nativeModuleExports &&
+  return nativeModuleCanBeRequiredByUsers(moduleName) &&
     !StringPrototypeStartsWith(moduleName, "internal/");
 }
 
@@ -4025,6 +4090,12 @@ function loadNativeModule(_id, request) {
 
 function nativeModuleCanBeRequiredByUsers(request) {
   if (request === "test" || request === "test/reporters") {
+    return false;
+  }
+  if (
+    (request === "stream/iter" || request === "zlib/iter") &&
+    !getOptionValue("--experimental-stream-iter")
+  ) {
     return false;
   }
   // `in` rather than bracket access avoids triggering the lazy getters

@@ -54,6 +54,8 @@ const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
 const { createFilteredInspectProxy } = core.loadExtScript(
   "ext:deno_web/01_console.js",
 );
+const kNodeWebStreamsState = SymbolFor("nodejs.webstreams.kState");
+const kNodeWebStreamsType = SymbolFor("nodejs.webstreams.kType");
 
 function withCode(error, code) {
   if (error && error.code === undefined) {
@@ -403,6 +405,40 @@ const ENCODE_INTO_PACKED_MULTIPLIER = 0x100000000;
 webidl.configureInterface(TextEncoder);
 const TextEncoderPrototype = TextEncoder.prototype;
 
+function inspectEncodingStream(name, inspect, inspectOptions, entries) {
+  const lines = [`${name} {`];
+  for (let i = 0; i < entries.length; i++) {
+    const [key, value, nested] = entries[i];
+    const formatted = nested
+      ? inspectNestedStream(value, inspect, inspectOptions)
+      : inspect(value, inspectOptions);
+    const suffix = i + 1 === entries.length ? "" : ",";
+    lines.push(`  ${key}: ${formatted}${suffix}`);
+  }
+  lines.push("}");
+  return lines.join("\n");
+}
+
+function inspectNestedStream(value, inspect, inspectOptions) {
+  const type = value?.[kNodeWebStreamsType];
+  if (type === "ReadableStream") {
+    const state = value[kNodeWebStreamsState];
+    const controllerType = state.controller?.[kNodeWebStreamsType];
+    return `ReadableStream { locked: ${
+      inspect(value.locked, inspectOptions)
+    }, state: ${inspect(state.state, inspectOptions)}, supportsBYOB: ${
+      inspect(controllerType === "ReadableByteStreamController", inspectOptions)
+    } }`;
+  }
+  if (type === "WritableStream") {
+    const state = value[kNodeWebStreamsState];
+    return `WritableStream { locked: ${
+      inspect(value.locked, inspectOptions)
+    }, state: ${inspect(state.state, inspectOptions)} }`;
+  }
+  return inspect(value, inspectOptions);
+}
+
 class TextDecoderStream {
   /** @type {TextDecoder} */
   #decoder;
@@ -505,20 +541,13 @@ class TextDecoderStream {
       TextDecoderStreamPrototype,
       "TextDecoderStream",
     );
-    return inspect(
-      createFilteredInspectProxy({
-        object: this,
-        evaluate: true,
-        keys: [
-          "encoding",
-          "fatal",
-          "ignoreBOM",
-          "readable",
-          "writable",
-        ],
-      }),
-      inspectOptions,
-    );
+    return inspectEncodingStream("TextDecoderStream", inspect, inspectOptions, [
+      ["encoding", this.encoding, false],
+      ["fatal", this.fatal, false],
+      ["ignoreBOM", this.ignoreBOM, false],
+      ["readable", this.readable, true],
+      ["writable", this.writable, true],
+    ]);
   }
 
   [SymbolFor("nodejs.util.inspect.custom")](_depth, inspectOptions, inspect) {
@@ -527,7 +556,13 @@ class TextDecoderStream {
       TextDecoderStreamPrototype,
       "TextDecoderStream",
     );
-    return this[SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions);
+    return inspectEncodingStream("TextDecoderStream", inspect, inspectOptions, [
+      ["encoding", this.encoding, false],
+      ["fatal", this.fatal, false],
+      ["ignoreBOM", this.ignoreBOM, false],
+      ["readable", this.readable, true],
+      ["writable", this.writable, true],
+    ]);
   }
 }
 
@@ -612,18 +647,11 @@ class TextEncoderStream {
       TextEncoderStreamPrototype,
       "TextEncoderStream",
     );
-    return inspect(
-      createFilteredInspectProxy({
-        object: this,
-        evaluate: true,
-        keys: [
-          "encoding",
-          "readable",
-          "writable",
-        ],
-      }),
-      inspectOptions,
-    );
+    return inspectEncodingStream("TextEncoderStream", inspect, inspectOptions, [
+      ["encoding", this.encoding, false],
+      ["readable", this.readable, true],
+      ["writable", this.writable, true],
+    ]);
   }
 
   [SymbolFor("nodejs.util.inspect.custom")](_depth, inspectOptions, inspect) {
@@ -632,7 +660,11 @@ class TextEncoderStream {
       TextEncoderStreamPrototype,
       "TextEncoderStream",
     );
-    return this[SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions);
+    return inspectEncodingStream("TextEncoderStream", inspect, inspectOptions, [
+      ["encoding", this.encoding, false],
+      ["readable", this.readable, true],
+      ["writable", this.writable, true],
+    ]);
   }
 }
 

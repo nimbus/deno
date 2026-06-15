@@ -72,6 +72,7 @@ pub static DENO_SUPPORTED_BUILTIN_NODE_MODULES: &[&str] = &[
   "sqlite",
   "stream",
   "stream/consumers",
+  "stream/iter",
   "stream/promises",
   "stream/web",
   "string_decoder",
@@ -91,6 +92,7 @@ pub static DENO_SUPPORTED_BUILTIN_NODE_MODULES: &[&str] = &[
   "wasi",
   "worker_threads",
   "zlib",
+  "zlib/iter",
 ];
 
 #[cfg(test)]

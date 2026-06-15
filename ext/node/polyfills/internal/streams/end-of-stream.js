@@ -52,16 +52,32 @@ const {
 const {
   Promise,
   PromisePrototypeThen,
+  ReflectApply,
   SymbolDispose,
 } = primordials;
 
 let addAbortListener;
+let AsyncResource;
 
 function isRequest(stream) {
   return stream.setHeader && typeof stream.abort === "function";
 }
 
 const nop = () => {};
+
+const { enabledHooksExist } = core.loadExtScript(
+  "ext:deno_node/internal/async_hooks.ts",
+);
+
+function bindAsyncResource(fn, type) {
+  AsyncResource ??= core.loadExtScript(
+    "ext:deno_node/async_hooks.ts",
+  ).AsyncResource;
+  const resource = new AsyncResource(type);
+  return function (...args) {
+    return resource.runInAsyncScope(fn, this, ...args);
+  };
+}
 
 function eos(stream, options, callback) {
   if (arguments.length === 2) {
@@ -75,21 +91,9 @@ function eos(stream, options, callback) {
   validateFunction(callback, "callback");
   validateAbortSignal(options.signal, "options.signal");
 
-  // Capture the current async context so that the callback runs in the
-  // same AsyncLocalStorage scope that was active when eos() was called.
-  // In Node.js this happens automatically through the native AsyncWrap
-  // layer, but Deno's ops don't propagate Node-style async context.
-  const snapshot = core.getAsyncContext();
-  const originalCallback = callback;
-  callback = function (...args) {
-    const previousContext = core.getAsyncContext();
-    try {
-      core.setAsyncContext(snapshot);
-      return originalCallback.apply(this, args);
-    } finally {
-      core.setAsyncContext(previousContext);
-    }
-  };
+  if (core.getAsyncContext() || enabledHooksExist()) {
+    callback = bindAsyncResource(callback, "STREAM_END_OF_STREAM");
+  }
 
   callback = once(callback);
 
@@ -290,7 +294,7 @@ function eos(stream, options, callback) {
       const originalCallback = callback;
       callback = once((...args) => {
         disposable[SymbolDispose]();
-        originalCallback.apply(stream, args);
+        ReflectApply(originalCallback, stream, args);
       });
     }
   }

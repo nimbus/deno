@@ -141,8 +141,8 @@ fn op_node_load_env_file(
   // presets that intentionally withhold ambient env access (env_read empty):
   // a missing in-root `.env` then surfaces as a permission error (EACCES)
   // instead of the Node-expected ENOENT. The operation discloses no host
-  // environment — it only materializes entries the caller already supplied in
-  // its own (read-gated, in-root) file — so the file read-permission check
+  // environment - it only materializes entries the caller already supplied in
+  // its own (read-gated, in-root) file - so the file read-permission check
   // below is the correct and sufficient capability boundary.
   let path = permissions
     .check_open(
@@ -537,10 +537,12 @@ deno_core::extension!(deno_node,
     "node:sqlite" = "sqlite_esm.ts",
     "node:os" = "os_esm.ts",
     "node:stream/consumers" = "stream/consumers_esm.js",
+    "node:stream/iter" = "stream/iter_esm.js",
     "node:stream/web" = "stream/web_esm.js",
     "node:string_decoder" = "string_decoder_esm.ts",
     "node:test" = "testing_esm.ts",
     "node:test/reporters" = "test/reporters_esm.ts",
+    "node:zlib/iter" = "zlib/iter_esm.js",
     "node:cluster" = "cluster_esm.ts",
     "node:console" = "console_esm.ts",
     "node:constants" = "constants_esm.ts",
@@ -755,6 +757,21 @@ deno_core::extension!(deno_node,
     "internal/streams/legacy.js",
     "internal/streams/destroy.js",
     "internal/streams/end-of-stream.js",
+    "internal/abort_controller.js",
+    "internal/encoding.js",
+    "internal/process/task_queues.js",
+    "internal/streams/iter/_require.js",
+    "internal/streams/iter/broadcast.js",
+    "internal/streams/iter/classic.js",
+    "internal/streams/iter/consumers.js",
+    "internal/streams/iter/duplex.js",
+    "internal/streams/iter/from.js",
+    "internal/streams/iter/pull.js",
+    "internal/streams/iter/push.js",
+    "internal/streams/iter/ringbuffer.js",
+    "internal/streams/iter/share.js",
+    "internal/streams/iter/types.js",
+    "internal/streams/iter/utils.js",
     "async_hooks.ts",
     "diagnostics_channel.js",
     "domain.ts",
@@ -767,8 +784,10 @@ deno_core::extension!(deno_node,
     "sqlite.ts",
     "os.ts",
     "stream/consumers.js",
+    "stream/iter.js",
     "stream/web.js",
     "string_decoder.ts",
+    "zlib/iter.js",
     "testing.ts",
     "test/reporters.ts",
     "_fs/_fs_common.ts",

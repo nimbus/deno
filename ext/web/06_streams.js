@@ -44,6 +44,7 @@ const {
   DataViewPrototypeGetByteOffset,
   Float32Array,
   Float64Array,
+  FunctionPrototypeBind,
   Int16Array,
   Int32Array,
   Int8Array,
@@ -161,6 +162,12 @@ class Deferred {
 function createInvalidStateTypeError(message) {
   const error = new TypeError(message);
   error.code = "ERR_INVALID_STATE";
+  return error;
+}
+
+function createInvalidArgNotIterableTypeError(message) {
+  const error = new TypeError(message);
+  error.code = "ERR_ARG_NOT_ITERABLE";
   return error;
 }
 
@@ -438,6 +445,9 @@ const _closedPromise = Symbol("[[closedPromise]]");
 const _closeRequest = Symbol("[[closeRequest]]");
 const _closeRequested = Symbol("[[closeRequested]]");
 const _controller = Symbol("[[controller]]");
+const kControllerErrorFunction = SymbolFor(
+  "nodejs.webstream.controllerErrorFunction",
+);
 const _detached = Symbol("[[Detached]]");
 const _disturbed = Symbol("[[disturbed]]");
 const _errorSteps = Symbol("[[ErrorSteps]]");
@@ -695,6 +705,7 @@ function initializeReadableStream(stream) {
   stream[_reader] = stream[_storedError] = undefined;
   stream[_disturbed] = false;
   stream[_isClosedPromise] = new Deferred();
+  stream[kControllerErrorFunction] = noop;
 }
 
 /**
@@ -775,6 +786,7 @@ function initializeWritableStream(stream) {
   stream[_writeRequests] = new Queue();
   stream[_backpressure] = false;
   stream[_isClosedPromise] = new Deferred();
+  stream[kControllerErrorFunction] = noop;
 }
 
 /**
@@ -3843,6 +3855,10 @@ function setUpReadableStreamDefaultController(
   controller[_pullAlgorithm] = pullAlgorithm;
   controller[_cancelAlgorithm] = cancelAlgorithm;
   stream[_controller] = controller;
+  stream[kControllerErrorFunction] = FunctionPrototypeBind(
+    controller.error,
+    controller,
+  );
   const startResult = startAlgorithm(controller);
   const startPromise = PromiseResolve(startResult);
   uponPromise(startPromise, () => {
@@ -4079,6 +4095,10 @@ function setUpWritableStreamDefaultController(
   controller[_writeAlgorithm] = writeAlgorithm;
   controller[_closeAlgorithm] = closeAlgorithm;
   controller[_abortAlgorithm] = abortAlgorithm;
+  stream[kControllerErrorFunction] = FunctionPrototypeBind(
+    controller.error,
+    controller,
+  );
   const backpressure = writableStreamDefaultControllerGetBackpressure(
     controller,
   );
@@ -5411,12 +5431,28 @@ class ReadableStream {
       1,
       prefix,
     );
-    asyncIterable = webidl.converters["async iterable<any>"](
-      asyncIterable,
-      prefix,
-      "Argument 1",
-    );
-    const iter = asyncIterable.open();
+    try {
+      asyncIterable = webidl.converters["async iterable<any>"](
+        asyncIterable,
+        prefix,
+        "Argument 1",
+      );
+    } catch (error) {
+      if (error instanceof TypeError && error.code === undefined) {
+        throw createInvalidArgNotIterableTypeError(error.message);
+      }
+      throw error;
+    }
+
+    let iter;
+    try {
+      iter = asyncIterable.open("Argument 1");
+    } catch (error) {
+      if (error instanceof TypeError && error.code === undefined) {
+        throw createInvalidStateTypeError(error.message);
+      }
+      throw error;
+    }
 
     const stream = createReadableStream(noop, async () => {
       // deno-lint-ignore prefer-primordials
@@ -5607,15 +5643,21 @@ class ReadableStream {
       ReadableStreamPrototype,
       this,
     );
+    const supportsBYOB = isBranded
+      ? ObjectPrototypeIsPrototypeOf(
+        ReadableByteStreamControllerPrototype,
+        this[_controller],
+      )
+      : undefined;
+    if (isBranded && inspectOptions?.breakLength === Infinity) {
+      return `ReadableStream { locked: ${inspect(this.locked, inspectOptions)}, state: ${
+        inspect(this[_state], inspectOptions)
+      }, supportsBYOB: ${inspect(supportsBYOB, inspectOptions)} }`;
+    }
     const view = {
       locked: isBranded ? this.locked : undefined,
       state: isBranded ? this[_state] : undefined,
-      supportsBYOB: isBranded
-        ? ObjectPrototypeIsPrototypeOf(
-          ReadableByteStreamControllerPrototype,
-          this[_controller],
-        )
-        : undefined,
+      supportsBYOB,
     };
     ObjectDefineProperty(view, "constructor", {
       __proto__: null,
@@ -6719,14 +6761,23 @@ class WritableStream {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    const isBranded = ObjectPrototypeIsPrototypeOf(
+      WritableStreamPrototype,
+      this,
+    );
+    const view = {
+      locked: isBranded ? this.locked : undefined,
+      state: isBranded ? this[_state] : undefined,
+    };
+    ObjectDefineProperty(view, "constructor", {
+      __proto__: null,
+      value: { name: this.constructor?.name ?? "WritableStream" },
+    });
     return inspect(
       createFilteredInspectProxy({
-        object: this,
-        evaluate: ObjectPrototypeIsPrototypeOf(
-          WritableStreamPrototype,
-          this,
-        ),
-        keys: ["locked"],
+        object: view,
+        evaluate: isBranded,
+        keys: ["locked", "state"],
       }),
       inspectOptions,
     );
@@ -7004,23 +7055,28 @@ function setUpCrossRealmTransformReadable(stream, port) {
   port.addEventListener("message", (event) => {
     if (event.data.type === "chunk") {
       readableStreamDefaultControllerEnqueue(controller, event.data.value);
+      port.unref();
     } else if (event.data.type === "close") {
       readableStreamDefaultControllerClose(controller);
+      port.unref();
       port.close();
     } else if (event.data.type === "error") {
       readableStreamDefaultControllerError(controller, event.data.value);
+      port.unref();
       port.close();
     }
   });
   port.addEventListener("messageerror", (event) => {
     crossRealmTransformSendError(port, event.error);
     readableStreamDefaultControllerError(controller, event.error);
+    port.unref();
     port.close();
   });
   port.start();
   port.unref();
   const startAlgorithm = () => undefined;
   const pullAlgorithm = () => {
+    port.ref();
     packAndPostMessage(port, "pull", undefined);
     return PromiseResolve(undefined);
   };
@@ -7030,6 +7086,7 @@ function setUpCrossRealmTransformReadable(stream, port) {
     } catch (e) {
       return PromiseReject(e);
     } finally {
+      port.unref();
       port.close();
     }
     return PromiseResolve(undefined);
@@ -7060,6 +7117,7 @@ function setUpCrossRealmTransformWritable(stream, port) {
         backpressurePromise.resolve();
         backpressurePromise = undefined;
       }
+      port.unref();
     } else if (event.data.type === "error") {
       writableStreamDefaultControllerErrorIfNeeded(
         controller,
@@ -7069,11 +7127,13 @@ function setUpCrossRealmTransformWritable(stream, port) {
         backpressurePromise.resolve();
         backpressurePromise = undefined;
       }
+      port.unref();
     }
   });
   port.addEventListener("messageerror", (event) => {
     crossRealmTransformSendError(port, event.error);
     writableStreamDefaultControllerErrorIfNeeded(controller, event.error);
+    port.unref();
     port.close();
   });
   port.start();
@@ -7084,11 +7144,13 @@ function setUpCrossRealmTransformWritable(stream, port) {
       backpressurePromise = PromiseWithResolvers();
       backpressurePromise.resolve();
     }
+    port.ref();
     return PromisePrototypeThen(backpressurePromise.promise, () => {
       backpressurePromise = PromiseWithResolvers();
       try {
         packAndPostMessageHandlingError(port, "chunk", chunk);
       } catch (e) {
+        port.unref();
         port.close();
         throw e;
       }
@@ -7096,6 +7158,7 @@ function setUpCrossRealmTransformWritable(stream, port) {
   };
   const closeAlgorithm = () => {
     packAndPostMessage(port, "close", undefined);
+    port.unref();
     port.close();
     return PromiseResolve(undefined);
   };
@@ -7106,6 +7169,7 @@ function setUpCrossRealmTransformWritable(stream, port) {
     } catch (error) {
       return PromiseReject(error);
     } finally {
+      port.unref();
       port.close();
     }
   };

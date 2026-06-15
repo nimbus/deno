@@ -93,6 +93,10 @@ function isError(e) {
   return isNativeError(e) || ObjectPrototypeIsPrototypeOf(ErrorPrototype, e);
 }
 
+function lazyDOMException(message, name) {
+  return new DOMException(message, name);
+}
+
 function promisify(
   original,
 ) {
@@ -290,6 +294,7 @@ return {
   kEmptyObject,
   kEnumerableProperty,
   kCustomPromisifiedSymbol,
+  lazyDOMException,
   normalizeEncoding,
   once,
   pendingDeprecate,
@@ -306,6 +311,7 @@ return {
     isError,
     kEmptyObject,
     kEnumerableProperty,
+    lazyDOMException,
     normalizeEncoding,
     once,
     pendingDeprecate,
