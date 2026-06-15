@@ -2046,7 +2046,7 @@ Module._load = function (request, parent, isMain) {
   ) {
     const id = StringPrototypeSlice(request, 5);
     if (
-      !nativeModuleCanBeRequiredByUsers(id) ||
+      !nativeModuleCanBeRequiredByUsers(id, true) ||
       StringPrototypeStartsWith(id, "internal/")
     ) {
       throw new internalErrors.ERR_UNKNOWN_BUILTIN_MODULE(request);
@@ -2440,7 +2440,7 @@ Module._resolveFilename = function (
 
   if (StringPrototypeStartsWith(request, "node:")) {
     const id = StringPrototypeSlice(request, 5);
-    if (nativeModuleCanBeRequiredByUsers(id)) {
+    if (nativeModuleCanBeRequiredByUsers(id, true)) {
       return request;
     }
     if (hookEntries.length > 0 && !insideResolveHook) {
@@ -3756,8 +3756,10 @@ function isBuiltin(moduleName) {
     return false;
   }
 
+  let fromNodeScheme = false;
   if (StringPrototypeStartsWith(moduleName, "node:")) {
     moduleName = StringPrototypeSlice(moduleName, 5);
+    fromNodeScheme = true;
   } else if (SetPrototypeHas(schemelessBlockList, moduleName)) {
     // sea, sqlite, test and test/reporters are only builtins when imported with
     // the "node:" scheme; without it `isBuiltin`/`getBuiltinModule` must report
@@ -3766,7 +3768,7 @@ function isBuiltin(moduleName) {
     return false;
   }
 
-  return nativeModuleCanBeRequiredByUsers(moduleName) &&
+  return nativeModuleCanBeRequiredByUsers(moduleName, fromNodeScheme) &&
     !StringPrototypeStartsWith(moduleName, "internal/");
 }
 
@@ -4088,8 +4090,11 @@ function loadNativeModule(_id, request) {
   return undefined;
 }
 
-function nativeModuleCanBeRequiredByUsers(request) {
-  if (request === "test" || request === "test/reporters") {
+function nativeModuleCanBeRequiredByUsers(request, fromNodeScheme = false) {
+  if (
+    !fromNodeScheme &&
+    (request === "test" || request === "test/reporters")
+  ) {
     return false;
   }
   if (
