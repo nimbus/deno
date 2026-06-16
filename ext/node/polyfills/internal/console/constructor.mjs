@@ -127,6 +127,23 @@ const kUseStderr = Symbol("kUseStderr");
 
 const optionsMap = new SafeWeakMap();
 
+function nodejsSymbolKeysWithoutBrackets() {
+  if (globalThis.__nimbusNodeCompatLane === "node22") {
+    return false;
+  }
+  if (
+    globalThis.__nimbusNodeCompatLane === "node24" ||
+    globalThis.__nimbusNodeCompatLane === "node26"
+  ) {
+    return true;
+  }
+  const nodeVersion = lazyProcess().versions?.node;
+  const nodeMajor = typeof nodeVersion === "string"
+    ? Number(StringPrototypeSplit(nodeVersion, ".", 1)[0])
+    : 24;
+  return nodeMajor >= 24;
+}
+
 function Console(options /* or: stdout, stderr, ignoreErrors = true */) {
   // We have to test new.target here to see if this function is called
   // with new, because we need to define a custom instanceof to accommodate
@@ -403,10 +420,19 @@ ObjectDefineProperties(Console.prototype, {
         if (options.colors === undefined) {
           options.colors = color;
         }
+        if (options.nodejsSymbolKeysWithoutBrackets === undefined) {
+          options.nodejsSymbolKeysWithoutBrackets =
+            nodejsSymbolKeysWithoutBrackets();
+        }
         return options;
       }
 
-      return color ? kColorInspectOptions : kNoColorInspectOptions;
+      const defaultOptions = color
+        ? kColorInspectOptions
+        : kNoColorInspectOptions;
+      defaultOptions.nodejsSymbolKeysWithoutBrackets =
+        nodejsSymbolKeysWithoutBrackets();
+      return defaultOptions;
     },
   },
   [kFormatForStdout]: {
