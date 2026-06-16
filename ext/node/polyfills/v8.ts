@@ -38,6 +38,7 @@ const {
   PromisePrototypeThen,
   ReflectApply,
   String,
+  StringPrototypeCharCodeAt,
   StringPrototypePadStart,
   Symbol,
   SymbolDispose,
@@ -116,10 +117,17 @@ function getViewByteLength(view: ArrayBufferView): number {
 const lazyFsUtils = core.createLazyLoader(
   "ext:deno_node/internal/fs/utils.mjs",
 );
-const { validateFunction, validateObject, validateOneOf, validateString } = core
-  .loadExtScript(
-    "ext:deno_node/internal/validators.mjs",
-  );
+const {
+  validateBoolean,
+  validateFunction,
+  validateInt32,
+  validateInteger,
+  validateObject,
+  validateOneOf,
+  validateString,
+} = core.loadExtScript(
+  "ext:deno_node/internal/validators.mjs",
+);
 
 function cachedDataVersionTag() {
   return op_v8_cached_data_version_tag();
@@ -196,6 +204,79 @@ function setFlagsFromString(flags: string) {
   validateString(flags, "flags");
   op_v8_set_flags_from_string(flags);
 }
+
+const EMPTY_SAMPLING_HEAP_PROFILE =
+  '{"head":{"callFrame":{"functionName":"(root)","scriptId":"0","url":"","lineNumber":-1,"columnNumber":-1},"selfSize":0,"id":1,"children":[]},"samples":[]}';
+
+let heapProfileStarted = false;
+
+// Deno does not expose V8's sampling heap profiler through rusty_v8 today, so
+// this wrapper preserves Node's public validation and handle lifecycle while
+// returning a minimal valid sampling-profile document from stop().
+function normalizeHeapProfileOptions(options: Record<string, unknown> = {}) {
+  validateObject(options, "options");
+  const {
+    sampleInterval = 512 * 1024,
+    stackDepth = 16,
+    forceGC = false,
+    includeObjectsCollectedByMajorGC = false,
+    includeObjectsCollectedByMinorGC = false,
+  } = options;
+
+  validateInteger(sampleInterval, "options.sampleInterval", 1);
+  validateInt32(stackDepth, "options.stackDepth", 0);
+  validateBoolean(forceGC, "options.forceGC");
+  validateBoolean(
+    includeObjectsCollectedByMajorGC,
+    "options.includeObjectsCollectedByMajorGC",
+  );
+  validateBoolean(
+    includeObjectsCollectedByMinorGC,
+    "options.includeObjectsCollectedByMinorGC",
+  );
+}
+
+function throwHeapProfileStarted() {
+  const error = new Error("Heap profile has already been started");
+  (error as Error & { code?: string }).code =
+    "ERR_HEAP_PROFILE_HAVE_BEEN_STARTED";
+  throw error;
+}
+
+class SyncHeapProfileHandle {
+  #stopped = false;
+
+  stop() {
+    if (this.#stopped) return undefined;
+    this.#stopped = true;
+    heapProfileStarted = false;
+    return EMPTY_SAMPLING_HEAP_PROFILE;
+  }
+
+  [SymbolDispose]() {
+    this.stop();
+  }
+}
+
+function startHeapProfile(options?: Record<string, unknown>) {
+  normalizeHeapProfileOptions(options);
+  if (heapProfileStarted) {
+    throwHeapProfileStarted();
+  }
+  heapProfileStarted = true;
+  return new SyncHeapProfileHandle();
+}
+
+function isStringOneByteRepresentation(content: string) {
+  validateString(content, "content");
+  for (let i = 0; i < content.length; i++) {
+    if (StringPrototypeCharCodeAt(content, i) > 0xff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function stopCoverage() {
   notImplemented("v8.stopCoverage");
 }
@@ -897,6 +978,8 @@ return {
   promiseHooks,
   queryObjects,
   setFlagsFromString,
+  startHeapProfile,
+  isStringOneByteRepresentation,
   startupSnapshot,
   stopCoverage,
   takeCoverage,
