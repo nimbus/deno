@@ -7076,7 +7076,6 @@ function setUpCrossRealmTransformReadable(stream, port) {
   port.unref();
   const startAlgorithm = () => undefined;
   const pullAlgorithm = () => {
-    port.ref();
     packAndPostMessage(port, "pull", undefined);
     return PromiseResolve(undefined);
   };
@@ -7144,7 +7143,6 @@ function setUpCrossRealmTransformWritable(stream, port) {
       backpressurePromise = PromiseWithResolvers();
       backpressurePromise.resolve();
     }
-    port.ref();
     return PromisePrototypeThen(backpressurePromise.promise, () => {
       backpressurePromise = PromiseWithResolvers();
       try {

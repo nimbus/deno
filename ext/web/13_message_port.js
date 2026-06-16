@@ -886,8 +886,11 @@ function toNodeStructuredCloneOptionsError(err, prefix) {
   const transferSequenceError =
     `${prefix}: 'transfer' of 'StructuredSerializeOptions' (Argument 2) can not be converted to sequence.`;
   if (err.message === transferSequenceError) {
+    const sequenceMessage = globalThis.__nimbusNodeCompatLane === "node26"
+      ? `${prefix}: transfer in Options cannot be converted to sequence.`
+      : `${prefix}: transfer in Options can not be converted to sequence.`;
     throw createStructuredCloneInvalidArgType(
-      `${prefix}: transfer in Options can not be converted to sequence.`,
+      sequenceMessage,
     );
   }
 
