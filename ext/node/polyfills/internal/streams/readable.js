@@ -118,6 +118,15 @@ const nop = () => {};
 
 const { errorOrDestroy } = destroyImpl;
 
+function usesNode26ReadableBufferFastPath() {
+  const nodeVersion = process?.versions?.node;
+  if (typeof nodeVersion !== "string") {
+    return true;
+  }
+  const nodeMajor = NumberParseInt(nodeVersion, 10);
+  return NumberIsNaN(nodeMajor) || nodeMajor >= 26;
+}
+
 const kErroredValue = Symbol("kErroredValue");
 const kDefaultEncodingValue = Symbol("kDefaultEncodingValue");
 const kDecoderValue = Symbol("kDecoderValue");
@@ -690,7 +699,10 @@ function howMuchToRead(n, state) {
   }
   if (NumberIsNaN(n)) {
     // Fast path for buffers.
-    if ((state[kState] & kDecoder) === 0 && state.length) {
+    if (
+      usesNode26ReadableBufferFastPath() &&
+      (state[kState] & kDecoder) === 0 && state.length
+    ) {
       return state.buffer[state.bufferIndex].length;
     }
 

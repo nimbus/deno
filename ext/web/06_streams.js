@@ -7055,25 +7055,20 @@ function setUpCrossRealmTransformReadable(stream, port) {
   port.addEventListener("message", (event) => {
     if (event.data.type === "chunk") {
       readableStreamDefaultControllerEnqueue(controller, event.data.value);
-      port.unref();
     } else if (event.data.type === "close") {
       readableStreamDefaultControllerClose(controller);
-      port.unref();
       port.close();
     } else if (event.data.type === "error") {
       readableStreamDefaultControllerError(controller, event.data.value);
-      port.unref();
       port.close();
     }
   });
   port.addEventListener("messageerror", (event) => {
     crossRealmTransformSendError(port, event.error);
     readableStreamDefaultControllerError(controller, event.error);
-    port.unref();
     port.close();
   });
   port.start();
-  port.unref();
   const startAlgorithm = () => undefined;
   const pullAlgorithm = () => {
     packAndPostMessage(port, "pull", undefined);
@@ -7085,7 +7080,6 @@ function setUpCrossRealmTransformReadable(stream, port) {
     } catch (e) {
       return PromiseReject(e);
     } finally {
-      port.unref();
       port.close();
     }
     return PromiseResolve(undefined);
@@ -7116,7 +7110,6 @@ function setUpCrossRealmTransformWritable(stream, port) {
         backpressurePromise.resolve();
         backpressurePromise = undefined;
       }
-      port.unref();
     } else if (event.data.type === "error") {
       writableStreamDefaultControllerErrorIfNeeded(
         controller,
@@ -7126,17 +7119,14 @@ function setUpCrossRealmTransformWritable(stream, port) {
         backpressurePromise.resolve();
         backpressurePromise = undefined;
       }
-      port.unref();
     }
   });
   port.addEventListener("messageerror", (event) => {
     crossRealmTransformSendError(port, event.error);
     writableStreamDefaultControllerErrorIfNeeded(controller, event.error);
-    port.unref();
     port.close();
   });
   port.start();
-  port.unref();
   const startAlgorithm = () => undefined;
   const writeAlgorithm = (chunk) => {
     if (!backpressurePromise) {
@@ -7148,7 +7138,6 @@ function setUpCrossRealmTransformWritable(stream, port) {
       try {
         packAndPostMessageHandlingError(port, "chunk", chunk);
       } catch (e) {
-        port.unref();
         port.close();
         throw e;
       }
@@ -7156,7 +7145,6 @@ function setUpCrossRealmTransformWritable(stream, port) {
   };
   const closeAlgorithm = () => {
     packAndPostMessage(port, "close", undefined);
-    port.unref();
     port.close();
     return PromiseResolve(undefined);
   };
@@ -7167,7 +7155,6 @@ function setUpCrossRealmTransformWritable(stream, port) {
     } catch (error) {
       return PromiseReject(error);
     } finally {
-      port.unref();
       port.close();
     }
   };
