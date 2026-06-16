@@ -37,6 +37,13 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 
 const process = lazyProcess().default;
+let traceEventsMod = null;
+function getTraceEvents() {
+  if (traceEventsMod === null) {
+    traceEventsMod = core.loadExtScript("ext:deno_node/trace_events.ts");
+  }
+  return traceEventsMod;
+}
 
 function isLoopback(host) {
   const hostLower = StringPrototypeToLowerCase(host);
@@ -50,14 +57,18 @@ function isLoopback(host) {
 }
 
 const {
+  ArrayIsArray,
   ArrayBufferPrototype,
+  ArrayPrototypeFilter,
   ArrayPrototypePush,
+  ArrayPrototypeSlice,
   ArrayPrototypeShift,
   ObjectAssign,
   ObjectPrototypeIsPrototypeOf,
   SymbolDispose,
   JSONParse,
   JSONStringify,
+  SafeArrayIterator,
   SafeMap,
   SafeMapIterator,
   StringPrototypeStartsWith,
@@ -103,6 +114,8 @@ class Session extends EventEmitter {
   #connection = null;
   #nextId = 1;
   #messageCallbacks = new SafeMap();
+  #nodeTracingCategories = null;
+  #nodeTracingStartIndex = 0;
   #pendingMessages = [];
   #drainScheduled = false;
   #isDraining = false;
@@ -179,6 +192,61 @@ class Session extends EventEmitter {
     }
   }
 
+  #emitProtocolNotification(method, params) {
+    const message = { method, params };
+    this.emit(method, message);
+    this.emit("inspectorNotification", message);
+  }
+
+  #eventMatchesNodeTracingCategories(event) {
+    const categories = this.#nodeTracingCategories;
+    if (!categories || !ArrayIsArray(categories)) return true;
+    for (const category of new SafeArrayIterator(categories)) {
+      if (event?.cat === category) return true;
+    }
+    return false;
+  }
+
+  #postNodeTracing(method, params, callback) {
+    const traceEvents = getTraceEvents();
+    if (method === "NodeTracing.start") {
+      this.#nodeTracingStartIndex = traceEvents.recordedTraceEventsCount();
+      this.#nodeTracingCategories =
+        params?.traceConfig?.includedCategories ?? null;
+      if (callback) process.nextTick(callback, null, {});
+      return true;
+    }
+    if (method !== "NodeTracing.stop") return false;
+
+    const events = ArrayPrototypeFilter(
+      traceEvents.recordedTraceEventsSince(this.#nodeTracingStartIndex),
+      (event) => this.#eventMatchesNodeTracingCategories(event),
+    );
+    const metadataEvent = {
+      __proto__: null,
+      cat: "__metadata",
+      name: "process_name",
+      ph: "M",
+      pid: process.pid,
+      tid: 0,
+      ts: 0,
+      args: { __proto__: null },
+    };
+    const firstChunk = events.length > 0 ? [events[0]] : [metadataEvent];
+    const secondChunk = events.length > 1
+      ? ArrayPrototypeSlice(events, 1)
+      : [metadataEvent];
+    this.#emitProtocolNotification("NodeTracing.dataCollected", {
+      value: firstChunk,
+    });
+    this.#emitProtocolNotification("NodeTracing.dataCollected", {
+      value: secondChunk,
+    });
+    this.#emitProtocolNotification("NodeTracing.tracingComplete", {});
+    if (callback) process.nextTick(callback, null, {});
+    return true;
+  }
+
   post(method, params, callback) {
     validateString(method, "method");
     if (!callback && typeof params === "function") {
@@ -194,6 +262,9 @@ class Session extends EventEmitter {
 
     if (!this.#connection) {
       throw new ERR_INSPECTOR_NOT_CONNECTED();
+    }
+    if (this.#postNodeTracing(method, params, callback)) {
+      return;
     }
     const id = this.#nextId++;
     const message = { id, method };

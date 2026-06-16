@@ -331,6 +331,24 @@ function getTapSuiteALS() {
   return tapSuiteALS;
 }
 
+let testContextALS = null;
+function getTestContextALS() {
+  if (testContextALS !== null) return testContextALS;
+  const mod = core.loadExtScript("ext:deno_node/async_hooks.ts");
+  const ALS = mod.AsyncLocalStorage;
+  testContextALS = new ALS();
+  return testContextALS;
+}
+
+function getTestContext() {
+  if (testContextALS === null) return undefined;
+  return testContextALS.getStore();
+}
+
+function runWithTestContext(context, fn) {
+  return getTestContextALS().run(context, fn);
+}
+
 function getTapCurrentSuite() {
   if (tapSuiteALS !== null) {
     const fromAls = tapSuiteALS.getStore();
@@ -576,15 +594,7 @@ async function runTapTop() {
     // `TAP version 13` line, so any console output they produce appears
     // before the reporter header in the captured stream.
     if (rootBeforeHooks.length > 0) {
-      const rootCtx = { name: "<root>", fullName: "<root>" };
-      for (const hook of new SafeArrayIterator(rootBeforeHooks)) {
-        try {
-          const r = ReflectApply(hook, null, [rootCtx]);
-          if (isThenable(r)) await r;
-        } catch {
-          /* swallow to keep parity with Node's lenient hook errors */
-        }
-      }
+      await runRootHookListLenient(rootBeforeHooks);
     }
     tapWrite("TAP version 13");
     let n = 0;
@@ -602,12 +612,7 @@ async function runTapTop() {
         0,
         rootAfterHooks.length,
       );
-      for (const hook of new SafeArrayIterator(hooks)) {
-        try {
-          const r = ReflectApply(hook, null, [rootCtx]);
-          if (isThenable(r)) await r;
-        } catch { /* swallow */ }
-      }
+      await runRootHookListIgnoringErrors(hooks);
     }
     tapWrite(`1..${n}`);
     tapWrite(`# tests ${tapStats.tests}`);
@@ -682,7 +687,10 @@ async function runTapEntry(entry, depth, n, parentState) {
     // test/it body
     const ctx = new TapContext(entry.name, depth, entry.children);
     try {
-      const ret = ReflectApply(entry.fn, ctx, [ctx]);
+      const ret = runWithTestContext(
+        ctx,
+        () => ReflectApply(entry.fn, ctx, [ctx]),
+      );
       if (isThenable(ret)) await ret;
       // Wait for any concurrent t.test() calls (e.g. Promise.all([...])).
       await ctx._drainSubtests();
@@ -830,35 +838,102 @@ function assertExpectedFailure(err, expectFailure) {
 }
 
 async function runNodeTestFunction(fn, nodeTestContext) {
-  if (fn.length >= 2) {
-    // Node-style callback API: fn(t, done) - wait for `done()` (or promise
-    // rejection) before treating the test as complete.
-    await new Promise((testResolve, testReject) => {
-      pendingCallbackReject = testReject;
-      const done = (err) => {
-        pendingCallbackReject = null;
-        if (err) testReject(err);
-        else testResolve(undefined);
-      };
-      try {
-        const result = ReflectApply(fn, nodeTestContext, [
-          nodeTestContext,
-          done,
-        ]);
-        if (isThenable(result)) {
-          PromisePrototypeThen(result, undefined, (err) => {
-            pendingCallbackReject = null;
-            testReject(err);
-          });
+  return await runWithTestContext(nodeTestContext, async () => {
+    if (fn.length >= 2) {
+      // Node-style callback API: fn(t, done) - wait for `done()` (or promise
+      // rejection) before treating the test as complete.
+      await new Promise((testResolve, testReject) => {
+        pendingCallbackReject = testReject;
+        const done = (err) => {
+          pendingCallbackReject = null;
+          if (err) testReject(err);
+          else testResolve(undefined);
+        };
+        try {
+          const result = ReflectApply(fn, nodeTestContext, [
+            nodeTestContext,
+            done,
+          ]);
+          if (isThenable(result)) {
+            PromisePrototypeThen(result, undefined, (err) => {
+              pendingCallbackReject = null;
+              testReject(err);
+            });
+          }
+        } catch (err) {
+          pendingCallbackReject = null;
+          testReject(err);
         }
-      } catch (err) {
-        pendingCallbackReject = null;
-        testReject(err);
-      }
-    });
-    return undefined;
+      });
+      return undefined;
+    }
+    return await ReflectApply(fn, nodeTestContext, [nodeTestContext]);
+  });
+}
+
+async function runNodeTestHook(fn, nodeTestContext) {
+  return await runWithTestContext(nodeTestContext, async () => {
+    const result = ReflectApply(fn, nodeTestContext, [nodeTestContext]);
+    if (isThenable(result)) {
+      return await result;
+    }
+    return result;
+  });
+}
+
+async function runNodeTestHookList(hooks, nodeTestContext) {
+  for (const hook of new SafeArrayIterator(hooks)) {
+    await runNodeTestHook(hook, nodeTestContext);
   }
-  return await ReflectApply(fn, nodeTestContext, [nodeTestContext]);
+}
+
+async function runNodeTestHookListLenient(hooks, nodeTestContext) {
+  for (const hook of new SafeArrayIterator(hooks)) {
+    try {
+      await runNodeTestHook(hook, nodeTestContext);
+    } catch {
+      /* swallow to match node behavior on hook error */
+    }
+  }
+}
+
+async function runNodeTestHookListIgnoringErrors(hooks, nodeTestContext) {
+  for (const hook of new SafeArrayIterator(hooks)) {
+    try {
+      await runNodeTestHook(hook, nodeTestContext);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function runRootHookList(hooks) {
+  const rootCtx = { name: "<root>", fullName: "<root>" };
+  for (const hook of new SafeArrayIterator(hooks)) {
+    await runNodeTestHook(hook, rootCtx);
+  }
+}
+
+async function runRootHookListIgnoringErrors(hooks) {
+  const rootCtx = { name: "<root>", fullName: "<root>" };
+  for (const hook of new SafeArrayIterator(hooks)) {
+    try {
+      await runNodeTestHook(hook, rootCtx);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function runRootHookListLenient(hooks) {
+  const rootCtx = { name: "<root>", fullName: "<root>" };
+  for (const hook of new SafeArrayIterator(hooks)) {
+    try {
+      await runNodeTestHook(hook, rootCtx);
+    } catch {
+      /* swallow to keep parity with Node's lenient hook errors */
+    }
+  }
 }
 
 async function runPossiblyExpectingFailure(fn, nodeTestContext, options) {
@@ -1003,16 +1078,6 @@ class NodeTestContext {
     if (this.#plan) this.#plan.increment();
     // deno-lint-ignore no-this-alias
     const parentContext = this;
-    const after = async () => {
-      for (const hook of new SafeArrayIterator(this.#afterHooks)) {
-        await hook();
-      }
-    };
-    const before = async () => {
-      for (const hook of new SafeArrayIterator(this.#beforeHooks)) {
-        await hook();
-      }
-    };
     return PromisePrototypeThen(
       this.#denoContext.step({
         name: prepared.name,
@@ -1023,35 +1088,32 @@ class NodeTestContext {
             prepared.name,
           );
           try {
-            await before();
-            for (
-              const hook of new SafeArrayIterator(
-                parentContext.#beforeEachHooks,
-              )
-            ) {
-              await hook();
-            }
+            await runNodeTestHookList(parentContext.#beforeHooks, parentContext);
+            await runNodeTestHookList(
+              parentContext.#beforeEachHooks,
+              parentContext,
+            );
             await runPossiblyExpectingFailure(
               prepared.fn,
               newNodeTextContext,
               prepared.options,
             );
-            await after();
+            await runNodeTestHookList(parentContext.#afterHooks, parentContext);
           } catch (err) {
             if (!newNodeTextContext[skippedSymbol]) {
               throw err;
             }
             try {
-              await after();
+              await runNodeTestHookListIgnoringErrors(
+                parentContext.#afterHooks,
+                parentContext,
+              );
             } catch { /* ignore, test is already failing */ }
           } finally {
-            for (
-              const hook of new SafeArrayIterator(
-                parentContext.#afterEachHooks,
-              )
-            ) {
-              await hook();
-            }
+            await runNodeTestHookList(
+              parentContext.#afterEachHooks,
+              parentContext,
+            );
           }
         },
         ignore: !!prepared.options.todo || !!prepared.options.skip,
@@ -1104,27 +1166,19 @@ async function runRootBeforeOnce() {
   if (rootBeforeRan) return;
   rootBeforeRan = true;
   if (rootBeforeHooks.length === 0) return;
-  const rootCtx = { name: "<root>", fullName: "<root>" };
-  for (const hook of new SafeArrayIterator(rootBeforeHooks)) {
-    await hook(rootCtx);
-  }
+  await runRootHookList(rootBeforeHooks);
 }
 
 async function runRootAfterIfDone() {
   if (activeNodeTests !== 0) return;
   if (rootAfterHooks.length === 0) return;
-  const rootCtx = { name: "<root>", fullName: "<root>" };
   // Snapshot and clear so we only run once even if more tests get queued.
   const hooks = ArrayPrototypeSplice(
     rootAfterHooks,
     0,
     rootAfterHooks.length,
   );
-  for (const hook of new SafeArrayIterator(hooks)) {
-    try {
-      await hook(rootCtx);
-    } catch { /* ignore */ }
-  }
+  await runRootHookListIgnoringErrors(hooks);
 }
 
 class TestSuite {
@@ -1155,9 +1209,7 @@ class TestSuite {
           prepared.name,
         );
         try {
-          for (const hook of new SafeArrayIterator(beforeEach)) {
-            await hook(newNodeTextContext);
-          }
+          await runNodeTestHookList(beforeEach, suiteNodeContext);
           return await runPossiblyExpectingFailure(
             prepared.fn,
             newNodeTextContext,
@@ -1170,11 +1222,7 @@ class TestSuite {
             throw err;
           }
         } finally {
-          for (const hook of new SafeArrayIterator(afterEach)) {
-            try {
-              await hook(newNodeTextContext);
-            } catch { /* ignore */ }
-          }
+          await runNodeTestHookListIgnoringErrors(afterEach, suiteNodeContext);
         }
       },
       ignore: !!prepared.options.todo || !!prepared.options.skip,
@@ -1245,9 +1293,7 @@ function wrapTestFn(fn, resolve, name, options) {
     let beforeEachOk = false;
     try {
       await runRootBeforeOnce();
-      for (const hook of new SafeArrayIterator(rootBeforeEachHooks)) {
-        await hook(nodeTestContext);
-      }
+      await runNodeTestHookList(rootBeforeEachHooks, nodeTestContext);
       beforeEachOk = true;
       await runPossiblyExpectingFailure(fn, nodeTestContext, options);
     } catch (err) {
@@ -1256,11 +1302,7 @@ function wrapTestFn(fn, resolve, name, options) {
       }
     } finally {
       if (beforeEachOk) {
-        for (const hook of new SafeArrayIterator(rootAfterEachHooks)) {
-          try {
-            await hook(nodeTestContext);
-          } catch { /* swallow to match node behavior on hook error */ }
-        }
+        await runNodeTestHookListLenient(rootAfterEachHooks, nodeTestContext);
       }
       activeNodeTests--;
       await runRootAfterIfDone();
@@ -1303,20 +1345,23 @@ function wrapSuiteFn(fn, resolve, name, parentNodeContext) {
     const prevSuite = currentSuite;
     const suite = currentSuite = new TestSuite(t, suiteNodeContext);
     try {
-      fn(suiteNodeContext);
+      const bodyResult = runWithTestContext(
+        suiteNodeContext,
+        () => fn(suiteNodeContext),
+      );
+      if (isThenable(bodyResult)) await bodyResult;
     } finally {
       currentSuite = prevSuite;
     }
     try {
-      for (const hook of new SafeArrayIterator(suite.beforeAllHooks)) {
-        await hook();
-      }
+      await runNodeTestHookList(suite.beforeAllHooks, suiteNodeContext);
       await suite.execute();
     } finally {
       try {
-        for (const hook of new SafeArrayIterator(suite.afterAllHooks)) {
-          await hook();
-        }
+        await runNodeTestHookListIgnoringErrors(
+          suite.afterAllHooks,
+          suiteNodeContext,
+        );
       } finally {
         if (isTopLevel) {
           activeNodeTests--;
@@ -1927,6 +1972,7 @@ test.after = after;
 test.beforeEach = beforeEach;
 test.afterEach = afterEach;
 test.run = run;
+test.getTestContext = getTestContext;
 
 return {
   run,
@@ -1938,6 +1984,7 @@ return {
   after,
   beforeEach,
   afterEach,
+  getTestContext,
   mock,
   default: test,
 };

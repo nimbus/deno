@@ -20,6 +20,7 @@ const {
   SafeSet,
   SetPrototypeHas,
   StringPrototypeReplace,
+  StringPrototypeSplit,
   StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
   SymbolSpecies,
@@ -123,6 +124,13 @@ function ccmMaxMessageSize(ivLength: number): number {
     return 9007199254740991;
   }
   return 2 ** (8 * q) - 1;
+}
+
+function nodeMajorVersion(): number {
+  const nodeVersion = lazyProcess().default?.versions?.node;
+  return typeof nodeVersion === "string"
+    ? +StringPrototypeSplit(nodeVersion, ".", 1)[0]
+    : 24;
 }
 
 function isStringOrBuffer(
@@ -726,6 +734,14 @@ Decipheriv.prototype.setAuthTag = function (
   }
   // DEP0182: warn once per process when using a short GCM auth tag without
   // an explicit `authTagLength` option at decipher creation time.
+  if (
+    this._isGcmMode && this._authTagLength === -1 &&
+    // deno-lint-ignore prefer-primordials -- `buffer` may be Buffer/TypedArray/DataView
+    buffer.byteLength < 16 && nodeMajorVersion() >= 26
+  ) {
+    // deno-lint-ignore prefer-primordials -- `buffer` may be Buffer/TypedArray/DataView
+    throw new TypeError(`Invalid authentication tag length: ${buffer.byteLength}`);
+  }
   if (
     this._isGcmMode && this._authTagLength === -1 &&
     // deno-lint-ignore prefer-primordials -- `buffer` may be Buffer/TypedArray/DataView

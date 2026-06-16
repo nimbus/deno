@@ -31,9 +31,6 @@ const { ERR_TRACE_EVENTS_CATEGORY_REQUIRED } = core.loadExtScript(
 const { validateObject, validateStringArray } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
-const lazyBindingMod = core.createLazyLoader(
-  "ext:deno_node/internal_binding/mod.ts",
-);
 
 function getProc() {
   // deno-lint-ignore no-process-global
@@ -226,6 +223,14 @@ function trace(phase, category, name, id, scope) {
   ensureExitHandlerInstalled();
 }
 
+function recordedTraceEventsCount() {
+  return recordedEvents.length;
+}
+
+function recordedTraceEventsSince(index) {
+  return ArrayPrototypeSlice(recordedEvents, index);
+}
+
 function writeTraceFile() {
   const p = getProc();
   const pid = p ? p.pid : 0;
@@ -403,25 +408,16 @@ function uninstallAsyncHooksTimerTracing() {
   originalSetImmediate = null;
 }
 
-// Expose trace + getCategoryEnabledBuffer on the internalBinding('trace_events')
-// surface so the Node test fixtures that go through `internal/test/binding`
-// observe the same state as the public API.
-try {
-  const binding = lazyBindingMod().getBinding("trace_events");
-  if (binding && typeof binding === "object") {
-    binding.getCategoryEnabledBuffer = getCategoryEnabledBuffer;
-    binding.trace = trace;
-  }
-} catch {
-  // best-effort: binding registry may not be available in all contexts
-}
-
 return {
   default: {
     createTracing,
     getEnabledCategories,
   },
   createTracing,
+  getCategoryEnabledBuffer,
   getEnabledCategories,
+  recordedTraceEventsCount,
+  recordedTraceEventsSince,
+  trace,
 };
 })();

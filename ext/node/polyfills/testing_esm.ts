@@ -12,6 +12,7 @@ export const {
   after,
   beforeEach,
   afterEach,
+  getTestContext,
   mock,
 } = mod;
 

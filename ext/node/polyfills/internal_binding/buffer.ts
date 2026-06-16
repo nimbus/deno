@@ -8,6 +8,8 @@ const { Encodings } = core.loadExtScript(
 const {
   Error,
   MathMax,
+  MathMin,
+  NumberIsNaN,
   TypedArrayFrom,
   TypedArrayPrototypeGetLength,
   TypedArrayPrototypeSlice,
@@ -127,6 +129,7 @@ function indexOfBuffer(
   byteOffset: number,
   encoding: Encodings,
   forwardDirection: boolean,
+  end?: number,
 ) {
   if (Encodings[encoding] === undefined) {
     throw new Error(`Unknown encoding code ${encoding}`);
@@ -135,11 +138,20 @@ function indexOfBuffer(
   const targetBufferLength = TypedArrayPrototypeGetLength(targetBuffer);
   const bufferLength = TypedArrayPrototypeGetLength(buffer);
   const isUcs2 = encoding === Encodings.UCS2;
+  end = end === undefined ? targetBufferLength : +end;
+  if (NumberIsNaN(end)) {
+    end = targetBufferLength;
+  }
+  end = MathMin(MathMax(end, 0), targetBufferLength);
+  const searchBuffer = end === targetBufferLength
+    ? targetBuffer
+    : TypedArrayPrototypeSlice(targetBuffer, 0, end);
+  const searchBufferLength = TypedArrayPrototypeGetLength(searchBuffer);
 
   // If the encoding is UCS2 and haystack or needle has a length less than 2, the search will always fail
   // https://github.com/nodejs/node/blob/fbdfe9399cf6c660e67fd7d6ceabfb106e32d787/src/node_buffer.cc#L1067-L1069
   if (isUcs2) {
-    if (bufferLength < 2 || targetBufferLength < 2) {
+    if (bufferLength < 2 || searchBufferLength < 2) {
       return -1;
     }
   }
@@ -152,17 +164,21 @@ function indexOfBuffer(
     }
 
     if (bufferLength === 0) {
-      return byteOffset <= targetBufferLength ? byteOffset : targetBufferLength;
+      return byteOffset <= searchBufferLength ? byteOffset : searchBufferLength;
     }
 
-    return findLastIndex(targetBuffer, buffer, byteOffset);
+    return findLastIndex(searchBuffer, buffer, byteOffset);
   }
 
   if (buffer.length === 0) {
-    return byteOffset <= targetBufferLength ? byteOffset : targetBufferLength;
+    return byteOffset <= searchBufferLength ? byteOffset : searchBufferLength;
   }
 
-  return indexOfNeedle(targetBuffer, buffer, byteOffset, isUcs2 ? 2 : 1);
+  if (byteOffset < 0) {
+    byteOffset = MathMax(0, targetBufferLength + byteOffset);
+  }
+
+  return indexOfNeedle(searchBuffer, buffer, byteOffset, isUcs2 ? 2 : 1);
 }
 
 function indexOfNumber(
@@ -170,6 +186,7 @@ function indexOfNumber(
   number: number,
   byteOffset: number,
   forwardDirection: boolean,
+  end?: number,
 ) {
   return indexOfBuffer(
     targetBuffer,
@@ -179,6 +196,7 @@ function indexOfNumber(
     byteOffset,
     Encodings.UTF8,
     forwardDirection,
+    end,
   );
 }
 

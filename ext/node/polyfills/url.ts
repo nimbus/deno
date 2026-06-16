@@ -74,6 +74,7 @@ const {
   CHAR_9,
   CHAR_AT,
   CHAR_BACKWARD_SLASH,
+  CHAR_COLON,
   CHAR_CARRIAGE_RETURN,
   CHAR_CIRCUMFLEX_ACCENT,
   CHAR_DOT,
@@ -107,6 +108,7 @@ const {
   CHAR_ZERO_WIDTH_NOBREAK_SPACE,
 } = core.loadExtScript("ext:deno_node/path/_constants.ts");
 const lazyPath = core.createLazyLoader("node:path");
+const lazyProcess = core.createLazyLoader("node:process");
 const {
   domainToASCII: idnaToASCII,
   domainToUnicode: idnaToUnicode,
@@ -207,6 +209,24 @@ const forbiddenHostChars = new SafeRegExp(/[\0\t\n\r #%/:<>?@[\\\]^|]/);
 const forbiddenHostCharsIpv6 = new SafeRegExp(/[\0\t\n\r #%/<>?@\\^|]/);
 
 const _url = URL;
+let invalidPortWarningEmitted = false;
+
+function nodeMajorVersion(): number {
+  const nodeVersion = lazyProcess().default?.versions?.node;
+  return typeof nodeVersion === "string"
+    ? +StringPrototypeSplit(nodeVersion, ".", 1)[0]
+    : 24;
+}
+
+function emitInvalidPortWarning(url: string) {
+  if (invalidPortWarningEmitted) return;
+  invalidPortWarningEmitted = true;
+  lazyProcess().default.emitWarning(
+    `The URL ${url} is invalid. Future versions of Node.js will throw an error.`,
+    "DeprecationWarning",
+    "DEP0170",
+  );
+}
 
 // Legacy URL API
 class Url {
@@ -882,7 +902,7 @@ class Url {
 
       // validate a little.
       if (!ipv6Hostname) {
-        rest = getHostname(this, rest, hostname);
+        rest = getHostname(this, rest, hostname, url);
       }
 
       if (this.hostname.length > hostnameMaxLen) {
@@ -1125,7 +1145,12 @@ function isIpv6Hostname(hostname: string) {
   );
 }
 
-function getHostname(self: Url, rest: string, hostname: string) {
+function getHostname(
+  self: Url,
+  rest: string,
+  hostname: string,
+  url: string,
+) {
   for (let i = 0; i < hostname.length; ++i) {
     const code = StringPrototypeCharCodeAt(hostname, i);
     const isValid = (code >= CHAR_LOWERCASE_A && code <= CHAR_LOWERCASE_Z) ||
@@ -1139,6 +1164,12 @@ function getHostname(self: Url, rest: string, hostname: string) {
 
     // Invalid host character
     if (!isValid) {
+      if (code === CHAR_COLON) {
+        if (nodeMajorVersion() >= 26) {
+          throw new ERR_INVALID_ARG_VALUE("url", "Invalid port in url", url);
+        }
+        emitInvalidPortWarning(url);
+      }
       self.hostname = StringPrototypeSlice(hostname, 0, i);
       return `/${StringPrototypeSlice(hostname, i)}${rest}`;
     }

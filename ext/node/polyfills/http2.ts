@@ -493,6 +493,21 @@ const nameForErrorCode = [
   "NGHTTP2_INADEQUATE_SECURITY",
   "NGHTTP2_HTTP_1_1_REQUIRED",
 ];
+const NGHTTP2_ERR_PROTO = -505;
+
+function nodeMajorVersion() {
+  const nodeVersion = process?.versions?.node;
+  if (typeof nodeVersion !== "string") {
+    return 0;
+  }
+  const dot = StringPrototypeIndexOf(nodeVersion, ".");
+  const major = dot === -1 ? nodeVersion : StringPrototypeSlice(
+    nodeVersion,
+    0,
+    dot,
+  );
+  return Number(major) || 0;
+}
 
 // Session field byte offsets and total size, matching Node.js
 // `SessionJSFields` (see src/node_http2.h). The buffer is 12 bytes:
@@ -921,6 +936,14 @@ function doStreamClose(stream, code) {
     stream.closed,
     stream.readable,
   );
+
+  if (code === NGHTTP2_FLOW_CONTROL_ERROR && nodeMajorVersion() >= 26) {
+    const session = stream[kSession];
+    if (session && !session.destroyed) {
+      session.destroy(new NghttpError(NGHTTP2_ERR_PROTO), NGHTTP2_NO_ERROR);
+      return true;
+    }
+  }
 
   if (!stream.closed) {
     closeStream(stream, code, kNoRstStream);
@@ -3597,6 +3620,25 @@ function setupHandle(socket, type, options) {
       // test-http2-options-max-headers-exceeds-nghttp2 wants
       // ERR_HTTP2_SESSION_ERROR, not a stream error).
       const goawayCode = handle.lastSentGoawayCode();
+      if (
+        goawayCode === NGHTTP2_FLOW_CONTROL_ERROR &&
+        nodeMajorVersion() >= 26
+      ) {
+        closeSession(session, NGHTTP2_NO_ERROR, new NghttpError(
+          NGHTTP2_ERR_PROTO,
+        ));
+        return;
+      }
+      if (
+        session[kType] === NGHTTP2_SESSION_CLIENT &&
+        nodeMajorVersion() >= 26 &&
+        goawayCode > NGHTTP2_NO_ERROR
+      ) {
+        closeSession(session, NGHTTP2_NO_ERROR, new NghttpError(
+          NGHTTP2_ERR_PROTO,
+        ));
+        return;
+      }
       const closeCode = goawayCode === NGHTTP2_FLOW_CONTROL_ERROR
         ? NGHTTP2_FLOW_CONTROL_ERROR
         : NGHTTP2_CANCEL;

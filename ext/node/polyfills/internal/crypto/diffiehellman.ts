@@ -17,6 +17,7 @@ const {
   ObjectPrototypeIsPrototypeOf,
   String,
   StringPrototypeIncludes,
+  StringPrototypeSplit,
   TypeError,
   TypeErrorPrototype,
   TypedArrayPrototypeGetBuffer,
@@ -36,6 +37,8 @@ const {
   op_node_ecdh_validate_public_key,
   op_node_gen_prime,
 } = core.ops;
+
+const lazyProcess = core.createLazyLoader("node:process");
 
 const {
   isAnyArrayBuffer,
@@ -70,6 +73,19 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/crypto/keys.ts");
 
 const DH_GENERATOR = 2;
+
+function nodeMajorVersion(): number {
+  const nodeVersion = lazyProcess().default?.versions?.node;
+  return typeof nodeVersion === "string"
+    ? +StringPrototypeSplit(nodeVersion, ".", 1)[0]
+    : 24;
+}
+
+function isNode26BoringSsl(): boolean {
+  const process = lazyProcess().default;
+  return nodeMajorVersion() >= 26 &&
+    !!process?.features?.openssl_is_boringssl;
+}
 
 // Returns the { buffer, byteOffset, byteLength } of an ArrayBufferView, using
 // the correct primordial getters depending on whether it is a TypedArray or
@@ -153,6 +169,8 @@ class DiffieHellmanImpl {
       generator = keyEncoding;
       keyEncoding = false;
     }
+    const usesImplicitStringPrimeEncoding =
+      typeof sizeOrKey === "string" && !keyEncoding;
 
     const encoding = getDefaultEncoding();
     keyEncoding = keyEncoding || encoding;
@@ -235,6 +253,9 @@ class DiffieHellmanImpl {
     this.#checkGenerator();
 
     this.verifyError = op_node_dh_check(this.#prime, this.#generator);
+    if (usesImplicitStringPrimeEncoding && isNode26BoringSsl()) {
+      throw new NodeError("ERR_CRYPTO_OPERATION_FAILED", "Operation failed");
+    }
   }
 
   #checkGenerator(): number {
@@ -264,9 +285,12 @@ class DiffieHellmanImpl {
   ): Buffer | string {
     const buf = getArrayBufferOrView(otherPublicKey, "key", inputEncoding);
     if (buf.length === 0) {
+      const reason = nodeMajorVersion() >= 26
+        ? "Supplied key is invalid"
+        : "Unspecified validation error";
       throw new NodeError(
         "ERR_CRYPTO_INVALID_KEYLEN",
-        "Unspecified validation error",
+        reason,
       );
     }
 

@@ -66,6 +66,21 @@ const jsStream = core.loadExtScript(
   "ext:deno_node/internal_binding/js_stream.ts",
 );
 
+const traceEventsBinding: Record<string, unknown> = {};
+function getTraceEventsBinding(): Record<string, unknown> {
+  if (traceEventsBinding.trace === undefined) {
+    const traceEvents = core.loadExtScript("ext:deno_node/trace_events.ts");
+    traceEventsBinding.getCategoryEnabledBuffer =
+      traceEvents.getCategoryEnabledBuffer;
+    traceEventsBinding.recordedTraceEventsCount =
+      traceEvents.recordedTraceEventsCount;
+    traceEventsBinding.recordedTraceEventsSince =
+      traceEvents.recordedTraceEventsSince;
+    traceEventsBinding.trace = traceEvents.trace;
+  }
+  return traceEventsBinding;
+}
+
 // Mutable shallow copy so callers can replace properties (e.g. wrap
 // `errname` with a deprecation warning when --pending-deprecation is set).
 // Match Node's C++ binding: UV_* error code constants are read-only and
@@ -134,7 +149,7 @@ const modules = {
     },
   },
   "tls_wrap": {},
-  "trace_events": {},
+  "trace_events": traceEventsBinding,
   "tty_wrap": ttyWrap,
   types,
   "udp_wrap": udpWrap,
@@ -149,6 +164,9 @@ const modules = {
 export type BindingName = keyof typeof modules;
 
 export function getBinding(name: BindingName) {
+  if (name === "trace_events") {
+    return getTraceEventsBinding();
+  }
   const mod = modules[name];
   if (!mod) {
     throw new Error(`No such module: ${name}`);

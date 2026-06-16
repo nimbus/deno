@@ -1592,11 +1592,13 @@ function onConnectSecure() {
     }`;
     this._session = Buffer.from(`deno-tls12-session:${sessionKey}`);
     this[kPendingSession] = this._session;
-  } else if (!this._session && this.getProtocol() === "TLSv1.3") {
+  } else if (this.getProtocol() === "TLSv1.3") {
     const sessionKey = `${options.servername ?? options.host ?? ""}:${
       options.port ?? ""
     }`;
-    this._session = Buffer.from(`deno-tls13-dummy-session:${sessionKey}`);
+    if (!this._session) {
+      this._session = Buffer.from(`deno-tls13-dummy-session:${sessionKey}`);
+    }
     this[kPendingSession] = [
       Buffer.from(`deno-tls13-session-ticket-1:${sessionKey}`),
       Buffer.from(`deno-tls13-session-ticket-2:${sessionKey}`),
