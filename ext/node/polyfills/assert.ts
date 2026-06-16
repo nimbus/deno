@@ -10,7 +10,7 @@ const { AssertionError } = core.loadExtScript(
 const { innerOk } = core.loadExtScript(
   "ext:deno_node/internal/assert/utils.ts",
 );
-const { inspect } = core.loadExtScript("ext:deno_node/util.ts");
+const { format, inspect } = core.loadExtScript("ext:deno_node/util.ts");
 const {
   ERR_AMBIGUOUS_ARGUMENT,
   ERR_CONSTRUCT_CALL_REQUIRED,
@@ -38,6 +38,7 @@ const {
 const { isError } = core.loadExtScript("ext:deno_node/internal/util.mjs");
 
 const {
+  ArrayIsArray,
   ArrayPrototypeForEach,
   ArrayPrototypeIndexOf,
   ArrayPrototypeJoin,
@@ -45,6 +46,7 @@ const {
   ArrayPrototypeSlice,
   Error,
   ErrorPrototype,
+  ErrorPrototypeToString,
   NumberIsNaN,
   ObjectAssign,
   ObjectDefineProperty,
@@ -125,11 +127,56 @@ Assert.prototype.match = match;
 Assert.prototype.doesNotMatch = doesNotMatch;
 
 function innerFail(obj) {
-  if (ObjectPrototypeIsPrototypeOf(ErrorPrototype, obj.message)) {
-    throw obj.message;
+  const message = obj.message;
+  if (ArrayIsArray(message)) {
+    if (message.length === 0) {
+      obj.message = undefined;
+    } else if (typeof message[0] === "string") {
+      obj.message = message.length > 1
+        ? format(...new SafeArrayIterator(message))
+        : message[0];
+    } else if (isError(message[0])) {
+      if (message.length > 1) {
+        throw new ERR_AMBIGUOUS_ARGUMENT(
+          "message",
+          `The error message was passed as error object "${
+            ErrorPrototypeToString(message[0])
+          }" has trailing arguments that would be ignored.`,
+        );
+      }
+      throw message[0];
+    } else if (typeof message[0] === "function") {
+      if (message.length > 1) {
+        throw new ERR_AMBIGUOUS_ARGUMENT(
+          "message",
+          `The error message with function "${
+            message[0].name || "anonymous"
+          }" has trailing arguments that would be ignored.`,
+        );
+      }
+      try {
+        obj.message = ReflectApply(message[0], undefined, [
+          obj.actual,
+          obj.expected,
+        ]);
+        if (typeof obj.message !== "string") {
+          obj.message = undefined;
+        }
+      } catch {
+        obj.message = undefined;
+      }
+    } else {
+      throw new ERR_INVALID_ARG_TYPE(
+        "message",
+        ["string", "function"],
+        message[0],
+      );
+    }
+  } else if (ObjectPrototypeIsPrototypeOf(ErrorPrototype, message)) {
+    throw message;
   }
 
-  throw new AssertionError({
+  const err = new AssertionError({
     actual: obj.actual,
     expected: obj.expected,
     message: obj.message,
@@ -137,6 +184,10 @@ function innerFail(obj) {
     stackStartFn: obj.stackStartFn,
     diff: obj.diff,
   });
+  if (obj.generatedMessage !== undefined) {
+    err.generatedMessage = obj.generatedMessage;
+  }
+  throw err;
 }
 
 function ok(...args) {
@@ -542,7 +593,7 @@ function doesNotThrow(
 function equal(
   actual,
   expected,
-  message,
+  ...message
 ) {
   if (arguments.length < 2) {
     throw new ERR_MISSING_ARGS("actual", "expected");
@@ -565,7 +616,7 @@ function equal(
 function notEqual(
   actual,
   expected,
-  message,
+  ...message
 ) {
   if (arguments.length < 2) {
     throw new ERR_MISSING_ARGS("actual", "expected");
@@ -586,7 +637,7 @@ function notEqual(
 function strictEqual(
   actual,
   expected,
-  message,
+  ...message
 ) {
   if (arguments.length < 2) {
     throw new ERR_MISSING_ARGS("actual", "expected");
@@ -607,7 +658,7 @@ function strictEqual(
 function notStrictEqual(
   actual,
   expected,
-  message,
+  ...message
 ) {
   if (arguments.length < 2) {
     throw new ERR_MISSING_ARGS("actual", "expected");
@@ -628,7 +679,7 @@ function notStrictEqual(
 function partialDeepStrictEqual(
   actual,
   expected,
-  message,
+  ...message
 ) {
   if (arguments.length < 2) {
     throw new ERR_MISSING_ARGS("actual", "expected");
@@ -648,7 +699,7 @@ function partialDeepStrictEqual(
 function deepEqual(
   actual,
   expected,
-  message,
+  ...message
 ) {
   if (arguments.length < 2) {
     throw new ERR_MISSING_ARGS("actual", "expected");
@@ -669,7 +720,7 @@ function deepEqual(
 function notDeepEqual(
   actual,
   expected,
-  message,
+  ...message
 ) {
   if (arguments.length < 2) {
     throw new ERR_MISSING_ARGS("actual", "expected");
@@ -690,7 +741,7 @@ function notDeepEqual(
 function deepStrictEqual(
   actual,
   expected,
-  message,
+  ...message
 ) {
   if (arguments.length < 2) {
     throw new ERR_MISSING_ARGS("actual", "expected");
@@ -711,7 +762,7 @@ function deepStrictEqual(
 function notDeepStrictEqual(
   actual,
   expected,
-  message,
+  ...message
 ) {
   if (arguments.length < 2) {
     throw new ERR_MISSING_ARGS("actual", "expected");
@@ -801,41 +852,36 @@ function internalMatch(
     typeof string !== "string" ||
     RegExpPrototypeExec(regexp, string) !== null !== matchFn
   ) {
-    if (ObjectPrototypeIsPrototypeOf(ErrorPrototype, message)) {
-      throw message;
-    }
-
-    const generatedMessage = !message;
+    const generatedMessage = message.length === 0;
 
     // 'The input was expected to not match the regular expression ' +
-    message ||= typeof string !== "string"
+    message[0] ||= typeof string !== "string"
       ? 'The "string" argument must be of type string. Received type ' +
         `${typeof string} (${inspect(string)})`
       : (matchFn
         ? "The input did not match the regular expression "
         : "The input was expected to not match the regular expression ") +
         `${inspect(regexp)}. Input:\n\n${inspect(string)}\n`;
-    const err = new AssertionError({
+    innerFail({
       actual: string,
       expected: regexp,
       message,
       operator: fn.name,
       stackStartFn: fn,
       diff: this?.[kOptions]?.diff,
+      generatedMessage,
     });
-    err.generatedMessage = generatedMessage;
-    throw err;
   }
 }
 
-function match(string, regexp, message) {
+function match(string, regexp, ...message) {
   internalMatch(string, regexp, message, match);
 }
 
 function doesNotMatch(
   string,
   regexp,
-  message,
+  ...message
 ) {
   internalMatch(string, regexp, message, doesNotMatch);
 }

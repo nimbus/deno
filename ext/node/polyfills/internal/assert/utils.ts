@@ -8,6 +8,10 @@ const { AssertionError } = core.loadExtScript(
   "ext:deno_node/internal/assert/assertion_error.js",
 );
 const { isError } = core.loadExtScript("ext:deno_node/internal/util.mjs");
+const { format } = core.loadExtScript("ext:deno_node/internal/util/inspect.mjs");
+const { ERR_AMBIGUOUS_ARGUMENT, ERR_INVALID_ARG_TYPE } = core.loadExtScript(
+  "ext:deno_node/internal/errors.ts",
+);
 const { isErrorStackTraceLimitWritable } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -18,6 +22,7 @@ const { getErrorSourceExpression } = core.loadExtScript(
 const {
   Error,
   ErrorCaptureStackTrace,
+  ErrorPrototypeToString,
   SafeRegExp,
   StringPrototypeCharCodeAt,
   StringPrototypeReplace,
@@ -90,19 +95,55 @@ function innerOk(
   fn: Function,
   argLen: number,
   value: unknown,
-  message?: string | Error,
+  ...messageArgs
 ) {
   if (!value) {
     let generatedMessage = false;
+    let message: string | undefined;
 
     if (argLen === 0) {
       generatedMessage = true;
       message = "No value argument passed to `assert.ok()`";
-    } else if (message == null) {
+    } else if (messageArgs.length === 0 || messageArgs[0] == null) {
       generatedMessage = true;
       message = getErrMessage(fn);
-    } else if (isError(message)) {
-      throw message;
+    } else if (typeof messageArgs[0] === "string") {
+      message = messageArgs.length > 1
+        ? format(...messageArgs)
+        : messageArgs[0];
+    } else if (isError(messageArgs[0])) {
+      if (messageArgs.length > 1) {
+        throw new ERR_AMBIGUOUS_ARGUMENT(
+          "message",
+          `The error message was passed as error object "${
+            ErrorPrototypeToString(messageArgs[0])
+          }" has trailing arguments that would be ignored.`,
+        );
+      }
+      throw messageArgs[0];
+    } else if (typeof messageArgs[0] === "function") {
+      if (messageArgs.length > 1) {
+        throw new ERR_AMBIGUOUS_ARGUMENT(
+          "message",
+          `The error message with function "${
+            messageArgs[0].name || "anonymous"
+          }" has trailing arguments that would be ignored.`,
+        );
+      }
+      try {
+        message = messageArgs[0](value, true);
+        if (typeof message !== "string") {
+          message = undefined;
+        }
+      } catch {
+        message = undefined;
+      }
+    } else {
+      throw new ERR_INVALID_ARG_TYPE(
+        "message",
+        ["string", "function"],
+        messageArgs[0],
+      );
     }
 
     const err = new AssertionError({

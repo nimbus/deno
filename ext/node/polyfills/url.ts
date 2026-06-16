@@ -210,6 +210,7 @@ const forbiddenHostCharsIpv6 = new SafeRegExp(/[\0\t\n\r #%/<>?@\\^|]/);
 
 const _url = URL;
 let invalidPortWarningEmitted = false;
+let urlParseWarningEmitted = false;
 
 function nodeMajorVersion(): number {
   const nodeVersion = lazyProcess().default?.versions?.node;
@@ -225,6 +226,31 @@ function emitInvalidPortWarning(url: string) {
     `The URL ${url} is invalid. Future versions of Node.js will throw an error.`,
     "DeprecationWarning",
     "DEP0170",
+  );
+}
+
+function urlParseCalledFromNodeModules(): boolean {
+  const stack = new Error().stack;
+  return typeof stack === "string" &&
+    (StringPrototypeIncludes(stack, "/node_modules/") ||
+      StringPrototypeIncludes(stack, "\\node_modules\\"));
+}
+
+function emitUrlParseWarning() {
+  if (
+    urlParseWarningEmitted ||
+    nodeMajorVersion() < 26 ||
+    urlParseCalledFromNodeModules()
+  ) {
+    return;
+  }
+  urlParseWarningEmitted = true;
+  lazyProcess().default.emitWarning(
+    "`url.parse()` behavior is not standardized and prone to " +
+      "errors that have security implications. Use the WHATWG URL API " +
+      "instead. CVEs are not issued for `url.parse()` vulnerabilities.",
+    "DeprecationWarning",
+    "DEP0169",
   );
 }
 
@@ -1354,6 +1380,7 @@ function parse(
   parseQueryString: boolean,
   slashesDenoteHost: boolean,
 ) {
+  emitUrlParseWarning();
   if (ObjectPrototypeIsPrototypeOf(Url.prototype, url)) return url;
 
   const urlObject = new Url();

@@ -2289,7 +2289,11 @@ function formatProperty(
       SymbolPrototypeToString(key),
       escapeFn,
     );
-    name = `[${ctx.stylize(tmp, "symbol")}]`;
+    const symbolName = ctx.stylize(tmp, "symbol");
+    name = ctx.nodejsSymbolKeysWithoutBrackets &&
+        tmp === "Symbol(nodejs.util.inspect.custom)"
+      ? symbolName
+      : `[${symbolName}]`;
   } else if (keyStrRegExp.test(key)) {
     name = key === "__proto__" ? "['__proto__']" : ctx.stylize(key, "name");
   } else {

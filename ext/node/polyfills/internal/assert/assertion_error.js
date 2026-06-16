@@ -75,6 +75,13 @@ const kMethodsWithCustomMessageDiff = [
   "partialDeepStrictEqual",
 ];
 
+function nodeMajorVersion() {
+  const nodeVersion = globalThis.process?.versions?.node;
+  return typeof nodeVersion === "string"
+    ? +StringPrototypeSplit(nodeVersion, ".", 1)[0]
+    : 0;
+}
+
 function copyError(source) {
   const target = ObjectAssign(
     { __proto__: ObjectGetPrototypeOf(source) },
@@ -99,7 +106,7 @@ function copyError(source) {
 function inspectValue(val) {
   // The util.inspect default values could be changed. This makes sure the
   // error messages contain the necessary information nevertheless.
-  return inspect(val, {
+  const options = {
     compact: false,
     customInspect: false,
     depth: 1000,
@@ -108,10 +115,18 @@ function inspectValue(val) {
     showHidden: false,
     // Assert does not detect proxies currently.
     showProxy: false,
+    nodejsSymbolKeysWithoutBrackets: nodeMajorVersion() >= 24,
     sorted: true,
     // Inspect getters as we also check them when comparing entries.
     getters: true,
-  });
+  };
+  if (inspect.defaultOptions.showProxy === true) {
+    const proxyDetails = core.getProxyDetails(val);
+    if (proxyDetails !== null && proxyDetails[0] !== null) {
+      return `Proxy(${inspect(proxyDetails[0], options)})`;
+    }
+  }
+  return inspect(val, options);
 }
 
 function getErrorMessage(operator, message) {
