@@ -338,9 +338,9 @@ function writeHeapSnapshot(
 
 // https://nodejs.org/api/v8.html#v8queryobjectsctor-options
 //
-// Deno currently only supports `{ format: 'count' }`. Returning live instances
-// would require V8's `HeapProfiler::QueryObjects`, which isn't exposed in the
-// rusty_v8 bindings; the count form is what Node's leak tests rely on.
+// Deno currently only supports Node's default count form and `{ format:
+// 'summary' }`. Returning live instances would require V8's
+// `HeapProfiler::QueryObjects`, which isn't exposed in the rusty_v8 bindings.
 function queryObjects(
   ctor: { name?: string; prototype?: unknown },
   options:
@@ -354,7 +354,7 @@ function queryObjects(
       validateOneOf(options.format, "options.format", ["count", "summary"]);
     }
   }
-  const format = options?.format;
+  const format = options?.format ?? "count";
 
   const name = typeof ctor.name === "string" ? ctor.name : "";
   if (name === "") {
@@ -368,10 +368,7 @@ function queryObjects(
     if (count === 0) return [];
     return [`${count} instance(s) of ${name}`];
   }
-  // Default format returns live object handles, which would require V8's
-  // `HeapProfiler::QueryObjects` (not exposed in rusty_v8). Returning an
-  // empty array keeps the signature sensible.
-  return [];
+  return count;
 }
 
 const promiseHookLists = {

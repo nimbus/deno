@@ -151,9 +151,12 @@ Deno.test({
     for (let i = 0; i < 50; i++) {
       instances.push(new QueryObjectsTestFixture());
     }
+    const defaultFormat = v8.queryObjects(QueryObjectsTestFixture);
     const after = v8.queryObjects(QueryObjectsTestFixture, {
       format: "count",
     });
+    assertEquals(typeof defaultFormat, "number");
+    assertEquals((defaultFormat as number) - before >= 50, true);
     assertEquals(after - before >= 50, true);
 
     const summary = v8.queryObjects(QueryObjectsTestFixture, {

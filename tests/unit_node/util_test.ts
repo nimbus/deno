@@ -295,8 +295,11 @@ Deno.test("[util] queryObjects() counts instances", () => {
   const before = queryObjects(UtilQueryObjectsFixture, { format: "count" });
   const refs = [];
   for (let i = 0; i < 25; i++) refs.push(new UtilQueryObjectsFixture());
+  const defaultFormat = queryObjects(UtilQueryObjectsFixture);
   const after = queryObjects(UtilQueryObjectsFixture, { format: "count" });
   assertEquals(typeof before, "number");
+  assertEquals(typeof defaultFormat, "number");
+  assertEquals((defaultFormat as number) - (before as number) >= 25, true);
   assertEquals((after as number) - (before as number) >= 25, true);
   assertEquals(refs.length, 25);
 });
