@@ -3,6 +3,7 @@
 
 (function () {
 const { core, internals, primordials } = __bootstrap;
+const { isModuleNamespaceObject } = core;
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
 const {
@@ -235,6 +236,9 @@ class Script {
 function finishDynamicImportResult(result) {
   if (isModule(result)) {
     return PromisePrototypeThen(result.evaluate(), () => result.namespace);
+  }
+  if (isModuleNamespaceObject(result)) {
+    return result;
   }
   throw new ERR_VM_MODULE_NOT_MODULE();
 }
