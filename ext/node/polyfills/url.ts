@@ -34,8 +34,12 @@ const {
   FunctionPrototypeCall,
   Int8Array,
   ObjectCreate,
+  ObjectDefineProperties,
+  ObjectGetOwnPropertyDescriptors,
   ObjectKeys,
   ObjectPrototypeIsPrototypeOf,
+  ReflectApply,
+  ReflectConstruct,
   RegExpPrototypeExec,
   RegExpPrototypeTest,
   SafeRegExp,
@@ -51,6 +55,7 @@ const {
   StringPrototypeSplit,
   StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
+  TypeError,
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
   TypedArrayPrototypeGetBuffer,
@@ -59,6 +64,7 @@ const {
   decodeURIComponent,
 } = primordials;
 const {
+  ERR_CONSTRUCT_CALL_REQUIRED,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
   ERR_INVALID_FILE_URL_HOST,
@@ -124,6 +130,9 @@ const { encodeStr, hexTable } = core.loadExtScript(
 );
 const querystring = core.loadExtScript("ext:deno_node/querystring.js").default;
 const { URL, URLSearchParams } = core.loadExtScript("ext:deno_web/00_url.js");
+const { URLPattern: WebURLPattern } = core.loadExtScript(
+  "ext:deno_web/01_urlpattern.js",
+);
 const { urlToHttpOptions } = core.loadExtScript(
   "ext:deno_node/internal/url.ts",
 );
@@ -209,6 +218,211 @@ const forbiddenHostChars = new SafeRegExp(/[\0\t\n\r #%/:<>?@[\\\]^|]/);
 const forbiddenHostCharsIpv6 = new SafeRegExp(/[\0\t\n\r #%/<>?@\\^|]/);
 
 const _url = URL;
+const WebURLPatternPrototype = WebURLPattern.prototype;
+const webURLPatternExec = WebURLPatternPrototype.exec;
+const webURLPatternTest = WebURLPatternPrototype.test;
+
+function isNodeURLPatternInput(value: unknown): boolean {
+  return value === undefined || value === null ||
+    typeof value === "string" || typeof value === "object";
+}
+
+function validateURLPatternConstructorArgs(args: unknown[]) {
+  if (args.length > 0 && !isNodeURLPatternInput(args[0])) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "input",
+      "object or string",
+      args[0],
+    );
+  }
+
+  if (args.length >= 3) {
+    if (
+      args[1] !== null && args[1] !== undefined &&
+      typeof args[1] !== "string"
+    ) {
+      throw new ERR_INVALID_ARG_TYPE(
+        "baseURL",
+        "string",
+        args[1],
+      );
+    }
+
+    if (
+      args[2] !== null && args[2] !== undefined &&
+      typeof args[2] !== "object"
+    ) {
+      throw new ERR_INVALID_ARG_TYPE(
+        "options",
+        "object",
+        args[2],
+      );
+    }
+    return;
+  }
+
+  if (
+    args.length === 2 && args[1] !== null && args[1] !== undefined &&
+    typeof args[1] !== "string" && typeof args[1] !== "object"
+  ) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "baseURLOrOptions",
+      "string or object",
+      args[1],
+    );
+  }
+}
+
+function normalizeURLPatternConstructorArgs(args: unknown[]): unknown[] {
+  if (args.length < 3 || (args[1] !== null && args[1] !== undefined)) {
+    return args;
+  }
+
+  const normalized = ArrayPrototypeSlice(args);
+  normalized[1] = args[1] === null ? "null" : "undefined";
+  return normalized;
+}
+
+function validateURLPatternMatchArgs(args: unknown[]) {
+  if (args.length > 0 && !isNodeURLPatternInput(args[0])) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "input",
+      "object or string",
+      args[0],
+    );
+  }
+
+  if (
+    args.length > 1 && args[1] !== null && args[1] !== undefined &&
+    typeof args[1] !== "string"
+  ) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "baseURL",
+      "string",
+      args[1],
+    );
+  }
+}
+
+function isURLPatternDictionaryInput(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "object";
+}
+
+function normalizeURLPatternMatchArgs(args: unknown[]): unknown[] {
+  if (args.length > 0 && args[0] !== null && args[0] !== undefined) {
+    return args;
+  }
+
+  const normalized = args.length === 0
+    ? [ObjectCreate(null)]
+    : ArrayPrototypeSlice(args);
+  normalized[0] = ObjectCreate(null);
+  return normalized;
+}
+
+function tagURLPatternError(error: unknown, code: string): never {
+  if (
+    error !== null && typeof error === "object" &&
+    (error as { code?: unknown }).code === undefined &&
+    typeof (error as { message?: unknown }).message === "string" &&
+    StringPrototypeStartsWith(
+      (error as { message: string }).message,
+      "Failed ",
+    )
+  ) {
+    (error as { code: string }).code = code;
+  }
+  throw error;
+}
+
+function throwURLPatternTypeError(code: string, message: string): never {
+  const error = new TypeError(message);
+  (error as { code: string }).code = code;
+  throw error;
+}
+
+function URLPattern(...args: unknown[]) {
+  if (!new.target) {
+    throw new ERR_CONSTRUCT_CALL_REQUIRED("URLPattern");
+  }
+  validateURLPatternConstructorArgs(args);
+  try {
+    return ReflectConstruct(
+      WebURLPattern,
+      normalizeURLPatternConstructorArgs(args),
+      new.target,
+    );
+  } catch (error) {
+    tagURLPatternError(error, "ERR_INVALID_URL_PATTERN");
+  }
+}
+const URLPatternPrototype = ObjectCreate(WebURLPatternPrototype);
+ObjectDefineProperties(
+  URLPatternPrototype,
+  ObjectGetOwnPropertyDescriptors(WebURLPatternPrototype),
+);
+ObjectDefineProperties(URLPatternPrototype, {
+  __proto__: null,
+  constructor: {
+    __proto__: null,
+    configurable: true,
+    writable: true,
+    value: URLPattern,
+  },
+  exec: {
+    __proto__: null,
+    configurable: true,
+    writable: true,
+    value: function exec(...args: unknown[]) {
+      validateURLPatternMatchArgs(args);
+      if (
+        args.length > 1 && args[1] !== undefined &&
+        isURLPatternDictionaryInput(args[0])
+      ) {
+        throwURLPatternTypeError(
+          "ERR_OPERATION_FAILED",
+          "Failed to exec URLPattern",
+        );
+      }
+      try {
+        return ReflectApply(
+          webURLPatternExec,
+          this,
+          normalizeURLPatternMatchArgs(args),
+        );
+      } catch (error) {
+        tagURLPatternError(error, "ERR_OPERATION_FAILED");
+      }
+    },
+  },
+  test: {
+    __proto__: null,
+    configurable: true,
+    writable: true,
+    value: function test(...args: unknown[]) {
+      validateURLPatternMatchArgs(args);
+      if (
+        args.length > 1 && args[1] !== undefined &&
+        isURLPatternDictionaryInput(args[0])
+      ) {
+        throwURLPatternTypeError(
+          "ERR_OPERATION_FAILED",
+          "Failed to test URLPattern",
+        );
+      }
+      try {
+        return ReflectApply(
+          webURLPatternTest,
+          this,
+          normalizeURLPatternMatchArgs(args),
+        );
+      } catch (error) {
+        tagURLPatternError(error, "ERR_OPERATION_FAILED");
+      }
+    },
+  },
+});
+URLPattern.prototype = URLPatternPrototype;
 let invalidPortWarningEmitted = false;
 let urlParseWarningEmitted = false;
 
@@ -1748,6 +1962,7 @@ const URLSearchParams_ = URLSearchParams;
 
 return {
   URL: _url,
+  URLPattern,
   URLSearchParams: URLSearchParams_,
   urlToHttpOptions,
   Url,

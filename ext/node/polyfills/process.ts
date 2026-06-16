@@ -975,6 +975,112 @@ const process = new Process();
 // Node. The domain polyfill's enter/exit paths overwrite it as domains activate.
 process.domain = null;
 
+let permissionFsDiagnosticChannel;
+
+function hasNodeExecArgvFlag(flag: string): boolean {
+  const flags = ArrayIsArray(process.execArgv) ? process.execArgv : execArgv;
+  for (let i = 0; i < flags.length; i++) {
+    const value = String(flags[i]);
+    if (value === flag || StringPrototypeStartsWith(value, `${flag}=`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function nodePermissionInfo(scope: string): {
+  permission: string;
+  channel: string;
+} | undefined {
+  switch (scope) {
+    case "fs":
+      return { permission: "FileSystem", channel: "node:permission-model:fs" };
+    case "fs.read":
+      return {
+        permission: "FileSystemRead",
+        channel: "node:permission-model:fs",
+      };
+    case "fs.write":
+      return {
+        permission: "FileSystemWrite",
+        channel: "node:permission-model:fs",
+      };
+    default:
+      return undefined;
+  }
+}
+
+function publishDeniedPermission(scope: string, reference: string | undefined) {
+  const info = nodePermissionInfo(scope);
+  if (info === undefined) {
+    return;
+  }
+  if (info.channel !== "node:permission-model:fs") {
+    return;
+  }
+  permissionFsDiagnosticChannel ??= core.loadExtScript(
+    "ext:deno_node/diagnostics_channel.js",
+  ).channel(info.channel);
+  if (permissionFsDiagnosticChannel.hasSubscribers) {
+    permissionFsDiagnosticChannel.publish({
+      __proto__: null,
+      permission: info.permission,
+      resource: reference ?? "",
+    });
+  }
+}
+
+function hasNodePermission(scope: string, reference?: string): boolean {
+  validateString(scope, "scope");
+  if (reference !== undefined && reference !== null) {
+    validateString(reference, "reference");
+  }
+
+  const info = nodePermissionInfo(scope);
+  if (info === undefined) {
+    return false;
+  }
+
+  const permissionMode =
+    hasNodeExecArgvFlag("--permission") ||
+    hasNodeExecArgvFlag("--permission-audit");
+  if (!permissionMode) {
+    return true;
+  }
+
+  let granted = false;
+  if (scope === "fs.read") {
+    granted = hasNodeExecArgvFlag("--allow-fs-read");
+  } else if (scope === "fs.write") {
+    granted = hasNodeExecArgvFlag("--allow-fs-write");
+  } else if (scope === "fs") {
+    granted = hasNodeExecArgvFlag("--allow-fs-read") &&
+      hasNodeExecArgvFlag("--allow-fs-write");
+  }
+
+  if (!granted) {
+    publishDeniedPermission(scope, reference ?? "");
+  }
+  return granted;
+}
+
+ObjectDefineProperty(process, "permission", {
+  __proto__: null,
+  enumerable: true,
+  writable: false,
+  configurable: true,
+  value: ObjectFreeze({
+    __proto__: null,
+    has: hasNodePermission,
+    drop(scope: string, reference?: string) {
+      validateString(scope, "scope");
+      if (reference !== undefined && reference !== null) {
+        validateString(reference, "reference");
+      }
+    },
+  }),
+});
+
 // `node:process` exposes `stdin`/`stdout`/`stderr` as ESM named exports. The
 // underlying streams are constructed lazily via accessor properties on
 // `process` (see `defineLazyStream` below), so the `let` bindings stay
