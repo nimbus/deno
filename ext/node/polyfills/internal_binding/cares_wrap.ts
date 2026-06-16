@@ -71,6 +71,15 @@ const {
   AsyncWrap,
   providerType,
 } = core.loadExtScript("ext:deno_node/internal_binding/async_wrap.ts");
+const {
+  emitInit,
+  emitBefore,
+  emitAfter,
+  emitDestroy,
+  enabledHooksExist,
+  executionAsyncId,
+  newAsyncId,
+} = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 const { ares_strerror } = core.loadExtScript(
   "ext:deno_node/internal_binding/ares.ts",
 );
@@ -86,6 +95,36 @@ interface ErrnoException extends Error {
   code?: string;
   path?: string;
   syscall?: string;
+}
+
+interface DnsAsyncRequest {
+  _asyncId?: number;
+  _triggerAsyncId?: number;
+}
+
+function emitDnsRequestInit(req: DnsAsyncRequest, type: string): void {
+  if (!enabledHooksExist()) return;
+
+  req._asyncId = newAsyncId();
+  req._triggerAsyncId = executionAsyncId();
+  emitInit(req._asyncId, type, req._triggerAsyncId, req);
+}
+
+function completeDnsRequest<T>(req: DnsAsyncRequest, callback: () => T): T {
+  const asyncId = req._asyncId;
+  if (asyncId === undefined) {
+    return callback();
+  }
+
+  emitBefore(asyncId, req._triggerAsyncId, req);
+  try {
+    return callback();
+  } finally {
+    emitAfter(asyncId);
+    emitDestroy(asyncId);
+    req._asyncId = undefined;
+    req._triggerAsyncId = undefined;
+  }
 }
 
 const DNS_ORDER_VERBATIM = 0;
@@ -123,6 +162,7 @@ function getaddrinfo(
   order: 0 | 1 | 2,
 ): number {
   let addresses: string[] = [];
+  emitDnsRequestInit(req, "GETADDRINFOREQWRAP");
 
   // TODO(cmorten): use hints
   // REF: https://nodejs.org/api/dns.html#dns_supported_getaddrinfo_flags
@@ -189,7 +229,9 @@ function getaddrinfo(
       addresses = ArrayPrototypeFilter(addresses, (addr) => isIPv6(addr));
     }
 
-    req.oncomplete(error, addresses, netPermToken);
+    completeDnsRequest(req, () => {
+      req.oncomplete(error, addresses, netPermToken);
+    });
   })();
 
   return 0;
@@ -222,12 +264,18 @@ function getnameinfo(
   address: string,
   port: number,
 ): number {
+  emitDnsRequestInit(req, "GETNAMEINFOREQWRAP");
+
   (async () => {
     try {
       const result = await op_node_getnameinfo(address, port);
-      req.oncomplete(null, result[0], result[1]);
+      completeDnsRequest(req, () => {
+        req.oncomplete(null, result[0], result[1]);
+      });
     } catch (err) {
-      req.oncomplete(err as Error);
+      completeDnsRequest(req, () => {
+        req.oncomplete(err as Error);
+      });
     }
   })();
   return 0;
@@ -428,6 +476,7 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
   }
 
   queryAny(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(
@@ -438,7 +487,9 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         SetPrototypeDelete(this.#pendingQueries, req);
 
         if (code !== 0) {
-          req.oncomplete(code, []);
+          completeDnsRequest(req, () => {
+            req.oncomplete(code, []);
+          });
           return;
         }
 
@@ -527,7 +578,9 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         }
 
         const err = records.length ? 0 : codeMap.get("EAI_NODATA")!;
-        req.oncomplete(err, records);
+        completeDnsRequest(req, () => {
+          req.oncomplete(err, records);
+        });
       },
     );
 
@@ -535,6 +588,7 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
   }
 
   queryA(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "A", req.ttl), ({ code, ret }) => {
@@ -552,13 +606,16 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         );
       }
 
-      req.oncomplete(code, recordsWithTtl ?? ret);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, recordsWithTtl ?? ret);
+      });
     });
 
     return 0;
   }
 
   queryAaaa(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(
@@ -578,7 +635,9 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
           );
         }
 
-        req.oncomplete(code, recordsWithTtl ?? ret);
+        completeDnsRequest(req, () => {
+          req.oncomplete(code, recordsWithTtl ?? ret);
+        });
       },
     );
 
@@ -586,6 +645,7 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
   }
 
   queryCaa(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "CAA"), ({ code, ret }) => {
@@ -600,26 +660,32 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         }),
       );
 
-      req.oncomplete(code, records);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, records);
+      });
     });
 
     return 0;
   }
 
   queryCname(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "CNAME"), ({ code, ret }) => {
       if (!SetPrototypeHas(this.#pendingQueries, req)) return;
       SetPrototypeDelete(this.#pendingQueries, req);
 
-      req.oncomplete(code, ret);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, ret);
+      });
     });
 
     return 0;
   }
 
   queryMx(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "MX"), ({ code, ret }) => {
@@ -634,13 +700,16 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         }),
       );
 
-      req.oncomplete(code, records);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, records);
+      });
     });
 
     return 0;
   }
 
   queryNaptr(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "NAPTR"), ({ code, ret }) => {
@@ -659,13 +728,16 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         }),
       );
 
-      req.oncomplete(code, records);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, records);
+      });
     });
 
     return 0;
   }
 
   queryNs(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "NS"), ({ code, ret }) => {
@@ -677,13 +749,16 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         (record) => fqdnToHostname(record),
       );
 
-      req.oncomplete(code, records);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, records);
+      });
     });
 
     return 0;
   }
 
   queryPtr(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "PTR"), ({ code, ret }) => {
@@ -695,13 +770,16 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         (record) => fqdnToHostname(record),
       );
 
-      req.oncomplete(code, records);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, records);
+      });
     });
 
     return 0;
   }
 
   querySoa(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "SOA"), ({ code, ret }) => {
@@ -725,13 +803,16 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         };
       }
 
-      req.oncomplete(code, record);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, record);
+      });
     });
 
     return 0;
   }
 
   querySrv(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "SRV"), ({ code, ret }) => {
@@ -748,26 +829,32 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         }),
       );
 
-      req.oncomplete(code, records);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, records);
+      });
     });
 
     return 0;
   }
 
   queryTxt(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     SetPrototypeAdd(this.#pendingQueries, req);
 
     PromisePrototypeThen(this.#query(name, "TXT"), ({ code, ret }) => {
       if (!SetPrototypeHas(this.#pendingQueries, req)) return;
       SetPrototypeDelete(this.#pendingQueries, req);
 
-      req.oncomplete(code, ret);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, ret);
+      });
     });
 
     return 0;
   }
 
   getHostByAddr(req: QueryReqWrap, name: string): number {
+    emitDnsRequestInit(req, "QUERYWRAP");
     let reverseName: string;
 
     if (isIPv4(name)) {
@@ -820,7 +907,9 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         ".",
       ) + ".ip6.arpa";
     } else {
-      req.oncomplete(codeMap.get("EINVAL")!, []);
+      completeDnsRequest(req, () => {
+        req.oncomplete(codeMap.get("EINVAL")!, []);
+      });
       return 0;
     }
 
@@ -834,7 +923,9 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         ret as string[],
         (record) => fqdnToHostname(record),
       );
-      req.oncomplete(code, records);
+      completeDnsRequest(req, () => {
+        req.oncomplete(code, records);
+      });
     });
 
     return 0;
@@ -875,7 +966,9 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
 
   cancel() {
     for (const req of new SafeSetIterator(this.#pendingQueries)) {
-      req.oncomplete("ECANCELLED", []);
+      completeDnsRequest(req, () => {
+        req.oncomplete("ECANCELLED", []);
+      });
     }
     SetPrototypeClear(this.#pendingQueries);
 
