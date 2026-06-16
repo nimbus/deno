@@ -860,6 +860,16 @@ function createStructuredCloneInvalidArgType(message) {
   return err;
 }
 
+function createStructuredCloneInvalidState(message) {
+  const err = new TypeError(message);
+  err.code = "ERR_INVALID_STATE";
+  return err;
+}
+
+function shouldUseNodeStructuredCloneErrors() {
+  return typeof globalThis.__nimbusNodeCompatLane === "string";
+}
+
 function toNodeStructuredCloneOptionsError(err, prefix) {
   if (!ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, err)) {
     throw err;
@@ -948,6 +958,12 @@ function structuredClone(value, options) {
         throw e;
       }
       if (ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, e)) {
+        if (
+          shouldUseNodeStructuredCloneErrors() &&
+          e.message === "Invalid state: File-backed Blobs are not cloneable"
+        ) {
+          throw createStructuredCloneInvalidState(e.message);
+        }
         throw new DOMException(e.message, "DataCloneError");
       }
       throw e;
