@@ -1297,6 +1297,7 @@ ObjectDefineProperty(process, "config", {
           "llvm_version": "0.0",
           "enable_lto": "false",
           "host_arch": arch,
+          "v8_enable_temporal_support": 1,
           ...(forceSharedOpenssl ? { "node_shared_openssl": 1 } : {}),
         }),
       });

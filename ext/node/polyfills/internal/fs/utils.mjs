@@ -527,6 +527,25 @@ function dateFromMs(ms) {
   return new Date(Number(ms) + 0.5);
 }
 
+function defineStatValue(receiver, key, value) {
+  ObjectDefineProperty(receiver, key, {
+    __proto__: null,
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+  return value;
+}
+
+function instantFromMs(ms) {
+  return globalThis.Temporal.Instant.fromEpochMilliseconds(Number(ms));
+}
+
+function instantFromNs(ns) {
+  return globalThis.Temporal.Instant.fromEpochNanoseconds(ns);
+}
+
 const lazyDateFields = {
   __proto__: null,
   atime: {
@@ -599,6 +618,110 @@ const lazyDateFields = {
   },
 };
 
+const lazyTemporalFields = {
+  __proto__: null,
+  atimeInstant: {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      return defineStatValue(this, "atimeInstant", instantFromMs(this.atimeMs));
+    },
+    set(value) {
+      defineStatValue(this, "atimeInstant", value);
+    },
+  },
+  mtimeInstant: {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      return defineStatValue(this, "mtimeInstant", instantFromMs(this.mtimeMs));
+    },
+    set(value) {
+      defineStatValue(this, "mtimeInstant", value);
+    },
+  },
+  ctimeInstant: {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      return defineStatValue(this, "ctimeInstant", instantFromMs(this.ctimeMs));
+    },
+    set(value) {
+      defineStatValue(this, "ctimeInstant", value);
+    },
+  },
+  birthtimeInstant: {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      return defineStatValue(
+        this,
+        "birthtimeInstant",
+        instantFromMs(this.birthtimeMs),
+      );
+    },
+    set(value) {
+      defineStatValue(this, "birthtimeInstant", value);
+    },
+  },
+};
+
+const lazyTemporalBigIntFields = {
+  __proto__: null,
+  atimeInstant: {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      return defineStatValue(this, "atimeInstant", instantFromNs(this.atimeNs));
+    },
+    set(value) {
+      defineStatValue(this, "atimeInstant", value);
+    },
+  },
+  mtimeInstant: {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      return defineStatValue(this, "mtimeInstant", instantFromNs(this.mtimeNs));
+    },
+    set(value) {
+      defineStatValue(this, "mtimeInstant", value);
+    },
+  },
+  ctimeInstant: {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      return defineStatValue(this, "ctimeInstant", instantFromNs(this.ctimeNs));
+    },
+    set(value) {
+      defineStatValue(this, "ctimeInstant", value);
+    },
+  },
+  birthtimeInstant: {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      return defineStatValue(
+        this,
+        "birthtimeInstant",
+        instantFromNs(this.birthtimeNs),
+      );
+    },
+    set(value) {
+      defineStatValue(this, "birthtimeInstant", value);
+    },
+  },
+};
+
 export function BigIntStats(
   dev,
   mode,
@@ -644,6 +767,7 @@ export function BigIntStats(
 ObjectSetPrototypeOf(BigIntStats.prototype, StatsBase.prototype);
 ObjectSetPrototypeOf(BigIntStats, StatsBase);
 ObjectDefineProperties(BigIntStats.prototype, lazyDateFields);
+ObjectDefineProperties(BigIntStats.prototype, lazyTemporalBigIntFields);
 
 BigIntStats.prototype._checkModeProperty = function (property) {
   if (
@@ -697,6 +821,7 @@ export function Stats(
 ObjectSetPrototypeOf(Stats.prototype, StatsBase.prototype);
 ObjectSetPrototypeOf(Stats, StatsBase);
 ObjectDefineProperties(Stats.prototype, lazyDateFields);
+ObjectDefineProperties(Stats.prototype, lazyTemporalFields);
 
 // HACK: Workaround for https://github.com/standard-things/esm/issues/821.
 // TODO(ronag): Remove this as soon as `esm` publishes a fixed version.
