@@ -3861,14 +3861,16 @@ function requireBuiltinModule(id) {
     mod.paths = [];
     getBuiltinModuleRequire = makeRequireFunction(mod);
   }
-  const normalizedId = StringPrototypeStartsWith(id, "node:")
-    ? StringPrototypeSlice(id, 5)
-    : id;
-  const module = loadNativeModuleWithoutUserHooks(normalizedId, id);
-  if (module) {
-    return module.exports;
+  const wasInsideResolveHook = insideResolveHook;
+  const wasInsideLoadHook = insideLoadHook;
+  insideResolveHook = true;
+  insideLoadHook = true;
+  try {
+    return getBuiltinModuleRequire(id);
+  } finally {
+    insideResolveHook = wasInsideResolveHook;
+    insideLoadHook = wasInsideLoadHook;
   }
-  return getBuiltinModuleRequire(id);
 }
 
 function getBuiltinModule(id) {
