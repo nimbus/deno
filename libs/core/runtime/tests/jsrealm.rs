@@ -162,6 +162,7 @@ async fn create_realm_loads_modules_in_realm_module_map() {
       r#"
         import { depLoadCount } from "./dep.js";
         globalThis.entryLoadCount = (globalThis.entryLoadCount ?? 0) + 1;
+        globalThis.importMetaMain = import.meta.main;
         globalThis.observedDepLoadCount = depLoadCount;
       "#,
     ),
@@ -184,7 +185,7 @@ async fn create_realm_loads_modules_in_realm_module_map() {
     })
     .unwrap();
   let first_id = runtime
-    .load_side_es_module_in_realm(&first_realm, &main_specifier)
+    .load_main_es_module_in_realm(&first_realm, &main_specifier)
     .await
     .unwrap();
   let first_evaluation = runtime.mod_evaluate_in_realm(&first_realm, first_id);
@@ -197,7 +198,7 @@ async fn create_realm_loads_modules_in_realm_module_map() {
     })
     .unwrap();
   let second_id = runtime
-    .load_side_es_module_in_realm(&second_realm, &main_specifier)
+    .load_main_es_module_in_realm(&second_realm, &main_specifier)
     .await
     .unwrap();
   let second_evaluation =
@@ -216,6 +217,9 @@ async fn create_realm_loads_modules_in_realm_module_map() {
         r#"
           if (globalThis.entryLoadCount !== 1) {
             throw new Error(`entry load count leaked: ${globalThis.entryLoadCount}`);
+          }
+          if (globalThis.importMetaMain !== true) {
+            throw new Error(`import.meta.main was not preserved: ${globalThis.importMetaMain}`);
           }
           if (globalThis.depLoadCount !== 1) {
             throw new Error(`dependency load count leaked: ${globalThis.depLoadCount}`);

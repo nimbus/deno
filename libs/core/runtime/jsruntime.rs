@@ -3504,6 +3504,51 @@ impl JsRuntime {
       .await
   }
 
+  /// Asynchronously load specified module and all of its dependencies from the
+  /// provided source into the provided realm's module map.
+  ///
+  /// The module will be marked as "main" in that realm, and because of that
+  /// "import.meta.main" will return true when checked inside that module.
+  ///
+  /// User must call [`JsRuntime::mod_evaluate_in_realm`] with the returned
+  /// [`ModuleId`] after loading finishes.
+  pub async fn load_main_es_module_from_code_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    specifier: &ModuleSpecifier,
+    code: impl IntoModuleCodeString,
+  ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    self
+      .drive_es_module_load_in_realm(
+        realm,
+        true,
+        specifier,
+        Some(code.into_module_code()),
+      )
+      .await
+  }
+
+  /// Asynchronously load specified module and all of its dependencies into the
+  /// provided realm's module map, retrieving source from the runtime's
+  /// configured [`ModuleLoader`].
+  ///
+  /// The module will be marked as "main" in that realm, and because of that
+  /// "import.meta.main" will return true when checked inside that module.
+  ///
+  /// User must call [`JsRuntime::mod_evaluate_in_realm`] with the returned
+  /// [`ModuleId`] after loading finishes.
+  pub async fn load_main_es_module_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    specifier: &ModuleSpecifier,
+  ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    self
+      .drive_es_module_load_in_realm(realm, true, specifier, None)
+      .await
+  }
+
   /// Asynchronously load specified ES module and all of its dependencies from the
   /// provided source.
   ///
