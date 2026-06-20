@@ -2482,6 +2482,22 @@ impl JsRuntime {
     Self::scoped_resolve(scope, promise)
   }
 
+  /// Waits for the given value to resolve in the provided realm.
+  ///
+  /// This is the realm-aware variant of [`JsRuntime::resolve`]. Use it for
+  /// promises created by scripts or modules executing in a non-main realm.
+  pub fn resolve_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    promise: v8::Global<v8::Value>,
+  ) -> impl Future<Output = Result<v8::Global<v8::Value>, Box<JsError>>> + use<>
+  {
+    let realm = JsRealm::clone(realm);
+    let isolate = self.v8_isolate();
+    jsrealm::context_scope!(scope, realm, isolate);
+    Self::scoped_resolve(scope, promise)
+  }
+
   /// Waits for the given value to resolve while polling the event loop.
   ///
   /// This future resolves when either the value is resolved or the event loop runs to
@@ -2549,6 +2565,20 @@ impl JsRuntime {
     poll_fn(|cx| self.poll_event_loop(cx, poll_options)).await
   }
 
+  /// Runs event loop to completion for the provided realm.
+  ///
+  /// This is the realm-aware variant of [`JsRuntime::run_event_loop`]. It
+  /// enters the realm's V8 context before collecting pending ops, timers,
+  /// module progress, promise rejections, and other per-context event-loop
+  /// state.
+  pub async fn run_event_loop_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    poll_options: PollEventLoopOptions,
+  ) -> Result<(), CoreError> {
+    poll_fn(|cx| self.poll_event_loop_in_realm(realm, cx, poll_options)).await
+  }
+
   /// A utility function that run provided future concurrently with the event loop.
   ///
   /// If the event loop resolves while polling the future, it return an error with the text
@@ -2567,6 +2597,39 @@ impl JsRuntime {
         return Poll::Ready(t.map_err(|e| e.into()));
       }
       if let Poll::Ready(t) = self.poll_event_loop(cx, poll_options) {
+        t?;
+        if let Poll::Ready(t) = fut.poll_unpin(cx) {
+          return Poll::Ready(t.map_err(|e| e.into()));
+        }
+        return Poll::Ready(Err(
+          CoreErrorKind::PendingPromiseResolution.into_box(),
+        ));
+      }
+      Poll::Pending
+    })
+    .await
+  }
+
+  /// A realm-aware variant of [`JsRuntime::with_event_loop_promise`].
+  ///
+  /// Use this for promises created in a non-main realm so async ops and timers
+  /// registered against that realm's [`ContextState`] are driven.
+  pub async fn with_event_loop_promise_in_realm<'fut, T, E>(
+    &mut self,
+    realm: &JsRealm,
+    mut fut: impl Future<Output = Result<T, E>> + Unpin + 'fut,
+    poll_options: PollEventLoopOptions,
+  ) -> Result<T, CoreError>
+  where
+    CoreError: From<E>,
+  {
+    poll_fn(|cx| {
+      if let Poll::Ready(t) = fut.poll_unpin(cx) {
+        return Poll::Ready(t.map_err(|e| e.into()));
+      }
+      if let Poll::Ready(t) =
+        self.poll_event_loop_in_realm(realm, cx, poll_options)
+      {
         t?;
         if let Poll::Ready(t) = fut.poll_unpin(cx) {
           return Poll::Ready(t.map_err(|e| e.into()));
@@ -2616,6 +2679,17 @@ impl JsRuntime {
     cx: &mut Context,
     poll_options: PollEventLoopOptions,
   ) -> Poll<Result<(), CoreError>> {
+    let realm = JsRealm::clone(&self.inner.main_realm);
+    self.poll_event_loop_in_realm(&realm, cx, poll_options)
+  }
+
+  /// Runs a single tick of the event loop for the provided realm.
+  pub fn poll_event_loop_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    cx: &mut Context,
+    poll_options: PollEventLoopOptions,
+  ) -> Poll<Result<(), CoreError>> {
     let has_inspector = self.inner.state.has_inspector.get();
 
     // SAFETY: We know this isolate is valid and non-null at this time
@@ -2624,10 +2698,9 @@ impl JsRuntime {
 
     let result = {
       v8::scope!(let isolate_scope, &mut isolate);
-      let context =
-        v8::Local::new(isolate_scope, self.inner.main_realm.context());
+      let context = v8::Local::new(isolate_scope, realm.context());
       let mut scope = v8::ContextScope::new(isolate_scope, context);
-      self.poll_event_loop_inner(cx, &mut scope, poll_options)
+      self.poll_event_loop_inner(cx, &mut scope, poll_options, realm)
     };
 
     // Tell V8's CPU profiler whether we're about to go idle. When the event
@@ -2662,6 +2735,7 @@ impl JsRuntime {
     cx: &mut Context,
     scope: &mut v8::PinScope,
     poll_options: PollEventLoopOptions,
+    realm: &JsRealm,
   ) -> Poll<Result<(), CoreError>> {
     let has_inspector = self.inner.state.has_inspector.get();
     self.inner.state.waker.register(cx.waker());
@@ -2693,7 +2767,6 @@ impl JsRuntime {
       }
     }
 
-    let realm = &self.inner.main_realm;
     let modules = &realm.0.module_map;
     let context_state = &realm.0.context_state;
 

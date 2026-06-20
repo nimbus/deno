@@ -154,6 +154,15 @@ fn create_realm_produces_fresh_global_context_with_core_ops() {
 
 #[tokio::test]
 async fn create_realm_loads_modules_in_realm_module_map() {
+  #[op2]
+  #[number]
+  async fn op_realm_async_value() -> Result<i64, JsErrorBox> {
+    tokio::task::yield_now().await;
+    Ok(19)
+  }
+
+  deno_core::extension!(realm_event_loop_ext, ops = [op_realm_async_value]);
+
   let main_specifier = ModuleSpecifier::parse("file:///main.js").unwrap();
   let dep_specifier = ModuleSpecifier::parse("file:///dep.js").unwrap();
   let loader = Rc::new(StaticModuleLoader::new([
@@ -163,6 +172,7 @@ async fn create_realm_loads_modules_in_realm_module_map() {
         import { depLoadCount } from "./dep.js";
         globalThis.entryLoadCount = (globalThis.entryLoadCount ?? 0) + 1;
         globalThis.importMetaMain = import.meta.main;
+        globalThis.asyncOpValue = await Deno.core.ops.op_realm_async_value();
         globalThis.observedDepLoadCount = depLoadCount;
       "#,
     ),
@@ -175,6 +185,7 @@ async fn create_realm_loads_modules_in_realm_module_map() {
     ),
   ]));
   let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![realm_event_loop_ext::init()],
     module_loader: Some(loader.clone()),
     ..Default::default()
   });
@@ -189,7 +200,10 @@ async fn create_realm_loads_modules_in_realm_module_map() {
     .await
     .unwrap();
   let first_evaluation = runtime.mod_evaluate_in_realm(&first_realm, first_id);
-  runtime.run_event_loop(Default::default()).await.unwrap();
+  runtime
+    .run_event_loop_in_realm(&first_realm, Default::default())
+    .await
+    .unwrap();
   first_evaluation.await.unwrap();
 
   let second_realm = runtime
@@ -203,8 +217,29 @@ async fn create_realm_loads_modules_in_realm_module_map() {
     .unwrap();
   let second_evaluation =
     runtime.mod_evaluate_in_realm(&second_realm, second_id);
-  runtime.run_event_loop(Default::default()).await.unwrap();
+  runtime
+    .run_event_loop_in_realm(&second_realm, Default::default())
+    .await
+    .unwrap();
   second_evaluation.await.unwrap();
+
+  let fresh_promise = first_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "first-realm-promise.js",
+      r#"
+        Deno.core.ops.op_realm_async_value().then((value) => {
+          globalThis.promiseResolvedValue = value;
+          return value;
+        })
+      "#,
+    )
+    .unwrap();
+  let resolve = runtime.resolve_in_realm(&first_realm, fresh_promise);
+  runtime
+    .with_event_loop_promise_in_realm(&first_realm, resolve, Default::default())
+    .await
+    .unwrap();
 
   for (realm, script_name) in [
     (&first_realm, "first-realm-check.js"),
@@ -221,6 +256,9 @@ async fn create_realm_loads_modules_in_realm_module_map() {
           if (globalThis.importMetaMain !== true) {
             throw new Error(`import.meta.main was not preserved: ${globalThis.importMetaMain}`);
           }
+          if (globalThis.asyncOpValue !== 19) {
+            throw new Error(`realm async op did not resolve: ${globalThis.asyncOpValue}`);
+          }
           if (globalThis.depLoadCount !== 1) {
             throw new Error(`dependency load count leaked: ${globalThis.depLoadCount}`);
           }
@@ -231,6 +269,17 @@ async fn create_realm_loads_modules_in_realm_module_map() {
       )
       .unwrap();
   }
+  first_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "first-realm-promise-check.js",
+      r#"
+        if (globalThis.promiseResolvedValue !== 19) {
+          throw new Error(`realm promise did not resolve: ${globalThis.promiseResolvedValue}`);
+        }
+      "#,
+    )
+    .unwrap();
 
   runtime
     .execute_script(
