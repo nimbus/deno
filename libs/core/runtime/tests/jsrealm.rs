@@ -6,6 +6,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
 
+use deno_error::JsErrorBox;
+
 use crate::JsRuntime;
 use crate::JsRuntimeForSnapshot;
 use crate::RuntimeOptions;
@@ -78,6 +80,74 @@ fn test_set_format_exception_callback_realms() {
       );
     }
   }
+}
+
+#[test]
+fn create_realm_produces_fresh_global_context_with_core_ops() {
+  #[allow(clippy::unnecessary_wraps, reason = "test op mirrors op2 API")]
+  #[op2(fast)]
+  #[number]
+  fn op_realm_value() -> Result<i64, JsErrorBox> {
+    Ok(7)
+  }
+
+  deno_core::extension!(test_ext, ops = [op_realm_value]);
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![test_ext::init()],
+    ..Default::default()
+  });
+
+  let main_realm = runtime.main_realm();
+  main_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "main.js",
+      "globalThis.realmMarker = 'main';",
+    )
+    .unwrap();
+
+  let fresh_realm = runtime.create_realm(Default::default()).unwrap();
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh.js",
+      r#"
+        if ("realmMarker" in globalThis) {
+          throw new Error("fresh realm inherited main global");
+        }
+        if (Deno.core.ops.op_realm_value() !== 7) {
+          throw new Error("fresh realm did not install ops");
+        }
+        globalThis.realmMarker = "fresh";
+      "#,
+    )
+    .unwrap();
+
+  main_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "main-check.js",
+      r#"
+        if (globalThis.realmMarker !== "main") {
+          throw new Error("main realm was polluted");
+        }
+      "#,
+    )
+    .unwrap();
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh-check.js",
+      r#"
+        if (globalThis.realmMarker !== "fresh") {
+          throw new Error("fresh realm marker was not retained");
+        }
+      "#,
+    )
+    .unwrap();
+
+  assert_eq!(fresh_realm.num_pending_ops(), 0);
+  assert_eq!(fresh_realm.num_unrefed_ops(), 0);
 }
 
 #[tokio::test]

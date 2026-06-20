@@ -213,7 +213,9 @@ impl InnerIsolateState {
     // op_state first, the Box<UvLoop> is freed and destroy() would
     // dereference a dangling pointer (use-after-free).
     unsafe {
-      ManuallyDrop::take(&mut self.main_realm).0.destroy();
+      ManuallyDrop::take(&mut self.main_realm)
+        .0
+        .destroy(&mut self.v8_isolate);
     }
 
     // Now safe to clear op_state (drops Box<UvLoop> etc.) since
@@ -486,6 +488,9 @@ pub struct JsRuntimeState {
     RefCell<Option<EvalContextCodeCacheReadyCb>>,
   pub(crate) cppgc_template: RefCell<Option<v8::Global<v8::FunctionTemplate>>>,
   pub(crate) function_templates: Rc<RefCell<FunctionTemplateData>>,
+  pub(crate) global_template_middlewares:
+    RefCell<Vec<GlobalTemplateMiddlewareFn>>,
+  pub(crate) global_object_middlewares: RefCell<Vec<GlobalObjectMiddlewareFn>>,
   pub(crate) callsite_prototype: RefCell<Option<v8::Global<v8::Object>>>,
   waker: Arc<AtomicWaker>,
   /// Foreground V8 tasks queued by the custom platform. Shared with the
@@ -889,6 +894,8 @@ impl JsRuntime {
       has_inspector: false.into(),
       cppgc_template: None.into(),
       function_templates: Default::default(),
+      global_template_middlewares: Default::default(),
+      global_object_middlewares: Default::default(),
       callsite_prototype: None.into(),
       lazy_extensions,
       tla_stall_retries: Cell::new(0),
@@ -918,6 +925,10 @@ impl JsRuntime {
       global_object_middlewares,
       additional_references,
     ) = extension_set::get_middlewares_and_external_refs(&mut extensions);
+    *state_rc.global_template_middlewares.borrow_mut() =
+      global_template_middleware.clone();
+    *state_rc.global_object_middlewares.borrow_mut() =
+      global_object_middlewares.clone();
 
     // Capture the extension, op and source counts. `source_count` MUST mirror
     // the number of `v8::OneByteConst` external strings produced by
@@ -1221,7 +1232,6 @@ impl JsRuntime {
     // internal JS and then execute code provided by extensions...
     {
       let realm = JsRealm::clone(&js_runtime.inner.main_realm);
-      let context_global = realm.context();
       let module_map = realm.0.module_map();
 
       // TODO(bartlomieju): this is somewhat duplicated in `bindings::initialize_context`,
@@ -1234,8 +1244,7 @@ impl JsRuntime {
       //   }
       // ) {
       if init_mode == InitMode::New {
-        js_runtime
-          .execute_virtual_ops_module(context_global, module_map.clone());
+        js_runtime.execute_virtual_ops_module(&realm, module_map.clone());
       }
 
       if init_mode == InitMode::New {
@@ -1384,6 +1393,137 @@ impl JsRuntime {
   #[cfg(test)]
   pub(crate) fn main_realm(&self) -> JsRealm {
     JsRealm::clone(&self.inner.main_realm)
+  }
+
+  /// Creates a fresh V8 context/realm inside the retained isolate.
+  ///
+  /// This initializes `Deno.core`, the core builtins, the virtual ops module,
+  /// and op bindings for the new realm. Extension JavaScript is intentionally
+  /// not replayed here yet; embedders that need extension-specific globals must
+  /// initialize them explicitly before using the realm for user code.
+  pub fn create_realm(
+    &mut self,
+    options: CreateRealmOptions,
+  ) -> Result<JsRealm, CoreError> {
+    self.ensure_v8_lock_held();
+
+    let global_template_middlewares = self
+      .inner
+      .state
+      .global_template_middlewares
+      .borrow()
+      .clone();
+    let global_object_middlewares =
+      self.inner.state.global_object_middlewares.borrow().clone();
+    let source_mapper = self.inner.state.source_mapper.clone();
+    let function_templates = self.inner.state.function_templates.clone();
+    let op_state = self.inner.state.op_state.clone();
+    let runtime_state = self.inner.state.clone();
+    let runtime_state_ptr = runtime_state.as_ref() as *const JsRuntimeState;
+    let isolate_ptr = unsafe { self.inner.v8_isolate.as_raw_isolate_ptr() };
+
+    let main_context_state = self.inner.main_realm.0.context_state.clone();
+    let op_driver = Rc::new(OpDriverImpl::default());
+    let op_ctxs = main_context_state
+      .op_ctxs
+      .iter()
+      .map(|ctx| {
+        ctx.clone_for_realm(
+          isolate_ptr,
+          op_driver.clone(),
+          op_state.clone(),
+          runtime_state_ptr,
+        )
+      })
+      .collect::<Vec<_>>()
+      .into_boxed_slice();
+    let op_method_decls = main_context_state.op_method_decls.clone();
+    let methods_ctx_offset = main_context_state.methods_ctx_offset;
+    let unrefed_ops = Default::default();
+    let context_state = Rc::new(ContextState::new(
+      op_driver,
+      isolate_ptr,
+      op_ctxs,
+      op_method_decls,
+      methods_ctx_offset,
+      op_state.borrow().external_ops_tracker.clone(),
+      unrefed_ops,
+    ));
+    let exception_state = context_state.exception_state.clone();
+    let loader = options
+      .module_loader
+      .unwrap_or_else(|| Rc::new(NoopModuleLoader));
+    let module_map = Rc::new(ModuleMap::new(
+      loader,
+      source_mapper,
+      exception_state,
+      false,
+    ));
+
+    let realm = {
+      let isolate = self.v8_isolate();
+      v8::scope!(let scope, isolate);
+      let context = create_context(
+        scope,
+        &global_template_middlewares,
+        &global_object_middlewares,
+        false,
+      );
+      let context_global = v8::Global::new(scope, context);
+      let scope = &mut v8::ContextScope::new(scope, context);
+
+      bindings::initialize_deno_core_namespace(scope, context, InitMode::New);
+      bindings::initialize_primordials_and_infra(scope)?;
+      bindings::initialize_deno_core_ops_bindings(
+        scope,
+        context,
+        &context_state.op_ctxs,
+        &context_state.op_method_decls,
+        methods_ctx_offset,
+        &mut function_templates.borrow_mut(),
+        false,
+      );
+
+      unsafe {
+        context.set_aligned_pointer_in_embedder_data(
+          super::jsrealm::CONTEXT_STATE_SLOT_INDEX,
+          Rc::into_raw(context_state.clone()) as *mut c_void,
+        );
+      }
+
+      if context_state.ext_import_meta_proto.borrow().is_none() {
+        let null = v8::null(scope);
+        let obj = v8::Object::with_prototype_and_properties(
+          scope,
+          null.into(),
+          &[],
+          &[],
+        );
+        *context_state.ext_import_meta_proto.borrow_mut() =
+          Some(v8::Global::new(scope, obj));
+      }
+
+      unsafe {
+        context.set_aligned_pointer_in_embedder_data(
+          super::jsrealm::MODULE_MAP_SLOT_INDEX,
+          Rc::into_raw(module_map.clone()) as *mut c_void,
+        );
+      }
+
+      JsRealm::new(JsRealmInner::new(
+        context_state,
+        context_global,
+        module_map.clone(),
+        function_templates,
+      ))
+    };
+
+    self.execute_virtual_ops_module(&realm, module_map.clone());
+    let mut files_loaded = Vec::new();
+    self.execute_builtin_sources(&realm, &module_map, &mut files_loaded)?;
+    self.store_js_callbacks(&realm, false);
+
+    Ok(realm)
   }
 
   #[inline]
@@ -1565,11 +1705,12 @@ impl JsRuntime {
   /// with the runtime.
   fn execute_virtual_ops_module(
     &mut self,
-    context_global: &v8::Global<v8::Context>,
+    realm: &JsRealm,
     module_map: Rc<ModuleMap>,
   ) {
-    scope!(scope, self);
-    let context_local = v8::Local::new(scope, context_global);
+    let isolate = self.v8_isolate();
+    jsrealm::context_scope!(scope, realm, isolate);
+    let context_local = v8::Local::new(scope, realm.context());
     let context_state = JsRealm::state_from_scope(scope);
     let global = context_local.global(scope);
     let synthetic_module_exports = create_exports_for_ops_virtual_module(
@@ -1596,11 +1737,12 @@ impl JsRuntime {
   /// some of this code already relies on certain ops being available.
   fn execute_builtin_sources(
     &mut self,
-    _realm: &JsRealm,
+    realm: &JsRealm,
     module_map: &Rc<ModuleMap>,
     files_loaded: &mut Vec<&'static str>,
   ) -> Result<(), CoreError> {
-    scope!(scope, self);
+    let isolate = self.v8_isolate();
+    jsrealm::context_scope!(scope, realm, isolate);
 
     for source_file in &BUILTIN_SOURCES {
       let name = source_file.specifier.v8_string(scope).unwrap();
@@ -1780,7 +1922,8 @@ impl JsRuntime {
       run_immediate_callbacks_cb,
       wasm_instance_fn,
     ) = {
-      scope!(scope, self);
+      let isolate = self.v8_isolate();
+      jsrealm::context_scope!(scope, realm, isolate);
       let context = realm.context();
       let context_local = v8::Local::new(scope, context);
       let global = context_local.global(scope);

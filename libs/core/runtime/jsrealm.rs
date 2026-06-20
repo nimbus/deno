@@ -248,7 +248,7 @@ impl ContextState {
 /// garbage collected.
 #[derive(Clone)]
 #[repr(transparent)]
-pub(crate) struct JsRealm(pub(crate) JsRealmInner);
+pub struct JsRealm(pub(crate) JsRealmInner);
 
 #[derive(Clone)]
 pub(crate) struct JsRealmInner {
@@ -293,11 +293,9 @@ impl JsRealmInner {
     self.function_templates.clone()
   }
 
-  pub fn destroy(self) {
+  pub fn destroy(self, isolate: &mut v8::Isolate) {
     let state = self.state();
-    let raw_ptr = self.state().isolate.unwrap();
-    // SAFETY: We know the isolate outlives the realm
-    let mut isolate = unsafe { v8::Isolate::from_raw_isolate_ptr(raw_ptr) };
+    debug_assert!(state.isolate.is_some_and(|ptr| !ptr.is_null()));
 
     // Close the immediate check/idle handles before the uv loop is dropped.
     // SAFETY: The uv loop is still alive (op_state hasn't been cleared yet).
@@ -311,19 +309,18 @@ impl JsRealmInner {
       // `Global::into_raw()` pointer during registration. We
       // reconstruct the Global via `from_raw` so it is properly
       // dropped. `NonNull::new_unchecked` is safe because we checked
-      // `!is_null()`. `isolate` is valid because we just obtained it
-      // from the raw isolate pointer above.
+      // `!is_null()`.
       unsafe {
         let data = (*loop_ptr).data;
         if !data.is_null() {
           let raw = std::ptr::NonNull::new_unchecked(data as *mut v8::Context);
-          let _global = v8::Global::from_raw(&mut isolate, raw);
+          let _global = v8::Global::from_raw(isolate, raw);
           (*loop_ptr).data = std::ptr::null_mut();
         }
       }
     }
 
-    v8::scope!(let scope, &mut isolate);
+    v8::scope!(let scope, isolate);
     // These globals will prevent snapshots from completing, take them
     state.exception_state.prepare_to_destroy();
     std::mem::take(&mut *state.js_event_loop_tick_cb.borrow_mut());
@@ -389,6 +386,14 @@ pub(crate) use context_scope;
 impl JsRealm {
   pub(crate) fn new(inner: JsRealmInner) -> Self {
     Self(inner)
+  }
+
+  /// Destroys this realm and releases its V8 context embedder state.
+  ///
+  /// Do not call this while another clone of the same [`JsRealm`] may still be
+  /// used. Clones are lightweight handles to the same V8 context.
+  pub fn destroy(self, isolate: &mut v8::Isolate) {
+    self.0.destroy(isolate);
   }
 
   #[inline(always)]
