@@ -3434,6 +3434,22 @@ impl JsRuntime {
   ) -> impl Future<Output = Result<(), CoreError>> + use<> {
     self.ensure_v8_lock_held();
     let realm = JsRealm::clone(&self.inner.main_realm);
+    self.mod_evaluate_in_realm(&realm, id)
+  }
+
+  /// Evaluates an already instantiated ES module in the provided realm.
+  ///
+  /// This is the realm-aware variant of [`JsRuntime::mod_evaluate`]. The
+  /// module must have been loaded and instantiated through the same realm's
+  /// module map, for example by
+  /// [`JsRuntime::load_side_es_module_in_realm`].
+  pub fn mod_evaluate_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    id: ModuleId,
+  ) -> impl Future<Output = Result<(), CoreError>> + use<> {
+    self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(realm);
     let module_map = realm.0.module_map.clone();
     let isolate = self.v8_isolate();
     jsrealm::context_scope!(scope, realm, isolate);
@@ -3458,8 +3474,14 @@ impl JsRuntime {
     code: impl IntoModuleCodeString,
   ) -> Result<ModuleId, CoreError> {
     self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(&self.inner.main_realm);
     self
-      .drive_es_module_load(true, specifier, Some(code.into_module_code()))
+      .drive_es_module_load_in_realm(
+        &realm,
+        true,
+        specifier,
+        Some(code.into_module_code()),
+      )
       .await
   }
 
@@ -3476,7 +3498,10 @@ impl JsRuntime {
     specifier: &ModuleSpecifier,
   ) -> Result<ModuleId, CoreError> {
     self.ensure_v8_lock_held();
-    self.drive_es_module_load(true, specifier, None).await
+    let realm = JsRealm::clone(&self.inner.main_realm);
+    self
+      .drive_es_module_load_in_realm(&realm, true, specifier, None)
+      .await
   }
 
   /// Asynchronously load specified ES module and all of its dependencies from the
@@ -3498,8 +3523,14 @@ impl JsRuntime {
     code: impl IntoModuleCodeString,
   ) -> Result<ModuleId, CoreError> {
     self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(&self.inner.main_realm);
     self
-      .drive_es_module_load(false, specifier, Some(code.into_module_code()))
+      .drive_es_module_load_in_realm(
+        &realm,
+        false,
+        specifier,
+        Some(code.into_module_code()),
+      )
       .await
   }
 
@@ -3516,7 +3547,49 @@ impl JsRuntime {
     specifier: &ModuleSpecifier,
   ) -> Result<ModuleId, CoreError> {
     self.ensure_v8_lock_held();
-    self.drive_es_module_load(false, specifier, None).await
+    let realm = JsRealm::clone(&self.inner.main_realm);
+    self
+      .drive_es_module_load_in_realm(&realm, false, specifier, None)
+      .await
+  }
+
+  /// Asynchronously load specified ES module and all of its dependencies from
+  /// the provided source into the provided realm's module map.
+  ///
+  /// User must call [`JsRuntime::mod_evaluate_in_realm`] with the returned
+  /// [`ModuleId`] after loading finishes.
+  pub async fn load_side_es_module_from_code_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    specifier: &ModuleSpecifier,
+    code: impl IntoModuleCodeString,
+  ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    self
+      .drive_es_module_load_in_realm(
+        realm,
+        false,
+        specifier,
+        Some(code.into_module_code()),
+      )
+      .await
+  }
+
+  /// Asynchronously load specified ES module and all of its dependencies into
+  /// the provided realm's module map, retrieving source from the runtime's
+  /// configured [`ModuleLoader`].
+  ///
+  /// User must call [`JsRuntime::mod_evaluate_in_realm`] with the returned
+  /// [`ModuleId`] after loading finishes.
+  pub async fn load_side_es_module_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    specifier: &ModuleSpecifier,
+  ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    self
+      .drive_es_module_load_in_realm(realm, false, specifier, None)
+      .await
   }
 
   /// Drive a recursive ES module load to completion while concurrently
@@ -3525,13 +3598,14 @@ impl JsRuntime {
   /// async polling task) can respond to load requests from the recursive
   /// load. Without it, static module loads that go through hook bridges
   /// would deadlock.
-  async fn drive_es_module_load(
+  async fn drive_es_module_load_in_realm(
     &mut self,
+    realm: &JsRealm,
     is_main: bool,
     specifier: &ModuleSpecifier,
     code: Option<ModuleCodeString>,
   ) -> Result<ModuleId, CoreError> {
-    let realm = JsRealm::clone(&self.inner.main_realm);
+    let realm = JsRealm::clone(realm);
     let module_map_rc = realm.0.module_map();
 
     // Only pump the V8 event loop alongside the load when the loader resolves

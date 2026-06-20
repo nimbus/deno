@@ -10,12 +10,14 @@ use deno_error::JsErrorBox;
 
 use crate::JsRuntime;
 use crate::JsRuntimeForSnapshot;
+use crate::ModuleSpecifier;
 use crate::RuntimeOptions;
 use crate::error::CoreErrorKind;
 use crate::error::ExtensionLazyInitCountMismatchError;
 use crate::error::ExtensionLazyInitOrderMismatchError;
 use crate::modules::StaticModuleLoader;
 use crate::op2;
+use crate::runtime::CreateRealmOptions;
 
 #[test]
 fn test_set_format_exception_callback_realms() {
@@ -148,6 +150,94 @@ fn create_realm_produces_fresh_global_context_with_core_ops() {
 
   assert_eq!(fresh_realm.num_pending_ops(), 0);
   assert_eq!(fresh_realm.num_unrefed_ops(), 0);
+}
+
+#[tokio::test]
+async fn create_realm_loads_modules_in_realm_module_map() {
+  let main_specifier = ModuleSpecifier::parse("file:///main.js").unwrap();
+  let dep_specifier = ModuleSpecifier::parse("file:///dep.js").unwrap();
+  let loader = Rc::new(StaticModuleLoader::new([
+    (
+      main_specifier.clone(),
+      r#"
+        import { depLoadCount } from "./dep.js";
+        globalThis.entryLoadCount = (globalThis.entryLoadCount ?? 0) + 1;
+        globalThis.observedDepLoadCount = depLoadCount;
+      "#,
+    ),
+    (
+      dep_specifier,
+      r#"
+        globalThis.depLoadCount = (globalThis.depLoadCount ?? 0) + 1;
+        export const depLoadCount = globalThis.depLoadCount;
+      "#,
+    ),
+  ]));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    module_loader: Some(loader.clone()),
+    ..Default::default()
+  });
+
+  let first_realm = runtime
+    .create_realm(CreateRealmOptions {
+      module_loader: Some(loader.clone()),
+    })
+    .unwrap();
+  let first_id = runtime
+    .load_side_es_module_in_realm(&first_realm, &main_specifier)
+    .await
+    .unwrap();
+  let first_evaluation = runtime.mod_evaluate_in_realm(&first_realm, first_id);
+  runtime.run_event_loop(Default::default()).await.unwrap();
+  first_evaluation.await.unwrap();
+
+  let second_realm = runtime
+    .create_realm(CreateRealmOptions {
+      module_loader: Some(loader.clone()),
+    })
+    .unwrap();
+  let second_id = runtime
+    .load_side_es_module_in_realm(&second_realm, &main_specifier)
+    .await
+    .unwrap();
+  let second_evaluation =
+    runtime.mod_evaluate_in_realm(&second_realm, second_id);
+  runtime.run_event_loop(Default::default()).await.unwrap();
+  second_evaluation.await.unwrap();
+
+  for (realm, script_name) in [
+    (&first_realm, "first-realm-check.js"),
+    (&second_realm, "second-realm-check.js"),
+  ] {
+    realm
+      .execute_script(
+        runtime.v8_isolate(),
+        script_name,
+        r#"
+          if (globalThis.entryLoadCount !== 1) {
+            throw new Error(`entry load count leaked: ${globalThis.entryLoadCount}`);
+          }
+          if (globalThis.depLoadCount !== 1) {
+            throw new Error(`dependency load count leaked: ${globalThis.depLoadCount}`);
+          }
+          if (globalThis.observedDepLoadCount !== 1) {
+            throw new Error(`dependency export leaked: ${globalThis.observedDepLoadCount}`);
+          }
+        "#,
+      )
+      .unwrap();
+  }
+
+  runtime
+    .execute_script(
+      "main-realm-check.js",
+      r#"
+        if ("entryLoadCount" in globalThis || "depLoadCount" in globalThis) {
+          throw new Error("realm module globals polluted the main realm");
+        }
+      "#,
+    )
+    .unwrap();
 }
 
 #[tokio::test]
