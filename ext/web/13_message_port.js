@@ -17,6 +17,7 @@ const {
 } = core.ops;
 const {
   ArrayBufferPrototypeGetByteLength,
+  ArrayBufferPrototypeTransferToFixedLength,
   ArrayPrototypeFilter,
   ArrayPrototypeIncludes,
   ArrayPrototypePush,
@@ -756,6 +757,16 @@ function serializeJsMessageData(data, transferables) {
   };
 }
 
+function detachTransferredArrayBuffersIfNeeded(transferables) {
+  const { isDetachedBuffer } = core.loadExtScript("ext:deno_web/06_streams.js");
+  for (let i = 0; i < transferables.length; i++) {
+    const transferable = transferables[i];
+    if (isArrayBuffer(transferable) && !isDetachedBuffer(transferable)) {
+      ArrayBufferPrototypeTransferToFixedLength(transferable);
+    }
+  }
+}
+
 webidl.converters.StructuredSerializeOptions = webidl
   .createDictionaryConverter(
     "StructuredSerializeOptions",
@@ -974,7 +985,9 @@ function structuredClone(value, options) {
   }
 
   const messageData = serializeJsMessageData(value, options.transfer);
-  return deserializeJsMessageData(messageData)[0];
+  const cloned = deserializeJsMessageData(messageData)[0];
+  detachTransferredArrayBuffersIfNeeded(options.transfer);
+  return cloned;
 }
 
 return {

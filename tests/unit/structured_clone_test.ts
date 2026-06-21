@@ -39,6 +39,7 @@ Deno.test("correct DataCloneError message", () => {
   const ab = new ArrayBuffer(1);
   // detach ArrayBuffer
   structuredClone(ab, { transfer: [ab] });
+  assertEquals(ab.byteLength, 0);
   assertThrows(
     () => {
       structuredClone(ab, { transfer: [ab] });
@@ -58,6 +59,19 @@ Deno.test("correct DataCloneError message", () => {
 
   // ab2 should not be detached after above failure
   structuredClone(ab2, { transfer: [ab2] });
+});
+
+Deno.test("structuredClone detaches transferred typed array backing store", () => {
+  const buffer = new ArrayBuffer(16);
+  const view = new Uint8Array(buffer);
+  view[0] = 17;
+
+  const cloned = structuredClone({ view }, { transfer: [buffer] });
+
+  assertEquals(buffer.byteLength, 0);
+  assertEquals(view.byteLength, 0);
+  assertEquals(cloned.view[0], 17);
+  assertEquals(cloned.view.buffer.byteLength, 16);
 });
 
 Deno.test("structuredClone CryptoKey", async () => {
