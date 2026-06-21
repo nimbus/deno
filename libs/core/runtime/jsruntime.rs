@@ -559,6 +559,28 @@ pub struct RuntimeOptions {
   /// build time. See [`Self::residual_lazy_js_sources`].
   pub residual_lazy_esm_sources: &'static [(&'static str, &'static str)],
 
+  /// Source for eager extension JS files that were loaded from the filesystem
+  /// while building `startup_snapshot` and therefore are not reachable from
+  /// the final binary. `init_extension_js_in_realm()` uses these bytes when
+  /// replaying extension JavaScript into a fresh realm.
+  pub extension_replay_js_sources: &'static [(&'static str, &'static str)],
+
+  /// Source for eager extension ESM files that were loaded from the filesystem
+  /// while building `startup_snapshot`. These bytes are registered as
+  /// lazy-loadable ESM so dependency-only modules are available to
+  /// `op_lazy_load_esm` without being treated as fresh-realm entry points.
+  /// See [`Self::extension_replay_esm_entry_points`] for the subset that
+  /// should be loaded and evaluated as side modules.
+  pub extension_replay_esm_sources: &'static [(&'static str, &'static str)],
+
+  /// Eager extension ESM entry points from
+  /// [`Self::extension_replay_esm_sources`] that should be evaluated during
+  /// `init_extension_js_in_realm()`. Supplemental ESM sources are
+  /// dependency-only unless listed here; callers should list only the modules
+  /// whose top-level side effects are part of the fresh realm bootstrap
+  /// contract.
+  pub extension_replay_esm_entry_points: &'static [&'static str],
+
   /// Should op registration be skipped?
   pub skip_op_registration: bool,
 
@@ -854,7 +876,7 @@ impl JsRuntime {
       },
     )?;
 
-    let extension_replay_sources = if maybe_startup_snapshot.is_some() {
+    let mut extension_replay_sources = if maybe_startup_snapshot.is_some() {
       extension_set::into_realm_sources_and_source_maps(
         options.extension_transpiler.as_deref(),
         &extensions,
@@ -864,6 +886,45 @@ impl JsRuntime {
     } else {
       sources.cheap_copy()
     };
+    for &(specifier, code) in options.extension_replay_js_sources {
+      extension_replay_sources.js.push(LoadedSource {
+        source_type: ExtensionSourceType::Js,
+        specifier: ModuleName::from_static(specifier),
+        code: ModuleCodeString::from_static(code),
+        maybe_source_map: None,
+      });
+    }
+    for &(specifier, code) in options.extension_replay_esm_sources {
+      extension_replay_sources.lazy_esm.push(LoadedSource {
+        source_type: ExtensionSourceType::LazyEsm,
+        specifier: ModuleName::from_static(specifier),
+        code: ModuleCodeString::from_static(code),
+        maybe_source_map: None,
+      });
+      if options
+        .extension_replay_esm_entry_points
+        .iter()
+        .any(|entry_point| *entry_point == specifier)
+      {
+        extension_replay_sources.esm.push(LoadedSource {
+          source_type: ExtensionSourceType::Esm,
+          specifier: ModuleName::from_static(specifier),
+          code: ModuleCodeString::from_static(code),
+          maybe_source_map: None,
+        });
+      }
+    }
+    for &specifier in options.extension_replay_esm_entry_points {
+      if !extension_replay_sources
+        .esm_entry_points
+        .iter()
+        .any(|entry_point| AsRef::<str>::as_ref(entry_point) == specifier)
+      {
+        extension_replay_sources
+          .esm_entry_points
+          .push(FastString::from_static(specifier));
+      }
+    }
 
     for loaded_source in sources
       .js

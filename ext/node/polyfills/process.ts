@@ -33,7 +33,7 @@ import {
 } from "ext:core/ops";
 
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
-import Module, { getBuiltinModule } from "node:module";
+const lazyModule = core.createLazyLoader("node:module");
 const { report } = core.loadExtScript(
   "ext:deno_node/internal/process/report.ts",
 );
@@ -77,6 +77,12 @@ const {
   versions,
 } = core.loadExtScript("ext:deno_node/_process/process.ts");
 const { _exiting } = core.loadExtScript("ext:deno_node/_process/exiting.ts");
+function getModule() {
+  return lazyModule().default;
+}
+function getBuiltinModule(id: string) {
+  return lazyModule().getBuiltinModule(id);
+}
 export {
   _nextTick as nextTick,
   chdir,
@@ -567,7 +573,7 @@ export function dlopen(module, filename, _flags) {
   // NOTE(bartlomieju): _flags is currently ignored, but we don't warn for it
   // as it makes DX bad, even though it might not be needed:
   // https://github.com/denoland/deno/issues/20075
-  Module._extensions[".node"](module, filename);
+  getModule()._extensions[".node"](module, filename);
   return module;
 }
 

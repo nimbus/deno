@@ -312,6 +312,78 @@ fn init_extension_js_in_realm_replays_snapshot_seeded_extension_globals() {
     .unwrap();
 }
 
+#[test]
+fn init_extension_js_in_realm_replays_snapshot_seeded_file_backed_extension_modules()
+ {
+  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().unwrap();
+
+  deno_core::extension!(
+    realm_replay_snapshot_fs_ext,
+    esm_entry_point = "ext:realm_replay_snapshot_fs_ext/entry.js",
+    esm = ["ext:realm_replay_snapshot_fs_ext/entry.js" =
+      "runtime/tests/testdata/realm_replay_snapshot_fs_entry.js"],
+  );
+
+  let snapshot = {
+    let runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
+      extensions: vec![realm_replay_snapshot_fs_ext::init()],
+      ..Default::default()
+    });
+    Box::leak(runtime.snapshot())
+  };
+
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    startup_snapshot: Some(snapshot),
+    extensions: vec![realm_replay_snapshot_fs_ext::init()],
+    extension_replay_esm_sources: &[(
+      "ext:realm_replay_snapshot_fs_ext/entry.js",
+      include_str!("testdata/realm_replay_snapshot_fs_entry.js"),
+    )],
+    extension_replay_esm_entry_points: &[
+      "ext:realm_replay_snapshot_fs_ext/entry.js",
+    ],
+    ..Default::default()
+  });
+  runtime
+    .execute_script(
+      "main-snapshot-fs-extension-check.js",
+      r#"
+        if (globalThis.realmReplaySnapshotFsModule !== 1) {
+          throw new Error(`main file-backed snapshot module count: ${globalThis.realmReplaySnapshotFsModule}`);
+        }
+      "#,
+    )
+    .unwrap();
+
+  let fresh_realm = runtime.create_realm(Default::default()).unwrap();
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh-snapshot-fs-before-extension-replay.js",
+      r#"
+        if ("realmReplaySnapshotFsModule" in globalThis) {
+          throw new Error("fresh realm inherited file-backed snapshotted extension module global");
+        }
+      "#,
+    )
+    .unwrap();
+
+  runtime
+    .init_extension_js_in_realm(&fresh_realm)
+    .expect("fresh realm file-backed extension ESM should replay");
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh-snapshot-fs-after-extension-replay.js",
+      r#"
+        if (globalThis.realmReplaySnapshotFsModule !== 1) {
+          throw new Error(`fresh file-backed snapshot module count: ${globalThis.realmReplaySnapshotFsModule}`);
+        }
+      "#,
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn create_realm_loads_modules_in_realm_module_map() {
   #[op2]
