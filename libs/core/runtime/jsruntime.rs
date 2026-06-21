@@ -63,7 +63,9 @@ use crate::error::ExtensionLazyInitOrderMismatchError;
 use crate::error::JsError;
 use crate::error::exception_to_err_result;
 use crate::extension_set;
+use crate::extension_set::LoadedSource;
 use crate::extension_set::LoadedSources;
+use crate::extensions::ExtensionSourceType;
 use crate::extensions::GlobalObjectMiddlewareFn;
 use crate::extensions::GlobalTemplateMiddlewareFn;
 use crate::inspector::JsRuntimeInspector;
@@ -492,6 +494,12 @@ pub struct JsRuntimeState {
     RefCell<Vec<GlobalTemplateMiddlewareFn>>,
   pub(crate) global_object_middlewares: RefCell<Vec<GlobalObjectMiddlewareFn>>,
   pub(crate) callsite_prototype: RefCell<Option<v8::Global<v8::Object>>>,
+  pub(crate) extension_replay_sources: LoadedSources,
+  pub(crate) extension_code_cache: Option<Rc<dyn ExtCodeCache>>,
+  pub(crate) residual_lazy_js_sources:
+    &'static [(&'static str, &'static str)],
+  pub(crate) residual_lazy_esm_sources:
+    &'static [(&'static str, &'static str)],
   waker: Arc<AtomicWaker>,
   /// Foreground V8 tasks queued by the custom platform. Shared with the
   /// global isolate registry so background threads can push tasks, while
@@ -846,11 +854,25 @@ impl JsRuntime {
       },
     )?;
 
+    let extension_replay_sources = if maybe_startup_snapshot.is_some() {
+      extension_set::into_realm_sources_and_source_maps(
+        options.extension_transpiler.as_deref(),
+        &extensions,
+        |_| {},
+      )?
+      .into_cloneable()
+    } else {
+      sources.cheap_copy()
+    };
+
     for loaded_source in sources
       .js
       .iter()
       .chain(sources.esm.iter())
       .chain(sources.lazy_esm.iter())
+      .chain(extension_replay_sources.js.iter())
+      .chain(extension_replay_sources.esm.iter())
+      .chain(extension_replay_sources.lazy_esm.iter())
       .filter(|s| s.maybe_source_map.is_some())
     {
       source_mapper.add_ext_source_map(
@@ -897,6 +919,10 @@ impl JsRuntime {
       global_template_middlewares: Default::default(),
       global_object_middlewares: Default::default(),
       callsite_prototype: None.into(),
+      extension_replay_sources,
+      extension_code_cache: options.extension_code_cache.clone(),
+      residual_lazy_js_sources: options.residual_lazy_js_sources,
+      residual_lazy_esm_sources: options.residual_lazy_esm_sources,
       lazy_extensions,
       tla_stall_retries: Cell::new(0),
     });
@@ -1400,7 +1426,8 @@ impl JsRuntime {
   /// This initializes `Deno.core`, the core builtins, the virtual ops module,
   /// and op bindings for the new realm. Extension JavaScript is intentionally
   /// not replayed here yet; embedders that need extension-specific globals must
-  /// initialize them explicitly before using the realm for user code.
+  /// call [`Self::init_extension_js_in_realm`] before using the realm for user
+  /// code.
   pub fn create_realm(
     &mut self,
     options: CreateRealmOptions,
@@ -1524,6 +1551,64 @@ impl JsRuntime {
     self.store_js_callbacks(&realm, false);
 
     Ok(realm)
+  }
+
+  /// Replays eager extension JavaScript and registers lazy extension sources in
+  /// an already-created realm.
+  ///
+  /// This uses the runtime's normalized extension source set so fresh realms
+  /// can be initialized with the same extension globals as the main realm. When
+  /// the main realm was seeded from a startup snapshot, the replay set is built
+  /// from runtime-loadable extension files rather than from the startup list,
+  /// because snapshotted eager sources are intentionally skipped during main
+  /// realm startup.
+  ///
+  /// Callers own idempotency for each realm. Extension code is allowed to have
+  /// side effects, so calling this more than once for the same realm may replay
+  /// those side effects.
+  pub fn init_extension_js_in_realm(
+    &mut self,
+    realm: &JsRealm,
+  ) -> Result<(), CoreError> {
+    let (
+      mut loaded_sources,
+      extension_code_cache,
+      residual_lazy_js_sources,
+      residual_lazy_esm_sources,
+    ) = {
+      let state = &self.inner.state;
+      (
+        state.extension_replay_sources.clone_for_replay(),
+        state.extension_code_cache.clone(),
+        state.residual_lazy_js_sources,
+        state.residual_lazy_esm_sources,
+      )
+    };
+
+    for &(specifier, code) in residual_lazy_js_sources {
+      loaded_sources.lazy_js.push(LoadedSource {
+        source_type: ExtensionSourceType::LazyJs,
+        specifier: ModuleName::from_static(specifier),
+        code: ModuleCodeString::from_static(code),
+        maybe_source_map: None,
+      });
+    }
+    for &(specifier, code) in residual_lazy_esm_sources {
+      loaded_sources.lazy_esm.push(LoadedSource {
+        source_type: ExtensionSourceType::LazyEsm,
+        specifier: ModuleName::from_static(specifier),
+        code: ModuleCodeString::from_static(code),
+        maybe_source_map: None,
+      });
+    }
+
+    let module_map = realm.0.module_map();
+    self.init_extension_js(
+      realm,
+      &module_map,
+      loaded_sources,
+      extension_code_cache,
+    )
   }
 
   #[inline]

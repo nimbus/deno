@@ -2,6 +2,7 @@
 
 use std::future::poll_fn;
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
@@ -18,6 +19,8 @@ use crate::error::ExtensionLazyInitOrderMismatchError;
 use crate::modules::StaticModuleLoader;
 use crate::op2;
 use crate::runtime::CreateRealmOptions;
+
+static EXTENSION_JS_REPLAY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_set_format_exception_callback_realms() {
@@ -150,6 +153,163 @@ fn create_realm_produces_fresh_global_context_with_core_ops() {
 
   assert_eq!(fresh_realm.num_pending_ops(), 0);
   assert_eq!(fresh_realm.num_unrefed_ops(), 0);
+}
+
+#[test]
+fn init_extension_js_in_realm_replays_extension_globals() {
+  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().unwrap();
+
+  deno_core::extension!(
+    realm_replay_ext,
+    esm_entry_point = "ext:realm_replay_ext/entry.js",
+    esm = ["ext:realm_replay_ext/entry.js" = {
+      source = "globalThis.realmReplayModule = (globalThis.realmReplayModule ?? 0) + 1; export {};"
+    }],
+    js = ["ext:realm_replay_ext/script.js" = {
+      source = "globalThis.realmReplayScript = (globalThis.realmReplayScript ?? 0) + 1;"
+    }],
+  );
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![realm_replay_ext::init()],
+    ..Default::default()
+  });
+
+  runtime
+    .execute_script(
+      "main-extension-check.js",
+      r#"
+        if (globalThis.realmReplayScript !== 1) {
+          throw new Error(`main script count: ${globalThis.realmReplayScript}`);
+        }
+        if (globalThis.realmReplayModule !== 1) {
+          throw new Error(`main module count: ${globalThis.realmReplayModule}`);
+        }
+      "#,
+    )
+    .unwrap();
+
+  let fresh_realm = runtime.create_realm(Default::default()).unwrap();
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh-before-extension-replay.js",
+      r#"
+        if ("realmReplayScript" in globalThis) {
+          throw new Error("fresh realm inherited extension script global");
+        }
+        if ("realmReplayModule" in globalThis) {
+          throw new Error("fresh realm inherited extension module global");
+        }
+      "#,
+    )
+    .unwrap();
+
+  runtime
+    .init_extension_js_in_realm(&fresh_realm)
+    .expect("fresh realm extension JS should replay");
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh-after-extension-replay.js",
+      r#"
+        if (globalThis.realmReplayScript !== 1) {
+          throw new Error(`fresh script count: ${globalThis.realmReplayScript}`);
+        }
+        if (globalThis.realmReplayModule !== 1) {
+          throw new Error(`fresh module count: ${globalThis.realmReplayModule}`);
+        }
+        globalThis.realmReplayScript = 9;
+      "#,
+    )
+    .unwrap();
+
+  runtime
+    .execute_script(
+      "main-extension-isolation-check.js",
+      r#"
+        if (globalThis.realmReplayScript !== 1) {
+          throw new Error(`fresh realm polluted main script count: ${globalThis.realmReplayScript}`);
+        }
+      "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn init_extension_js_in_realm_replays_snapshot_seeded_extension_globals() {
+  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().unwrap();
+
+  deno_core::extension!(
+    realm_replay_snapshot_ext,
+    esm_entry_point = "ext:realm_replay_snapshot_ext/entry.js",
+    esm = ["ext:realm_replay_snapshot_ext/entry.js" = {
+      source = "globalThis.realmReplaySnapshotModule = (globalThis.realmReplaySnapshotModule ?? 0) + 1; export {};"
+    }],
+    js = ["ext:realm_replay_snapshot_ext/script.js" = {
+      source = "globalThis.realmReplaySnapshotScript = (globalThis.realmReplaySnapshotScript ?? 0) + 1;"
+    }],
+  );
+
+  let snapshot = {
+    let runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
+      extensions: vec![realm_replay_snapshot_ext::init()],
+      ..Default::default()
+    });
+    Box::leak(runtime.snapshot())
+  };
+
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    startup_snapshot: Some(snapshot),
+    extensions: vec![realm_replay_snapshot_ext::init()],
+    ..Default::default()
+  });
+  runtime
+    .execute_script(
+      "main-snapshot-extension-check.js",
+      r#"
+        if (globalThis.realmReplaySnapshotScript !== 1) {
+          throw new Error(`main snapshot script count: ${globalThis.realmReplaySnapshotScript}`);
+        }
+        if (globalThis.realmReplaySnapshotModule !== 1) {
+          throw new Error(`main snapshot module count: ${globalThis.realmReplaySnapshotModule}`);
+        }
+      "#,
+    )
+    .unwrap();
+
+  let fresh_realm = runtime.create_realm(Default::default()).unwrap();
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh-snapshot-before-extension-replay.js",
+      r#"
+        if ("realmReplaySnapshotScript" in globalThis) {
+          throw new Error("fresh realm inherited snapshotted extension script global");
+        }
+        if ("realmReplaySnapshotModule" in globalThis) {
+          throw new Error("fresh realm inherited snapshotted extension module global");
+        }
+      "#,
+    )
+    .unwrap();
+
+  runtime
+    .init_extension_js_in_realm(&fresh_realm)
+    .expect("fresh realm extension JS should replay after snapshot startup");
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh-snapshot-after-extension-replay.js",
+      r#"
+        if (globalThis.realmReplaySnapshotScript !== 1) {
+          throw new Error(`fresh snapshot script count: ${globalThis.realmReplaySnapshotScript}`);
+        }
+        if (globalThis.realmReplaySnapshotModule !== 1) {
+          throw new Error(`fresh snapshot module count: ${globalThis.realmReplaySnapshotModule}`);
+        }
+      "#,
+    )
+    .unwrap();
 }
 
 #[tokio::test]
