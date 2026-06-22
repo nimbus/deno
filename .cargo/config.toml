@@ -47,4 +47,4 @@ rustflags = [
 ]
 
 [env]
-RUSTY_V8_VERSION = "149.4.0-nimbus.1"
+RUSTY_V8_VERSION = "149.4.0-nimbus.10"

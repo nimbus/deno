@@ -10840,7 +10840,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "149.4.0"
-source = "git+https://github.com/nimbus/rusty_v8?tag=v149.4.0-nimbus.8#3aefa0a2730db325cb66d387fad0fdcc01182594"
+source = "git+https://github.com/nimbus/rusty_v8?tag=v149.4.0-nimbus.10#f9457373150679d9db9eb577dcd3a687a3ec25ef"
 dependencies = [
  "bindgen 0.72.1",
  "bitflags 2.9.3",

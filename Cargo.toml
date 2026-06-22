@@ -609,4 +609,4 @@ opt-level = 3
 opt-level = 3
 
 [patch.crates-io]
-v8 = { git = "https://github.com/nimbus/rusty_v8", tag = "v149.4.0-nimbus.8" }
+v8 = { git = "https://github.com/nimbus/rusty_v8", tag = "v149.4.0-nimbus.10" }
