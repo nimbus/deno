@@ -281,6 +281,51 @@ function openPromise(
   });
 }
 
+function createWriteFileOpenNotFoundError(path: string | Buffer | URL) {
+  const pathString = getValidatedPathToString(path);
+  const error = new Error(
+    `ENOENT: no such file or directory, open '${pathString}'`,
+  ) as NodeJS.ErrnoException;
+  error.errno = -2;
+  error.code = "ENOENT";
+  error.syscall = "open";
+  error.path = pathString;
+  return error;
+}
+
+async function normalizeWriteFileOpenError(
+  path: string | Buffer | URL,
+  error: unknown,
+) {
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error;
+  }
+  let parentPath: string;
+  try {
+    parentPath = lazyPath().dirname(getValidatedPathToString(path));
+  } catch {
+    return error;
+  }
+  try {
+    await statPromise(parentPath);
+  } catch (statError) {
+    if (
+      statError &&
+      typeof statError === "object" &&
+      "code" in statError &&
+      (statError.code === "ENOENT" || statError.code === "ENOTDIR")
+    ) {
+      return createWriteFileOpenNotFoundError(path);
+    }
+  }
+  return error;
+}
+
 type OpendirOptions = {
   encoding?: string;
   bufferSize?: number;
@@ -364,11 +409,19 @@ function writeFilePromise(
     // throw Deno's `AbortError` instead). Inside the async IIFE so the throw
     // becomes a promise rejection, not a sync throw.
     if (opts.signal?.aborted) opts.signal.throwIfAborted();
-    const fh = await openPromise(
-      pathOrRid as string | Buffer | URL,
-      flag,
-      mode,
-    );
+    let fh;
+    try {
+      fh = await openPromise(
+        pathOrRid as string | Buffer | URL,
+        flag,
+        mode,
+      );
+    } catch (error) {
+      throw await normalizeWriteFileOpenError(
+        pathOrRid as string | Buffer | URL,
+        error,
+      );
+    }
     return handleFdClose(fh.writeFile(data, opts), () => fh.close());
   })();
 }
