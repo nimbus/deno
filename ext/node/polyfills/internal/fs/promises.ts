@@ -314,11 +314,15 @@ async function normalizeWriteFileOpenError(
   try {
     await statPromise(parentPath);
   } catch (statError) {
+    const statMessage = statError instanceof Error
+      ? statError.message
+      : String(statError);
     if (
-      statError &&
-      typeof statError === "object" &&
-      "code" in statError &&
-      (statError.code === "ENOENT" || statError.code === "ENOTDIR")
+      (statError &&
+        typeof statError === "object" &&
+        "code" in statError &&
+        (statError.code === "ENOENT" || statError.code === "ENOTDIR")) ||
+      statMessage === "invalid_argument"
     ) {
       return createWriteFileOpenNotFoundError(path);
     }
