@@ -27,7 +27,7 @@ const _: () = assert!(
     == std::mem::size_of::<usize>()
 );
 
-pub(crate) fn isolate_ptr_to_key(ptr: v8::UnsafeRawIsolatePtr) -> usize {
+pub fn isolate_ptr_to_key(ptr: v8::UnsafeRawIsolatePtr) -> usize {
   // SAFETY: UnsafeRawIsolatePtr is #[repr(transparent)] over *mut RealIsolate,
   // which is pointer-sized. The compile-time assert above guarantees this.
   unsafe { std::mem::transmute::<v8::UnsafeRawIsolatePtr, usize>(ptr) }
@@ -74,6 +74,28 @@ pub fn register_isolate(
 pub fn unregister_isolate(isolate_ptr: usize) {
   let mut map = ISOLATE_ENTRIES.lock().unwrap();
   map.remove(&isolate_ptr);
+}
+
+/// Drain and run every foreground task currently queued for `isolate_ptr`,
+/// returning `true` if at least one task ran.
+///
+/// This does not perform a microtask checkpoint; callers that hold a
+/// `HandleScope` are responsible for doing that at the right embedding point.
+/// The isolate-registry lock is released before tasks run, so a task that
+/// reposts foreground work cannot deadlock on the registry.
+pub fn run_foreground_tasks(isolate_ptr: usize) -> bool {
+  let tasks = {
+    let map = ISOLATE_ENTRIES.lock().unwrap();
+    match map.get(&isolate_ptr) {
+      Some(entry) => std::mem::take(&mut *entry.tasks.lock().unwrap()),
+      None => return false,
+    }
+  };
+  let had_tasks = !tasks.is_empty();
+  for task in tasks {
+    task.run();
+  }
+  had_tasks
 }
 
 /// Queue an immediate foreground task and wake the event loop.
@@ -233,14 +255,30 @@ pub fn create_isolate(
   maybe_create_params: Option<v8::CreateParams>,
   maybe_startup_snapshot: Option<V8Snapshot>,
   external_refs: Cow<'static, [v8::ExternalReference]>,
-) -> v8::OwnedIsolate {
+  use_locker: bool,
+) -> super::managed_isolate::ManagedIsolate {
+  use super::managed_isolate::LockerIsolate;
+  use super::managed_isolate::ManagedIsolate;
+
   let mut params = maybe_create_params.unwrap_or_default();
-  let mut isolate = if will_snapshot {
-    snapshot::create_snapshot_creator(
+
+  assert!(
+    !(will_snapshot && use_locker),
+    "use_locker is not supported with snapshot creation"
+  );
+
+  let mut isolate = if use_locker {
+    params = params.external_references(external_refs);
+    if let Some(snapshot) = maybe_startup_snapshot {
+      params = params.snapshot_blob(v8::StartupData::from(snapshot.0));
+    }
+    ManagedIsolate::Lockable(LockerIsolate::new(params))
+  } else if will_snapshot {
+    ManagedIsolate::Owned(snapshot::create_snapshot_creator(
       external_refs,
       maybe_startup_snapshot,
       params,
-    )
+    ))
   } else {
     params = params.external_references(external_refs);
     let has_snapshot = maybe_startup_snapshot.is_some();
@@ -253,17 +291,19 @@ pub fn create_isolate(
     // On Windows, the snapshot deserialization code appears to be crashing and we are not
     // certain of the reason. We take a mutex the first time an isolate with a snapshot to
     // prevent this. https://github.com/denoland/deno/issues/15590
-    if cfg!(windows)
-      && has_snapshot
-      && FIRST_SNAPSHOT_INIT.load(Ordering::SeqCst)
-    {
-      let _g = SNAPSHOW_INIT_MUT.lock().unwrap();
-      let res = v8::Isolate::new(params);
-      FIRST_SNAPSHOT_INIT.store(true, Ordering::SeqCst);
-      res
-    } else {
-      v8::Isolate::new(params)
-    }
+    ManagedIsolate::Owned(
+      if cfg!(windows)
+        && has_snapshot
+        && FIRST_SNAPSHOT_INIT.load(Ordering::SeqCst)
+      {
+        let _g = SNAPSHOW_INIT_MUT.lock().unwrap();
+        let res = v8::Isolate::new(params);
+        FIRST_SNAPSHOT_INIT.store(true, Ordering::SeqCst);
+        res
+      } else {
+        v8::Isolate::new(params)
+      },
+    )
   };
 
   isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);

@@ -5,6 +5,7 @@ pub(crate) mod exception_state;
 pub mod host_defined_options;
 mod jsrealm;
 mod jsruntime;
+pub(crate) mod managed_isolate;
 pub mod op_driver;
 #[doc(hidden)]
 pub mod ops;
@@ -22,7 +23,7 @@ pub const V8_WRAPPER_OBJECT_INDEX: i32 = 1;
 
 pub use jsrealm::CONTEXT_STATE_SLOT_INDEX;
 pub use jsrealm::ContextState;
-pub(crate) use jsrealm::JsRealm;
+pub use jsrealm::JsRealm;
 pub use jsrealm::MODULE_MAP_SLOT_INDEX;
 pub(crate) use jsrealm::OpDriverImpl;
 pub(crate) use jsrealm::UnrefedOps;
@@ -40,6 +41,9 @@ pub(crate) use jsruntime::NO_OF_BUILTIN_MODULES;
 pub use jsruntime::PollEventLoopOptions;
 pub use jsruntime::RuntimeOptions;
 pub use jsruntime::SharedArrayBufferStore;
+pub use jsruntime::shared_ro_heap_serialize_lock;
+pub use setup::isolate_ptr_to_key;
+pub use setup::run_foreground_tasks;
 pub use snapshot::CreateSnapshotOptions;
 pub use snapshot::CreateSnapshotOutput;
 pub(crate) use snapshot::SnapshotDataId;

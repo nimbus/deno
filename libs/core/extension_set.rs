@@ -248,7 +248,263 @@ pub struct LoadedSources {
   pub esm_entry_points: Vec<FastString>,
 }
 
+impl LoadedSource {
+  fn cheap_copy(&mut self) -> Self {
+    let (specifier_copy, specifier) =
+      std::mem::take(&mut self.specifier).into_cheap_copy();
+    self.specifier = specifier;
+    let (code_copy, code) = std::mem::take(&mut self.code).into_cheap_copy();
+    self.code = code;
+
+    Self {
+      source_type: self.source_type,
+      specifier: specifier_copy,
+      code: code_copy,
+      maybe_source_map: self.maybe_source_map.clone(),
+    }
+  }
+
+  fn into_cloneable(mut self) -> Self {
+    let (specifier, _) = self.specifier.into_cheap_copy();
+    let (code, _) = self.code.into_cheap_copy();
+    self.specifier = specifier;
+    self.code = code;
+    self
+  }
+
+  fn clone_for_replay(&self) -> Self {
+    Self {
+      source_type: self.source_type,
+      specifier: self
+        .specifier
+        .try_clone()
+        .expect("extension replay specifier should be cloneable"),
+      code: self
+        .code
+        .try_clone()
+        .expect("extension replay code should be cloneable"),
+      maybe_source_map: self.maybe_source_map.clone(),
+    }
+  }
+}
+
+pub fn into_realm_sources_and_source_maps(
+  transpiler: Option<&ExtensionTranspiler>,
+  extensions: &[Extension],
+  mut load_callback: impl FnMut(&ExtensionFileSource),
+) -> Result<LoadedSources, CoreError> {
+  let mut sources = LoadedSources::default();
+
+  for extension in extensions {
+    for file in &*extension.lazy_loaded_esm_files {
+      if !file.is_runtime_loadable() {
+        continue;
+      }
+      let (code, maybe_source_map) =
+        load(transpiler, file, &mut load_callback)?;
+      sources.lazy_esm.push(LoadedSource {
+        source_type: ExtensionSourceType::LazyEsm,
+        specifier: ModuleName::from_static(file.specifier),
+        code,
+        maybe_source_map,
+      });
+    }
+
+    for file in &*extension.lazy_loaded_js_files {
+      if !file.is_runtime_loadable() {
+        continue;
+      }
+      let (code, maybe_source_map) =
+        load(transpiler, file, &mut load_callback)?;
+      sources.lazy_js.push(LoadedSource {
+        source_type: ExtensionSourceType::LazyJs,
+        specifier: ModuleName::from_static(file.specifier),
+        code,
+        maybe_source_map,
+      });
+    }
+
+    for (module_spec, backing_spec) in &*extension.synthetic_esm_modules {
+      sources.synthetic_esm.push((
+        ModuleName::from_static(module_spec),
+        ModuleName::from_static(backing_spec),
+      ));
+    }
+
+    let mut loaded_esm_entry_point = false;
+    for file in &*extension.js_files {
+      if !file.is_runtime_loadable() {
+        continue;
+      }
+      let (code, maybe_source_map) =
+        load(transpiler, file, &mut load_callback)?;
+      sources.js.push(LoadedSource {
+        source_type: ExtensionSourceType::Js,
+        specifier: ModuleName::from_static(file.specifier),
+        code,
+        maybe_source_map,
+      });
+    }
+    for file in &*extension.esm_files {
+      if !file.is_runtime_loadable() {
+        continue;
+      }
+      if extension.esm_entry_point == Some(file.specifier) {
+        loaded_esm_entry_point = true;
+      }
+      let (code, maybe_source_map) =
+        load(transpiler, file, &mut load_callback)?;
+      sources.esm.push(LoadedSource {
+        source_type: ExtensionSourceType::Esm,
+        specifier: ModuleName::from_static(file.specifier),
+        code,
+        maybe_source_map,
+      });
+    }
+    if let Some(esm_entry_point) = extension.esm_entry_point
+      && loaded_esm_entry_point
+    {
+      sources
+        .esm_entry_points
+        .push(FastString::from_static(esm_entry_point));
+    }
+  }
+
+  Ok(sources)
+}
+
 impl LoadedSources {
+  pub fn cheap_copy(&mut self) -> Self {
+    let js = self.js.iter_mut().map(LoadedSource::cheap_copy).collect();
+    let esm = self.esm.iter_mut().map(LoadedSource::cheap_copy).collect();
+    let lazy_esm = self
+      .lazy_esm
+      .iter_mut()
+      .map(LoadedSource::cheap_copy)
+      .collect();
+    let lazy_js = self
+      .lazy_js
+      .iter_mut()
+      .map(LoadedSource::cheap_copy)
+      .collect();
+    let synthetic_esm = self
+      .synthetic_esm
+      .iter_mut()
+      .map(|(module_spec, backing_spec)| {
+        let (module_spec_copy, module_spec_original) =
+          std::mem::take(module_spec).into_cheap_copy();
+        *module_spec = module_spec_original;
+        let (backing_spec_copy, backing_spec_original) =
+          std::mem::take(backing_spec).into_cheap_copy();
+        *backing_spec = backing_spec_original;
+        (module_spec_copy, backing_spec_copy)
+      })
+      .collect();
+    let esm_entry_points = self
+      .esm_entry_points
+      .iter_mut()
+      .map(|specifier| {
+        let (specifier_copy, specifier_original) =
+          std::mem::take(specifier).into_cheap_copy();
+        *specifier = specifier_original;
+        specifier_copy
+      })
+      .collect();
+
+    Self {
+      js,
+      esm,
+      lazy_esm,
+      lazy_js,
+      synthetic_esm,
+      esm_entry_points,
+    }
+  }
+
+  pub fn into_cloneable(self) -> Self {
+    Self {
+      js: self
+        .js
+        .into_iter()
+        .map(LoadedSource::into_cloneable)
+        .collect(),
+      esm: self
+        .esm
+        .into_iter()
+        .map(LoadedSource::into_cloneable)
+        .collect(),
+      lazy_esm: self
+        .lazy_esm
+        .into_iter()
+        .map(LoadedSource::into_cloneable)
+        .collect(),
+      lazy_js: self
+        .lazy_js
+        .into_iter()
+        .map(LoadedSource::into_cloneable)
+        .collect(),
+      synthetic_esm: self
+        .synthetic_esm
+        .into_iter()
+        .map(|(module_spec, backing_spec)| {
+          (
+            module_spec.into_cheap_copy().0,
+            backing_spec.into_cheap_copy().0,
+          )
+        })
+        .collect(),
+      esm_entry_points: self
+        .esm_entry_points
+        .into_iter()
+        .map(|specifier| specifier.into_cheap_copy().0)
+        .collect(),
+    }
+  }
+
+  pub fn clone_for_replay(&self) -> Self {
+    Self {
+      js: self.js.iter().map(LoadedSource::clone_for_replay).collect(),
+      esm: self
+        .esm
+        .iter()
+        .map(LoadedSource::clone_for_replay)
+        .collect(),
+      lazy_esm: self
+        .lazy_esm
+        .iter()
+        .map(LoadedSource::clone_for_replay)
+        .collect(),
+      lazy_js: self
+        .lazy_js
+        .iter()
+        .map(LoadedSource::clone_for_replay)
+        .collect(),
+      synthetic_esm: self
+        .synthetic_esm
+        .iter()
+        .map(|(module_spec, backing_spec)| {
+          (
+            module_spec
+              .try_clone()
+              .expect("extension replay synthetic module should be cloneable"),
+            backing_spec
+              .try_clone()
+              .expect("extension replay synthetic backing should be cloneable"),
+          )
+        })
+        .collect(),
+      esm_entry_points: self
+        .esm_entry_points
+        .iter()
+        .map(|specifier| {
+          specifier
+            .try_clone()
+            .expect("extension replay entry point should be cloneable")
+        })
+        .collect(),
+    }
+  }
+
   pub fn len(&self) -> usize {
     self.js.len() + self.esm.len() + self.lazy_esm.len() + self.lazy_js.len()
   }

@@ -99,7 +99,9 @@ use crate::error::ExtensionLazyInitOrderMismatchError;
 use crate::error::JsError;
 use crate::error::exception_to_err_result;
 use crate::extension_set;
+use crate::extension_set::LoadedSource;
 use crate::extension_set::LoadedSources;
+use crate::extensions::ExtensionSourceType;
 use crate::extensions::GlobalObjectMiddlewareFn;
 use crate::extensions::GlobalTemplateMiddlewareFn;
 use crate::inspector::JsRuntimeInspector;
@@ -199,7 +201,7 @@ impl<T> DerefMut for ManuallyDropRc<T> {
   }
 }
 
-/// This struct contains the [`JsRuntimeState`] and [`v8::OwnedIsolate`] that are required
+/// This struct contains the [`JsRuntimeState`] and V8 isolate that are required
 /// to do an orderly shutdown of V8. We keep these in a separate struct to allow us to control
 /// the destruction more closely, as snapshots require the isolate to be destroyed by the
 /// snapshot process, not the destructor.
@@ -219,7 +221,7 @@ pub(crate) struct InnerIsolateState {
   addl_refs_count: usize,
   main_realm: ManuallyDrop<JsRealm>,
   pub(crate) state: ManuallyDropRc<JsRuntimeState>,
-  v8_isolate: ManuallyDrop<v8::OwnedIsolate>,
+  v8_isolate: ManuallyDrop<super::managed_isolate::ManagedIsolate>,
 }
 
 impl InnerIsolateState {
@@ -247,6 +249,8 @@ impl InnerIsolateState {
     let inspector = self.state.inspector.take();
 
     // Unregister isolate waker before dropping the isolate
+    self.v8_isolate.ensure_lock_held();
+
     let isolate_ptr = unsafe { self.v8_isolate.as_raw_isolate_ptr() };
     setup::unregister_isolate(setup::isolate_ptr_to_key(isolate_ptr));
 
@@ -261,7 +265,9 @@ impl InnerIsolateState {
     // op_state first, the Box<UvLoop> is freed and destroy() would
     // dereference a dangling pointer (use-after-free).
     unsafe {
-      ManuallyDrop::take(&mut self.main_realm).0.destroy();
+      ManuallyDrop::take(&mut self.main_realm)
+        .0
+        .destroy(&mut self.v8_isolate);
     }
 
     // Now safe to clear op_state (drops Box<UvLoop> etc.) since
@@ -285,13 +291,43 @@ impl InnerIsolateState {
     unsafe {
       ManuallyDrop::drop(&mut self.state.0);
 
-      let isolate = ManuallyDrop::take(&mut self.v8_isolate);
+      let managed = ManuallyDrop::take(&mut self.v8_isolate);
 
       std::mem::forget(self);
 
-      isolate
+      match managed {
+        super::managed_isolate::ManagedIsolate::Owned(owned) => owned,
+        _ => panic!(
+          "prepare_for_snapshot requires OwnedIsolate (use_locker must be false)"
+        ),
+      }
     }
   }
+}
+
+/// Process-global RE-ENTRANT lock serializing the isolate-lifecycle operations
+/// that touch a single (shared) pointer-compression cage's shared READ-ONLY
+/// heap: cold isolate CREATION (the restore deserializers in `Isolate::Init`),
+/// snapshot BUILD (`SnapshotCreator`), and isolate DISPOSAL (the shared
+/// read-only space teardown when the last isolate leaves the `IsolateGroup`).
+/// These three are the only unguarded writers to the group-shared RO heap on a
+/// single cage; left concurrent they abort (`shared_heap_object_cache()->at()`
+/// out-of-bounds / `vector.h` OOB). It is RE-ENTRANT so an embedder may hold it
+/// across an operation that internally disposes an isolate (e.g. snapshot
+/// creation, or a failed construction dropping a partial runtime) while still
+/// excluding OTHER threads. A multi-cage build gives each isolate a PRIVATE RO
+/// heap and can skip this entirely.
+static SHARED_RO_HEAP_SERIALIZE_LOCK: std::sync::OnceLock<
+  parking_lot::ReentrantMutex<()>,
+> = std::sync::OnceLock::new();
+
+/// See [`SHARED_RO_HEAP_SERIALIZE_LOCK`]. Embedders that create/dispose isolates
+/// from multiple threads on a single shared cage must hold this across each
+/// such operation (creation, snapshot build, disposal).
+pub fn shared_ro_heap_serialize_lock()
+-> &'static parking_lot::ReentrantMutex<()> {
+  SHARED_RO_HEAP_SERIALIZE_LOCK
+    .get_or_init(|| parking_lot::ReentrantMutex::new(()))
 }
 
 impl Drop for InnerIsolateState {
@@ -311,6 +347,10 @@ impl Drop for InnerIsolateState {
           eprintln!("WARNING: v8::OwnedIsolate for snapshot was leaked");
         }
       } else {
+        // Isolate::Dispose -> IsolateGroup::RemoveIsolate frees the group-shared
+        // read-only space when this is the LAST isolate; serialize it against
+        // concurrent creates/builds reading that shared RO heap.
+        let _serialize = shared_ro_heap_serialize_lock().lock();
         ManuallyDrop::drop(&mut self.v8_isolate);
       }
     }
@@ -535,7 +575,16 @@ pub struct JsRuntimeState {
     RefCell<Option<EvalContextCodeCacheReadyCb>>,
   pub(crate) cppgc_template: RefCell<Option<v8::Global<v8::FunctionTemplate>>>,
   pub(crate) function_templates: Rc<RefCell<FunctionTemplateData>>,
+  pub(crate) global_template_middlewares:
+    RefCell<Vec<GlobalTemplateMiddlewareFn>>,
+  pub(crate) global_object_middlewares: RefCell<Vec<GlobalObjectMiddlewareFn>>,
   pub(crate) callsite_prototype: RefCell<Option<v8::Global<v8::Object>>>,
+  pub(crate) extension_replay_sources: LoadedSources,
+  pub(crate) extension_code_cache: Option<Rc<dyn ExtCodeCache>>,
+  pub(crate) residual_lazy_js_sources:
+    &'static [(&'static str, &'static str)],
+  pub(crate) residual_lazy_esm_sources:
+    &'static [(&'static str, &'static str)],
   waker: Arc<AtomicWaker>,
   /// Foreground V8 tasks queued by the custom platform. Shared with the
   /// global isolate registry so background threads can push tasks, while
@@ -595,11 +644,38 @@ pub struct RuntimeOptions {
   /// build time. See [`Self::residual_lazy_js_sources`].
   pub residual_lazy_esm_sources: &'static [(&'static str, &'static str)],
 
+  /// Source for eager extension JS files that were loaded from the filesystem
+  /// while building `startup_snapshot` and therefore are not reachable from
+  /// the final binary. `init_extension_js_in_realm()` uses these bytes when
+  /// replaying extension JavaScript into a fresh realm.
+  pub extension_replay_js_sources: &'static [(&'static str, &'static str)],
+
+  /// Source for eager extension ESM files that were loaded from the filesystem
+  /// while building `startup_snapshot`. These bytes are registered as
+  /// lazy-loadable ESM so dependency-only modules are available to
+  /// `op_lazy_load_esm` without being treated as fresh-realm entry points.
+  /// See [`Self::extension_replay_esm_entry_points`] for the subset that
+  /// should be loaded and evaluated as side modules.
+  pub extension_replay_esm_sources: &'static [(&'static str, &'static str)],
+
+  /// Eager extension ESM entry points from
+  /// [`Self::extension_replay_esm_sources`] that should be evaluated during
+  /// `init_extension_js_in_realm()`. Supplemental ESM sources are
+  /// dependency-only unless listed here; callers should list only the modules
+  /// whose top-level side effects are part of the fresh realm bootstrap
+  /// contract.
+  pub extension_replay_esm_entry_points: &'static [&'static str],
+
   /// Should op registration be skipped?
   pub skip_op_registration: bool,
 
   /// Isolate creation parameters.
   pub create_params: Option<v8::CreateParams>,
+
+  /// If true, create the isolate using `v8::UnenteredIsolate` + `v8::Locker`
+  /// instead of `v8::OwnedIsolate`. This enables multiple `JsRuntime`s on the
+  /// same thread via cooperative lock/unlock.
+  pub use_locker: bool,
 
   /// V8 platform instance to use. Used when Deno initializes V8
   /// (which it only does once), otherwise it's silently dropped.
@@ -709,7 +785,41 @@ macro_rules! scope {
   };
 }
 
+/// RAII guard for the V8 lock on locker-enabled runtimes.
+///
+/// Standard upstream-style runtimes treat this as a no-op wrapper.
+pub struct JsRuntimeV8LockGuard<'a> {
+  runtime: &'a mut JsRuntime,
+  release_on_drop: bool,
+}
+
+impl Deref for JsRuntimeV8LockGuard<'_> {
+  type Target = JsRuntime;
+
+  fn deref(&self) -> &Self::Target {
+    self.runtime
+  }
+}
+
+impl DerefMut for JsRuntimeV8LockGuard<'_> {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    self.runtime
+  }
+}
+
+impl Drop for JsRuntimeV8LockGuard<'_> {
+  fn drop(&mut self) {
+    if self.release_on_drop {
+      self.runtime.release_v8_lock();
+    }
+  }
+}
+
 impl JsRuntime {
+  fn ensure_v8_lock_held(&mut self) {
+    self.inner.v8_isolate.ensure_lock_held();
+  }
+
   /// Explicitly initalizes the V8 platform using the passed platform. This
   /// should only be called once per process. Further calls will be silently
   /// ignored.
@@ -849,11 +959,64 @@ impl JsRuntime {
     )?;
     startup_phase_end(_phase, "into_sources_and_source_maps");
 
+    let mut extension_replay_sources = if maybe_startup_snapshot.is_some() {
+      extension_set::into_realm_sources_and_source_maps(
+        options.extension_transpiler.as_deref(),
+        &extensions,
+        |_| {},
+      )?
+      .into_cloneable()
+    } else {
+      sources.cheap_copy()
+    };
+    for &(specifier, code) in options.extension_replay_js_sources {
+      extension_replay_sources.js.push(LoadedSource {
+        source_type: ExtensionSourceType::Js,
+        specifier: ModuleName::from_static(specifier),
+        code: ModuleCodeString::from_static(code),
+        maybe_source_map: None,
+      });
+    }
+    for &(specifier, code) in options.extension_replay_esm_sources {
+      extension_replay_sources.lazy_esm.push(LoadedSource {
+        source_type: ExtensionSourceType::LazyEsm,
+        specifier: ModuleName::from_static(specifier),
+        code: ModuleCodeString::from_static(code),
+        maybe_source_map: None,
+      });
+      if options
+        .extension_replay_esm_entry_points
+        .iter()
+        .any(|entry_point| *entry_point == specifier)
+      {
+        extension_replay_sources.esm.push(LoadedSource {
+          source_type: ExtensionSourceType::Esm,
+          specifier: ModuleName::from_static(specifier),
+          code: ModuleCodeString::from_static(code),
+          maybe_source_map: None,
+        });
+      }
+    }
+    for &specifier in options.extension_replay_esm_entry_points {
+      if !extension_replay_sources
+        .esm_entry_points
+        .iter()
+        .any(|entry_point| AsRef::<str>::as_ref(entry_point) == specifier)
+      {
+        extension_replay_sources
+          .esm_entry_points
+          .push(FastString::from_static(specifier));
+      }
+    }
+
     for loaded_source in sources
       .js
       .iter()
       .chain(sources.esm.iter())
       .chain(sources.lazy_esm.iter())
+      .chain(extension_replay_sources.js.iter())
+      .chain(extension_replay_sources.esm.iter())
+      .chain(extension_replay_sources.lazy_esm.iter())
       .filter(|s| s.maybe_source_map.is_some())
     {
       source_mapper.add_ext_source_map(
@@ -896,7 +1059,13 @@ impl JsRuntime {
       has_inspector: false.into(),
       cppgc_template: None.into(),
       function_templates: Default::default(),
+      global_template_middlewares: Default::default(),
+      global_object_middlewares: Default::default(),
       callsite_prototype: None.into(),
+      extension_replay_sources,
+      extension_code_cache: options.extension_code_cache.clone(),
+      residual_lazy_js_sources: options.residual_lazy_js_sources,
+      residual_lazy_esm_sources: options.residual_lazy_esm_sources,
       lazy_extensions,
       tla_stall_retries: Cell::new(0),
     });
@@ -925,6 +1094,10 @@ impl JsRuntime {
       global_object_middlewares,
       additional_references,
     ) = extension_set::get_middlewares_and_external_refs(&mut extensions);
+    *state_rc.global_template_middlewares.borrow_mut() =
+      global_template_middleware.clone();
+    *state_rc.global_object_middlewares.borrow_mut() =
+      global_object_middlewares.clone();
 
     // Capture the extension, op and source counts. `source_count` MUST mirror
     // the number of `v8::OneByteConst` external strings produced by
@@ -983,6 +1156,7 @@ impl JsRuntime {
       options.create_params.take(),
       maybe_startup_snapshot,
       external_references.into(),
+      options.use_locker,
     );
     startup_phase_end(_phase, "create_isolate (v8 snapshot deser)");
 
@@ -1035,7 +1209,7 @@ impl JsRuntime {
     let _phase = startup_phase_begin();
     let mut snapshotted_data = None;
     let main_context = {
-      v8::scope!(let scope, &mut isolate);
+      v8::scope!(let scope, isolate.as_mut());
 
       let cppgc_template = crate::cppgc::make_cppgc_template(scope);
       state_rc
@@ -1066,7 +1240,7 @@ impl JsRuntime {
     startup_phase_end(_phase, "create_context+load_data");
 
     let main_realm = {
-      v8::scope_with_context!(context_scope, &mut isolate, &main_context);
+      v8::scope_with_context!(context_scope, isolate.as_mut(), &main_context);
       let scope = context_scope;
       let context = v8::Local::new(scope, &main_context);
 
@@ -1251,7 +1425,6 @@ impl JsRuntime {
     // internal JS and then execute code provided by extensions...
     {
       let realm = JsRealm::clone(&js_runtime.inner.main_realm);
-      let context_global = realm.context();
       let module_map = realm.0.module_map();
 
       // TODO(bartlomieju): this is somewhat duplicated in `bindings::initialize_context`,
@@ -1265,8 +1438,7 @@ impl JsRuntime {
       // ) {
       if init_mode == InitMode::New {
         let _phase = startup_phase_begin();
-        js_runtime
-          .execute_virtual_ops_module(context_global, module_map.clone());
+        js_runtime.execute_virtual_ops_module(&realm, module_map.clone());
         startup_phase_end(_phase, "execute_virtual_ops_module");
       }
 
@@ -1426,19 +1598,328 @@ impl JsRuntime {
     JsRealm::clone(&self.inner.main_realm)
   }
 
+  /// Creates a fresh V8 context/realm inside the retained isolate.
+  ///
+  /// This initializes `Deno.core`, the core builtins, the virtual ops module,
+  /// and op bindings for the new realm. Extension JavaScript is intentionally
+  /// not replayed here yet; embedders that need extension-specific globals must
+  /// call [`Self::init_extension_js_in_realm`] before using the realm for user
+  /// code.
+  pub fn create_realm(
+    &mut self,
+    options: CreateRealmOptions,
+  ) -> Result<JsRealm, CoreError> {
+    self.ensure_v8_lock_held();
+
+    let global_template_middlewares = self
+      .inner
+      .state
+      .global_template_middlewares
+      .borrow()
+      .clone();
+    let global_object_middlewares =
+      self.inner.state.global_object_middlewares.borrow().clone();
+    let source_mapper = self.inner.state.source_mapper.clone();
+    let function_templates = self.inner.state.function_templates.clone();
+    let op_state = self.inner.state.op_state.clone();
+    let runtime_state = self.inner.state.clone();
+    let runtime_state_ptr = runtime_state.as_ref() as *const JsRuntimeState;
+    let isolate_ptr = unsafe { self.inner.v8_isolate.as_raw_isolate_ptr() };
+
+    let main_context_state = self.inner.main_realm.0.context_state.clone();
+    let op_driver = Rc::new(OpDriverImpl::default());
+    let op_ctxs = main_context_state
+      .op_ctxs
+      .iter()
+      .map(|ctx| {
+        ctx.clone_for_realm(
+          isolate_ptr,
+          op_driver.clone(),
+          op_state.clone(),
+          runtime_state_ptr,
+        )
+      })
+      .collect::<Vec<_>>()
+      .into_boxed_slice();
+    let op_method_decls = main_context_state.op_method_decls.clone();
+    let methods_ctx_offset = main_context_state.methods_ctx_offset;
+    let unrefed_ops = Default::default();
+    let context_state = Rc::new(ContextState::new(
+      op_driver,
+      isolate_ptr,
+      op_ctxs,
+      op_method_decls,
+      methods_ctx_offset,
+      op_state.borrow().external_ops_tracker.clone(),
+      unrefed_ops,
+    ));
+    let exception_state = context_state.exception_state.clone();
+    let loader = options
+      .module_loader
+      .unwrap_or_else(|| Rc::new(NoopModuleLoader));
+    let module_map = Rc::new(ModuleMap::new(
+      loader,
+      source_mapper,
+      exception_state,
+      false,
+    ));
+
+    let realm = {
+      let isolate = self.v8_isolate();
+      v8::scope!(let scope, isolate);
+      let context = create_context(
+        scope,
+        &global_template_middlewares,
+        &global_object_middlewares,
+        false,
+      );
+      let context_global = v8::Global::new(scope, context);
+      let scope = &mut v8::ContextScope::new(scope, context);
+
+      bindings::initialize_deno_core_namespace(scope, context, InitMode::New);
+      bindings::initialize_primordials_and_infra(scope)?;
+      bindings::initialize_deno_core_ops_bindings(
+        scope,
+        context,
+        &context_state.op_ctxs,
+        &context_state.op_method_decls,
+        methods_ctx_offset,
+        &mut function_templates.borrow_mut(),
+        false,
+      );
+
+      unsafe {
+        context.set_aligned_pointer_in_embedder_data(
+          super::jsrealm::CONTEXT_STATE_SLOT_INDEX,
+          Rc::into_raw(context_state.clone()) as *mut c_void,
+        );
+      }
+
+      if context_state.ext_import_meta_proto.borrow().is_none() {
+        let null = v8::null(scope);
+        let obj = v8::Object::with_prototype_and_properties(
+          scope,
+          null.into(),
+          &[],
+          &[],
+        );
+        *context_state.ext_import_meta_proto.borrow_mut() =
+          Some(v8::Global::new(scope, obj));
+      }
+
+      unsafe {
+        context.set_aligned_pointer_in_embedder_data(
+          super::jsrealm::MODULE_MAP_SLOT_INDEX,
+          Rc::into_raw(module_map.clone()) as *mut c_void,
+        );
+      }
+
+      JsRealm::new(JsRealmInner::new(
+        context_state,
+        context_global,
+        module_map.clone(),
+        function_templates,
+      ))
+    };
+
+    self.execute_virtual_ops_module(&realm, module_map.clone());
+    let mut files_loaded = Vec::new();
+    self.execute_builtin_sources(&realm, &module_map, &mut files_loaded)?;
+    self.store_js_callbacks(&realm, false);
+
+    Ok(realm)
+  }
+
+  /// Replays eager extension JavaScript and registers lazy extension sources in
+  /// an already-created realm.
+  ///
+  /// This uses the runtime's normalized extension source set so fresh realms
+  /// can be initialized with the same extension globals as the main realm. When
+  /// the main realm was seeded from a startup snapshot, the replay set is built
+  /// from runtime-loadable extension files rather than from the startup list,
+  /// because snapshotted eager sources are intentionally skipped during main
+  /// realm startup.
+  ///
+  /// Callers own idempotency for each realm. Extension code is allowed to have
+  /// side effects, so calling this more than once for the same realm may replay
+  /// those side effects.
+  pub fn init_extension_js_in_realm(
+    &mut self,
+    realm: &JsRealm,
+  ) -> Result<(), CoreError> {
+    let (
+      mut loaded_sources,
+      extension_code_cache,
+      residual_lazy_js_sources,
+      residual_lazy_esm_sources,
+    ) = {
+      let state = &self.inner.state;
+      (
+        state.extension_replay_sources.clone_for_replay(),
+        state.extension_code_cache.clone(),
+        state.residual_lazy_js_sources,
+        state.residual_lazy_esm_sources,
+      )
+    };
+
+    for &(specifier, code) in residual_lazy_js_sources {
+      loaded_sources.lazy_js.push(LoadedSource {
+        source_type: ExtensionSourceType::LazyJs,
+        specifier: ModuleName::from_static(specifier),
+        code: ModuleCodeString::from_static(code),
+        maybe_source_map: None,
+      });
+    }
+    for &(specifier, code) in residual_lazy_esm_sources {
+      loaded_sources.lazy_esm.push(LoadedSource {
+        source_type: ExtensionSourceType::LazyEsm,
+        specifier: ModuleName::from_static(specifier),
+        code: ModuleCodeString::from_static(code),
+        maybe_source_map: None,
+      });
+    }
+
+    let module_map = realm.0.module_map();
+    self.init_extension_js(
+      realm,
+      &module_map,
+      loaded_sources,
+      extension_code_cache,
+    )
+  }
+
   #[inline]
-  pub fn v8_isolate(&mut self) -> &mut v8::OwnedIsolate {
+  pub fn v8_isolate(&mut self) -> &mut v8::Isolate {
+    self.ensure_v8_lock_held();
     &mut self.inner.v8_isolate
   }
 
   #[inline]
   fn v8_isolate_ptr(&mut self) -> v8::UnsafeRawIsolatePtr {
+    self.ensure_v8_lock_held();
     unsafe { self.inner.v8_isolate.as_raw_isolate_ptr() }
   }
 
   #[inline]
   pub fn inspector(&self) -> Rc<JsRuntimeInspector> {
     self.inner.state.inspector()
+  }
+
+  #[inline]
+  pub fn is_v8_lock_held(&self) -> bool {
+    self.inner.v8_isolate.is_lock_held()
+  }
+
+  #[inline]
+  pub fn release_v8_lock(&mut self) -> bool {
+    self.inner.v8_isolate.release_lock()
+  }
+
+  #[inline]
+  pub fn acquire_v8_lock(&mut self) -> JsRuntimeV8LockGuard<'_> {
+    let release_on_drop = self.inner.v8_isolate.is_lockable();
+    self.ensure_v8_lock_held();
+    JsRuntimeV8LockGuard {
+      runtime: self,
+      release_on_drop,
+    }
+  }
+
+  /// Returns true if the runtime's event loop is fully quiescent and safe to
+  /// return to a warm pool without carrying forward request state.
+  ///
+  /// This checks all tracked `EventLoopPendingState` fields, including timers,
+  /// immediates, and unrefed ops that `EventLoopPendingState::is_pending()`
+  /// intentionally ignores for ordinary event-loop liveness checks.
+  pub fn is_warm_reuse_safe(&mut self) -> bool {
+    self.ensure_v8_lock_held();
+    let main_context = self.inner.main_realm.context().clone();
+    let isolate = self.v8_isolate();
+    v8::scope!(let scope, isolate);
+    let context = v8::Local::new(scope, &main_context);
+    let mut scope = v8::ContextScope::new(scope, context);
+    let state = EventLoopPendingState::new_from_scope(&mut scope);
+    state.is_warm_reuse_safe()
+  }
+
+  /// Reset per-request event-loop state for warm module reuse while preserving
+  /// evaluated modules and bootstrap globals.
+  ///
+  /// The caller must first ensure the runtime is fully quiescent by checking
+  /// [`JsRuntime::is_warm_reuse_safe`]. Calling this method with live pending
+  /// state is an error.
+  pub fn reset_request_state(&mut self) -> Result<(), CoreError> {
+    self.ensure_v8_lock_held();
+
+    {
+      let main_context = self.inner.main_realm.context().clone();
+      let isolate = self.v8_isolate();
+      v8::scope!(let scope, isolate);
+      let context = v8::Local::new(scope, &main_context);
+      let mut scope = v8::ContextScope::new(scope, context);
+      let pending = EventLoopPendingState::new_from_scope(&mut scope);
+      if !pending.is_warm_reuse_safe() {
+        return Err(
+          CoreErrorKind::JsBox(JsErrorBox::generic(
+            "reset_request_state requires the event loop to be fully quiescent",
+          ))
+          .into_box(),
+        );
+      }
+    }
+
+    {
+      let main_context = self.inner.main_realm.context().clone();
+      let foreground_tasks = self.inner.state.foreground_tasks.clone();
+      let isolate = self.v8_isolate();
+      v8::scope!(let scope, isolate);
+      let context = v8::Local::new(scope, &main_context);
+      let mut context_scope = v8::ContextScope::new(scope, context);
+
+      for _drain_pass in 0..8 {
+        let tasks = std::mem::take(&mut *foreground_tasks.lock().unwrap());
+        let had_tasks = !tasks.is_empty();
+        for task in tasks {
+          task.run();
+        }
+        v8::tc_scope!(tc_scope, &mut context_scope);
+        tc_scope.perform_microtask_checkpoint();
+        if !had_tasks {
+          break;
+        }
+      }
+    }
+
+    let context_state = &self.inner.main_realm.0.context_state;
+    let module_map = &self.inner.main_realm.0.module_map;
+
+    context_state.exception_state.clear_request_state();
+    module_map.clear_pending_state();
+
+    // These buffers are shared with V8 ArrayBuffers, so reset them in place
+    // only after verifying the runtime is fully quiescent.
+    unsafe {
+      let tick = context_state.tick_info.as_ptr() as *mut u8;
+      *tick = 0;
+      *tick.add(1) = 0;
+      let imm = context_state.immediate_info.as_ptr() as *mut u32;
+      *imm.add(IMM_IDX_COUNT) = 0;
+      *imm.add(IMM_IDX_REF_COUNT) = 0;
+      *imm.add(IMM_IDX_HAS_OUTSTANDING) = 0;
+      let timer = context_state.timer_info.as_ptr() as *mut i32;
+      *timer = 0;
+      let expiry = context_state.timer_expiry.as_ptr() as *mut f64;
+      *expiry = 0.0;
+    }
+
+    context_state.active_timers.borrow_mut().clear();
+    context_state.unrefed_ops.borrow_mut().clear();
+    context_state.external_ops_tracker.reset();
+    context_state.activity_traces.clear_traces();
+    *context_state.event_loop_phases.borrow_mut() = Default::default();
+    context_state.task_spawner_factory.clear();
+
+    Ok(())
   }
 
   #[inline]
@@ -1485,11 +1966,12 @@ impl JsRuntime {
   /// with the runtime.
   fn execute_virtual_ops_module(
     &mut self,
-    context_global: &v8::Global<v8::Context>,
+    realm: &JsRealm,
     module_map: Rc<ModuleMap>,
   ) {
-    scope!(scope, self);
-    let context_local = v8::Local::new(scope, context_global);
+    let isolate = self.v8_isolate();
+    jsrealm::context_scope!(scope, realm, isolate);
+    let context_local = v8::Local::new(scope, realm.context());
     let context_state = JsRealm::state_from_scope(scope);
     let global = context_local.global(scope);
     let synthetic_module_exports = create_exports_for_ops_virtual_module(
@@ -1516,11 +1998,12 @@ impl JsRuntime {
   /// some of this code already relies on certain ops being available.
   fn execute_builtin_sources(
     &mut self,
-    _realm: &JsRealm,
+    realm: &JsRealm,
     module_map: &Rc<ModuleMap>,
     files_loaded: &mut Vec<&'static str>,
   ) -> Result<(), CoreError> {
-    scope!(scope, self);
+    let isolate = self.v8_isolate();
+    jsrealm::context_scope!(scope, realm, isolate);
 
     for source_file in &BUILTIN_SOURCES {
       let name = source_file.specifier.v8_string(scope).unwrap();
@@ -1701,7 +2184,8 @@ impl JsRuntime {
       wasm_instance_fn,
       wasm_instances_map,
     ) = {
-      scope!(scope, self);
+      let isolate = self.v8_isolate();
+      jsrealm::context_scope!(scope, realm, isolate);
       let context = realm.context();
       let context_local = v8::Local::new(scope, context);
       let global = context_local.global(scope);
@@ -2053,6 +2537,7 @@ impl JsRuntime {
     name: impl IntoModuleName,
     source_code: impl IntoModuleCodeString,
   ) -> Result<v8::Global<v8::Value>, Box<JsError>> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self.inner.main_realm.execute_script(
       isolate,
@@ -2192,6 +2677,7 @@ impl JsRuntime {
     &mut self,
     module_id: ModuleId,
   ) -> Result<v8::Global<v8::Object>, CoreError> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self
       .inner
@@ -2273,6 +2759,22 @@ impl JsRuntime {
     Self::scoped_resolve(scope, promise)
   }
 
+  /// Waits for the given value to resolve in the provided realm.
+  ///
+  /// This is the realm-aware variant of [`JsRuntime::resolve`]. Use it for
+  /// promises created by scripts or modules executing in a non-main realm.
+  pub fn resolve_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    promise: v8::Global<v8::Value>,
+  ) -> impl Future<Output = Result<v8::Global<v8::Value>, Box<JsError>>> + use<>
+  {
+    let realm = JsRealm::clone(realm);
+    let isolate = self.v8_isolate();
+    jsrealm::context_scope!(scope, realm, isolate);
+    Self::scoped_resolve(scope, promise)
+  }
+
   /// Waits for the given value to resolve while polling the event loop.
   ///
   /// This future resolves when either the value is resolved or the event loop runs to
@@ -2340,6 +2842,20 @@ impl JsRuntime {
     poll_fn(|cx| self.poll_event_loop(cx, poll_options)).await
   }
 
+  /// Runs event loop to completion for the provided realm.
+  ///
+  /// This is the realm-aware variant of [`JsRuntime::run_event_loop`]. It
+  /// enters the realm's V8 context before collecting pending ops, timers,
+  /// module progress, promise rejections, and other per-context event-loop
+  /// state.
+  pub async fn run_event_loop_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    poll_options: PollEventLoopOptions,
+  ) -> Result<(), CoreError> {
+    poll_fn(|cx| self.poll_event_loop_in_realm(realm, cx, poll_options)).await
+  }
+
   /// A utility function that run provided future concurrently with the event loop.
   ///
   /// If the event loop resolves while polling the future, it return an error with the text
@@ -2358,6 +2874,39 @@ impl JsRuntime {
         return Poll::Ready(t.map_err(|e| e.into()));
       }
       if let Poll::Ready(t) = self.poll_event_loop(cx, poll_options) {
+        t?;
+        if let Poll::Ready(t) = fut.poll_unpin(cx) {
+          return Poll::Ready(t.map_err(|e| e.into()));
+        }
+        return Poll::Ready(Err(
+          CoreErrorKind::PendingPromiseResolution.into_box(),
+        ));
+      }
+      Poll::Pending
+    })
+    .await
+  }
+
+  /// A realm-aware variant of [`JsRuntime::with_event_loop_promise`].
+  ///
+  /// Use this for promises created in a non-main realm so async ops and timers
+  /// registered against that realm's [`ContextState`] are driven.
+  pub async fn with_event_loop_promise_in_realm<'fut, T, E>(
+    &mut self,
+    realm: &JsRealm,
+    mut fut: impl Future<Output = Result<T, E>> + Unpin + 'fut,
+    poll_options: PollEventLoopOptions,
+  ) -> Result<T, CoreError>
+  where
+    CoreError: From<E>,
+  {
+    poll_fn(|cx| {
+      if let Poll::Ready(t) = fut.poll_unpin(cx) {
+        return Poll::Ready(t.map_err(|e| e.into()));
+      }
+      if let Poll::Ready(t) =
+        self.poll_event_loop_in_realm(realm, cx, poll_options)
+      {
         t?;
         if let Poll::Ready(t) = fut.poll_unpin(cx) {
           return Poll::Ready(t.map_err(|e| e.into()));
@@ -2407,6 +2956,17 @@ impl JsRuntime {
     cx: &mut Context,
     poll_options: PollEventLoopOptions,
   ) -> Poll<Result<(), CoreError>> {
+    let realm = JsRealm::clone(&self.inner.main_realm);
+    self.poll_event_loop_in_realm(&realm, cx, poll_options)
+  }
+
+  /// Runs a single tick of the event loop for the provided realm.
+  pub fn poll_event_loop_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    cx: &mut Context,
+    poll_options: PollEventLoopOptions,
+  ) -> Poll<Result<(), CoreError>> {
     let has_inspector = self.inner.state.has_inspector.get();
 
     // SAFETY: We know this isolate is valid and non-null at this time
@@ -2415,10 +2975,9 @@ impl JsRuntime {
 
     let result = {
       v8::scope!(let isolate_scope, &mut isolate);
-      let context =
-        v8::Local::new(isolate_scope, self.inner.main_realm.context());
+      let context = v8::Local::new(isolate_scope, realm.context());
       let mut scope = v8::ContextScope::new(isolate_scope, context);
-      self.poll_event_loop_inner(cx, &mut scope, poll_options)
+      self.poll_event_loop_inner(cx, &mut scope, poll_options, realm)
     };
 
     // Tell V8's CPU profiler whether we're about to go idle. When the event
@@ -2453,6 +3012,7 @@ impl JsRuntime {
     cx: &mut Context,
     scope: &mut v8::PinScope,
     poll_options: PollEventLoopOptions,
+    realm: &JsRealm,
   ) -> Poll<Result<(), CoreError>> {
     let has_inspector = self.inner.state.has_inspector.get();
     self.inner.state.waker.register(cx.waker());
@@ -2484,7 +3044,6 @@ impl JsRuntime {
       }
     }
 
-    let realm = &self.inner.main_realm;
     let modules = &realm.0.module_map;
     let context_state = &realm.0.context_state;
 
@@ -3117,6 +3676,23 @@ impl EventLoopPendingState {
       || self.has_pending_external_ops
       || self.has_uv_alive_handles
   }
+
+  /// Returns true only if no event-loop state is live and the runtime is safe
+  /// to return to a warm pool without carrying forward request state.
+  pub fn is_warm_reuse_safe(&self) -> bool {
+    !self.has_pending_ops
+      && !self.has_pending_refed_ops
+      && !self.has_pending_dyn_imports
+      && !self.has_pending_dyn_module_evaluation
+      && !self.has_pending_module_evaluation
+      && !self.has_pending_background_tasks
+      && !self.has_tick_scheduled
+      && !self.has_pending_promise_events
+      && !self.has_pending_external_ops
+      && !self.has_outstanding_immediates
+      && !self.has_pending_timers
+      && !self.has_uv_alive_handles
+  }
 }
 
 extern "C" fn near_heap_limit_callback<F>(
@@ -3169,8 +3745,9 @@ impl JsRuntime {
     &mut self,
     id: ModuleId,
   ) -> Result<(), v8::Global<v8::Value>> {
-    let isolate = &mut *self.inner.v8_isolate;
+    self.ensure_v8_lock_held();
     let realm = JsRealm::clone(&self.inner.main_realm);
+    let isolate = self.v8_isolate();
     jsrealm::context_scope!(scope, realm, isolate);
     realm.instantiate_module(scope, id)
   }
@@ -3196,10 +3773,28 @@ impl JsRuntime {
     &mut self,
     id: ModuleId,
   ) -> impl Future<Output = Result<(), CoreError>> + use<> {
-    let isolate = &mut *self.inner.v8_isolate;
-    let realm = &self.inner.main_realm;
+    self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(&self.inner.main_realm);
+    self.mod_evaluate_in_realm(&realm, id)
+  }
+
+  /// Evaluates an already instantiated ES module in the provided realm.
+  ///
+  /// This is the realm-aware variant of [`JsRuntime::mod_evaluate`]. The
+  /// module must have been loaded and instantiated through the same realm's
+  /// module map, for example by
+  /// [`JsRuntime::load_side_es_module_in_realm`].
+  pub fn mod_evaluate_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    id: ModuleId,
+  ) -> impl Future<Output = Result<(), CoreError>> + use<> {
+    self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(realm);
+    let module_map = realm.0.module_map.clone();
+    let isolate = self.v8_isolate();
     jsrealm::context_scope!(scope, realm, isolate);
-    self.inner.main_realm.0.module_map.mod_evaluate(scope, id)
+    module_map.mod_evaluate(scope, id)
   }
 
   /// Asynchronously load specified module and all of its dependencies.
@@ -3219,8 +3814,15 @@ impl JsRuntime {
     specifier: &ModuleSpecifier,
     code: impl IntoModuleCodeString,
   ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(&self.inner.main_realm);
     self
-      .drive_es_module_load(true, specifier, Some(code.into_module_code()))
+      .drive_es_module_load_in_realm(
+        &realm,
+        true,
+        specifier,
+        Some(code.into_module_code()),
+      )
       .await
   }
 
@@ -3236,7 +3838,56 @@ impl JsRuntime {
     &mut self,
     specifier: &ModuleSpecifier,
   ) -> Result<ModuleId, CoreError> {
-    self.drive_es_module_load(true, specifier, None).await
+    self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(&self.inner.main_realm);
+    self
+      .drive_es_module_load_in_realm(&realm, true, specifier, None)
+      .await
+  }
+
+  /// Asynchronously load specified module and all of its dependencies from the
+  /// provided source into the provided realm's module map.
+  ///
+  /// The module will be marked as "main" in that realm, and because of that
+  /// "import.meta.main" will return true when checked inside that module.
+  ///
+  /// User must call [`JsRuntime::mod_evaluate_in_realm`] with the returned
+  /// [`ModuleId`] after loading finishes.
+  pub async fn load_main_es_module_from_code_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    specifier: &ModuleSpecifier,
+    code: impl IntoModuleCodeString,
+  ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    self
+      .drive_es_module_load_in_realm(
+        realm,
+        true,
+        specifier,
+        Some(code.into_module_code()),
+      )
+      .await
+  }
+
+  /// Asynchronously load specified module and all of its dependencies into the
+  /// provided realm's module map, retrieving source from the runtime's
+  /// configured [`ModuleLoader`].
+  ///
+  /// The module will be marked as "main" in that realm, and because of that
+  /// "import.meta.main" will return true when checked inside that module.
+  ///
+  /// User must call [`JsRuntime::mod_evaluate_in_realm`] with the returned
+  /// [`ModuleId`] after loading finishes.
+  pub async fn load_main_es_module_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    specifier: &ModuleSpecifier,
+  ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    self
+      .drive_es_module_load_in_realm(realm, true, specifier, None)
+      .await
   }
 
   /// Asynchronously load specified ES module and all of its dependencies from the
@@ -3257,8 +3908,15 @@ impl JsRuntime {
     specifier: &ModuleSpecifier,
     code: impl IntoModuleCodeString,
   ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(&self.inner.main_realm);
     self
-      .drive_es_module_load(false, specifier, Some(code.into_module_code()))
+      .drive_es_module_load_in_realm(
+        &realm,
+        false,
+        specifier,
+        Some(code.into_module_code()),
+      )
       .await
   }
 
@@ -3274,7 +3932,50 @@ impl JsRuntime {
     &mut self,
     specifier: &ModuleSpecifier,
   ) -> Result<ModuleId, CoreError> {
-    self.drive_es_module_load(false, specifier, None).await
+    self.ensure_v8_lock_held();
+    let realm = JsRealm::clone(&self.inner.main_realm);
+    self
+      .drive_es_module_load_in_realm(&realm, false, specifier, None)
+      .await
+  }
+
+  /// Asynchronously load specified ES module and all of its dependencies from
+  /// the provided source into the provided realm's module map.
+  ///
+  /// User must call [`JsRuntime::mod_evaluate_in_realm`] with the returned
+  /// [`ModuleId`] after loading finishes.
+  pub async fn load_side_es_module_from_code_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    specifier: &ModuleSpecifier,
+    code: impl IntoModuleCodeString,
+  ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    self
+      .drive_es_module_load_in_realm(
+        realm,
+        false,
+        specifier,
+        Some(code.into_module_code()),
+      )
+      .await
+  }
+
+  /// Asynchronously load specified ES module and all of its dependencies into
+  /// the provided realm's module map, retrieving source from the runtime's
+  /// configured [`ModuleLoader`].
+  ///
+  /// User must call [`JsRuntime::mod_evaluate_in_realm`] with the returned
+  /// [`ModuleId`] after loading finishes.
+  pub async fn load_side_es_module_in_realm(
+    &mut self,
+    realm: &JsRealm,
+    specifier: &ModuleSpecifier,
+  ) -> Result<ModuleId, CoreError> {
+    self.ensure_v8_lock_held();
+    self
+      .drive_es_module_load_in_realm(realm, false, specifier, None)
+      .await
   }
 
   /// Drive a recursive ES module load to completion while concurrently
@@ -3283,13 +3984,14 @@ impl JsRuntime {
   /// async polling task) can respond to load requests from the recursive
   /// load. Without it, static module loads that go through hook bridges
   /// would deadlock.
-  async fn drive_es_module_load(
+  async fn drive_es_module_load_in_realm(
     &mut self,
+    realm: &JsRealm,
     is_main: bool,
     specifier: &ModuleSpecifier,
     code: Option<ModuleCodeString>,
   ) -> Result<ModuleId, CoreError> {
-    let realm = JsRealm::clone(&self.inner.main_realm);
+    let realm = JsRealm::clone(realm);
     let module_map_rc = realm.0.module_map();
 
     // Only pump the V8 event loop alongside the load when the loader resolves
@@ -3388,6 +4090,7 @@ impl JsRuntime {
     specifier: impl IntoModuleName,
     code: impl IntoModuleCodeString,
   ) -> Result<v8::Global<v8::Value>, CoreError> {
+    self.ensure_v8_lock_held();
     let isolate = &mut self.inner.v8_isolate;
     self.inner.main_realm.lazy_load_es_module_with_code(
       isolate,
