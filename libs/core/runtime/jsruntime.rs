@@ -255,6 +255,31 @@ impl InnerIsolateState {
   }
 }
 
+/// Process-global RE-ENTRANT lock serializing the isolate-lifecycle operations
+/// that touch a single (shared) pointer-compression cage's shared READ-ONLY
+/// heap: cold isolate CREATION (the restore deserializers in `Isolate::Init`),
+/// snapshot BUILD (`SnapshotCreator`), and isolate DISPOSAL (the shared
+/// read-only space teardown when the last isolate leaves the `IsolateGroup`).
+/// These three are the only unguarded writers to the group-shared RO heap on a
+/// single cage; left concurrent they abort (`shared_heap_object_cache()->at()`
+/// out-of-bounds / `vector.h` OOB). It is RE-ENTRANT so an embedder may hold it
+/// across an operation that internally disposes an isolate (e.g. snapshot
+/// creation, or a failed construction dropping a partial runtime) while still
+/// excluding OTHER threads. A multi-cage build gives each isolate a PRIVATE RO
+/// heap and can skip this entirely.
+static SHARED_RO_HEAP_SERIALIZE_LOCK: std::sync::OnceLock<
+  parking_lot::ReentrantMutex<()>,
+> = std::sync::OnceLock::new();
+
+/// See [`SHARED_RO_HEAP_SERIALIZE_LOCK`]. Embedders that create/dispose isolates
+/// from multiple threads on a single shared cage must hold this across each
+/// such operation (creation, snapshot build, disposal).
+pub fn shared_ro_heap_serialize_lock() -> &'static parking_lot::ReentrantMutex<()>
+{
+  SHARED_RO_HEAP_SERIALIZE_LOCK
+    .get_or_init(|| parking_lot::ReentrantMutex::new(()))
+}
+
 impl Drop for InnerIsolateState {
   fn drop(&mut self) {
     self.cleanup();
@@ -272,6 +297,10 @@ impl Drop for InnerIsolateState {
           eprintln!("WARNING: v8::OwnedIsolate for snapshot was leaked");
         }
       } else {
+        // Isolate::Dispose -> IsolateGroup::RemoveIsolate frees the group-shared
+        // read-only space when this is the LAST isolate; serialize it against
+        // concurrent creates/builds reading that shared RO heap.
+        let _serialize = shared_ro_heap_serialize_lock().lock();
         ManuallyDrop::drop(&mut self.v8_isolate);
       }
     }

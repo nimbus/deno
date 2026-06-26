@@ -34,6 +34,7 @@ pub use jsruntime::ExtensionTranspiler;
 pub(crate) use jsruntime::InitMode;
 pub use jsruntime::JsRuntime;
 pub use jsruntime::JsRuntimeForSnapshot;
+pub use jsruntime::shared_ro_heap_serialize_lock;
 pub use jsruntime::JsRuntimeState;
 #[cfg(test)]
 pub(crate) use jsruntime::NO_OF_BUILTIN_MODULES;

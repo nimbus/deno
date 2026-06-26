@@ -185,6 +185,7 @@ pub use crate::runtime::CrossIsolateStore;
 pub use crate::runtime::JsRealm;
 pub use crate::runtime::JsRuntime;
 pub use crate::runtime::JsRuntimeForSnapshot;
+pub use crate::runtime::shared_ro_heap_serialize_lock;
 pub use crate::runtime::MODULE_MAP_SLOT_INDEX;
 pub use crate::runtime::PollEventLoopOptions;
 pub use crate::runtime::RuntimeOptions;
