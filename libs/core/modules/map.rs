@@ -2772,7 +2772,7 @@ impl ModuleMap {
     let status = module_local.get_status();
     assert_eq!(status, v8::ModuleStatus::Instantiated);
 
-    let value = module_local.evaluate(scope).unwrap();
+    let value = Self::evaluate_lazy_esm_module(scope, module_local)?;
     // Under Explicit microtask policy, drain microtasks so the module
     // evaluation promise resolves for synchronous modules.
     //
@@ -2885,6 +2885,24 @@ impl ModuleMap {
     data.residual_lazy_esm_sources = lazy_esm_sources;
   }
 
+  fn evaluate_lazy_esm_module<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    module: v8::Local<'s, v8::Module>,
+  ) -> Result<v8::Local<'s, v8::Value>, CoreError> {
+    let Some(value) = module.evaluate(scope) else {
+      if scope.is_execution_terminating() {
+        return Err(CoreErrorKind::ExecutionTerminated.into_box());
+      }
+      return Err(
+        CoreErrorKind::JsBox(JsErrorBox::generic(
+          "lazy-loaded ES module evaluation failed without a result",
+        ))
+        .into_box(),
+      );
+    };
+    Ok(value)
+  }
+
   /// Lazy load and evaluate an ES module. Only modules that have been added
   /// during build time can be executed (the ones stored in
   /// `ModuleMapData::lazy_esm_sources`), not _any, random_ module.
@@ -2903,7 +2921,7 @@ impl ModuleMap {
         let handle = data.get_handle(id).unwrap();
         let handle_local = v8::Local::new(scope, handle);
         if handle_local.get_status() == v8::ModuleStatus::Instantiated {
-          let value = handle_local.evaluate(scope).unwrap();
+          let value = Self::evaluate_lazy_esm_module(scope, handle_local)?;
           if !self.evaluating_top_level.get() {
             scope.perform_microtask_checkpoint();
           }
@@ -2923,7 +2941,7 @@ impl ModuleMap {
     let module_id = self.build_synthetic_esm_module(scope, module_specifier)?;
     let handle = self.get_handle(module_id).unwrap();
     let handle_local = v8::Local::new(scope, handle);
-    let value = handle_local.evaluate(scope).unwrap();
+    let value = Self::evaluate_lazy_esm_module(scope, handle_local)?;
     if !self.evaluating_top_level.get() {
       scope.perform_microtask_checkpoint();
     }
@@ -2986,7 +3004,7 @@ impl ModuleMap {
       // Returning the namespace before evaluation leaves `export const`
       // bindings in the temporal dead zone, so trigger evaluation here.
       if handle_local.get_status() == v8::ModuleStatus::Instantiated {
-        let value = handle_local.evaluate(scope).unwrap();
+        let value = Self::evaluate_lazy_esm_module(scope, handle_local)?;
         if !self.evaluating_top_level.get() {
           scope.perform_microtask_checkpoint();
         }
