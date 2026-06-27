@@ -6,12 +6,23 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
+use std::time::Duration;
 
 use deno_error::JsErrorBox;
+use futures::channel::oneshot;
 
+use crate::FastString;
 use crate::JsRuntime;
 use crate::JsRuntimeForSnapshot;
+use crate::ModuleLoadOptions;
+use crate::ModuleLoadReferrer;
+use crate::ModuleLoadResponse;
+use crate::ModuleLoader;
+use crate::ModuleSource;
+use crate::ModuleSourceCode;
 use crate::ModuleSpecifier;
+use crate::ModuleType;
+use crate::ResolutionKind;
 use crate::RuntimeOptions;
 use crate::error::CoreErrorKind;
 use crate::error::ExtensionLazyInitCountMismatchError;
@@ -21,6 +32,106 @@ use crate::op2;
 use crate::runtime::CreateRealmOptions;
 
 static EXTENSION_JS_REPLAY_TEST_LOCK: Mutex<()> = Mutex::new(());
+static FRESH_REALM_MODULE_LOAD_RELEASE: Mutex<Option<oneshot::Sender<()>>> =
+  Mutex::new(None);
+
+#[op2(fast)]
+fn op_release_fresh_realm_module_load() {
+  if let Some(sender) = FRESH_REALM_MODULE_LOAD_RELEASE.lock().unwrap().take() {
+    let _ = sender.send(());
+  }
+}
+
+struct PumpedFreshRealmLoader {
+  entry_specifier: ModuleSpecifier,
+  dependency_specifier: ModuleSpecifier,
+  dependency_release: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl PumpedFreshRealmLoader {
+  fn new(
+    entry_specifier: ModuleSpecifier,
+    dependency_specifier: ModuleSpecifier,
+    dependency_release: oneshot::Receiver<()>,
+  ) -> Self {
+    Self {
+      entry_specifier,
+      dependency_specifier,
+      dependency_release: Mutex::new(Some(dependency_release)),
+    }
+  }
+}
+
+impl ModuleLoader for PumpedFreshRealmLoader {
+  fn resolve(
+    &self,
+    specifier: &str,
+    referrer: &str,
+    _kind: ResolutionKind,
+  ) -> Result<ModuleSpecifier, JsErrorBox> {
+    if specifier == self.entry_specifier.as_str() {
+      return Ok(self.entry_specifier.clone());
+    }
+    if specifier == "./pumped_dep.js"
+      && referrer == self.entry_specifier.as_str()
+    {
+      return Ok(self.dependency_specifier.clone());
+    }
+    ModuleSpecifier::parse(specifier).map_err(JsErrorBox::from_err)
+  }
+
+  fn load(
+    &self,
+    module_specifier: &ModuleSpecifier,
+    _maybe_referrer: Option<&ModuleLoadReferrer>,
+    _options: ModuleLoadOptions,
+  ) -> ModuleLoadResponse {
+    if module_specifier == &self.entry_specifier {
+      return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
+        ModuleType::JavaScript,
+        ModuleSourceCode::String(FastString::from_static(
+          r#"
+            import { value } from "./pumped_dep.js";
+            globalThis.freshRealmPumpedModuleValue = value;
+          "#,
+        )),
+        module_specifier,
+        None,
+      )));
+    }
+
+    if module_specifier == &self.dependency_specifier {
+      let receiver = self
+        .dependency_release
+        .lock()
+        .unwrap()
+        .take()
+        .expect("dependency should only be loaded once");
+      let specifier = module_specifier.clone();
+      return ModuleLoadResponse::Async(Box::pin(async move {
+        receiver.await.map_err(|_| {
+          JsErrorBox::generic("fresh realm module load was not released")
+        })?;
+        Ok(ModuleSource::new(
+          ModuleType::JavaScript,
+          ModuleSourceCode::String(FastString::from_static(
+            "export const value = 42;",
+          )),
+          &specifier,
+          None,
+        ))
+      }));
+    }
+
+    ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+      "unexpected module load: {module_specifier}"
+    ))))
+  }
+
+  fn pump_event_loop_during_load(&self) -> bool {
+    true
+  }
+}
 
 #[test]
 fn test_set_format_exception_callback_realms() {
@@ -523,6 +634,92 @@ async fn create_realm_loads_modules_in_realm_module_map() {
       "#,
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn create_realm_pumps_fresh_realm_event_loop_during_module_load() {
+  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().unwrap();
+
+  deno_core::extension!(
+    fresh_realm_pumped_load_ext,
+    ops = [op_release_fresh_realm_module_load],
+  );
+
+  let entry_specifier =
+    ModuleSpecifier::parse("file:///fresh_realm_pumped_entry.js").unwrap();
+  let dependency_specifier =
+    ModuleSpecifier::parse("file:///pumped_dep.js").unwrap();
+  let (sender, receiver) = oneshot::channel();
+  *FRESH_REALM_MODULE_LOAD_RELEASE.lock().unwrap() = Some(sender);
+
+  let loader = Rc::new(PumpedFreshRealmLoader::new(
+    entry_specifier.clone(),
+    dependency_specifier,
+    receiver,
+  ));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![fresh_realm_pumped_load_ext::init()],
+    module_loader: Some(loader.clone()),
+    ..Default::default()
+  });
+  let fresh_realm = runtime
+    .create_realm(CreateRealmOptions {
+      module_loader: Some(loader),
+    })
+    .unwrap();
+
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh-realm-release-load.js",
+      r#"
+        Promise.resolve().then(() => {
+          globalThis.freshRealmLoadReleaseRan = true;
+          Deno.core.ops.op_release_fresh_realm_module_load();
+        });
+      "#,
+    )
+    .unwrap();
+
+  let module_id = tokio::time::timeout(
+    Duration::from_secs(2),
+    runtime.load_main_es_module_in_realm(&fresh_realm, &entry_specifier),
+  )
+  .await
+  .expect("fresh-realm module load should pump the fresh realm event loop")
+  .expect("fresh-realm module load should succeed");
+  let evaluation = runtime.mod_evaluate_in_realm(&fresh_realm, module_id);
+  runtime
+    .run_event_loop_in_realm(&fresh_realm, Default::default())
+    .await
+    .unwrap();
+  evaluation.await.unwrap();
+
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fresh-realm-pumped-load-check.js",
+      r#"
+        if (globalThis.freshRealmLoadReleaseRan !== true) {
+          throw new Error("fresh realm release microtask did not run");
+        }
+        if (globalThis.freshRealmPumpedModuleValue !== 42) {
+          throw new Error(`fresh realm module did not evaluate: ${globalThis.freshRealmPumpedModuleValue}`);
+        }
+      "#,
+    )
+    .unwrap();
+  runtime
+    .execute_script(
+      "main-realm-pumped-load-check.js",
+      r#"
+        if ("freshRealmLoadReleaseRan" in globalThis || "freshRealmPumpedModuleValue" in globalThis) {
+          throw new Error("fresh-realm module load polluted the main realm");
+        }
+      "#,
+    )
+    .unwrap();
+  *FRESH_REALM_MODULE_LOAD_RELEASE.lock().unwrap() = None;
 }
 
 #[tokio::test]

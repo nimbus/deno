@@ -4009,7 +4009,11 @@ impl JsRuntime {
         if !pump_event_loop {
           return Poll::Pending;
         }
-        match self.poll_event_loop(cx, PollEventLoopOptions::default()) {
+        match self.poll_event_loop_in_realm(
+          &realm,
+          cx,
+          PollEventLoopOptions::default(),
+        ) {
           Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
           Poll::Ready(Ok(())) | Poll::Pending => {}
         }
