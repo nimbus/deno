@@ -119,10 +119,45 @@ pub struct Options {
   #[allow(clippy::type_complexity, reason = "TODO: improve")]
   pub request_builder_hook:
     Option<fn(&mut http::Request<ReqBody>) -> Result<(), JsErrorBox>>,
+  /// A pre-permission hook for embedders that route `fetch()` through a richer
+  /// egress gateway than the coarse `allow_net` list. When this hook is set it
+  /// is responsible for fail-closed authorization; when absent, `fetch()` keeps
+  /// the upstream `PermissionsContainer::check_net_url` behavior.
+  pub egress_gateway_hook: Option<FetchEgressGatewayHook>,
   pub unsafely_ignore_certificate_errors: Option<Vec<String>>,
   pub client_cert_chain_and_key: TlsKeys,
   pub file_fetch_handler: Rc<dyn FetchHandler>,
   pub resolver: dns::Resolver,
+}
+
+pub type FetchEgressGatewayHook =
+  for<'a> fn(
+    &mut OpState,
+    FetchEgressGatewayRequest<'a>,
+  ) -> Result<FetchEgressGatewayAuthorization, JsErrorBox>;
+
+pub struct FetchEgressGatewayRequest<'a> {
+  pub method: &'a Method,
+  pub url: &'a Url,
+  pub client_rid: Option<ResourceId>,
+}
+
+pub struct FetchEgressGatewayAuthorization {
+  pub use_deno_client_permissions: bool,
+}
+
+impl FetchEgressGatewayAuthorization {
+  pub fn use_deno_permissions() -> Self {
+    Self {
+      use_deno_client_permissions: true,
+    }
+  }
+
+  pub fn bypass_deno_permissions() -> Self {
+    Self {
+      use_deno_client_permissions: false,
+    }
+  }
 }
 
 impl Options {
@@ -142,6 +177,7 @@ impl Default for Options {
       proxy: None,
       client_builder_hook: None,
       request_builder_hook: None,
+      egress_gateway_hook: None,
       unsafely_ignore_certificate_errors: None,
       client_cert_chain_and_key: TlsKeys::Null,
       file_fetch_handler: Rc::new(DefaultFileFetchHandler),
@@ -310,6 +346,17 @@ pub struct FetchReturn {
 pub fn get_or_create_client_from_state(
   state: &mut OpState,
 ) -> Result<Client, HttpClientCreateError> {
+  get_or_create_client_from_state_with_permissions(state, true)
+}
+
+fn get_or_create_client_from_state_with_permissions(
+  state: &mut OpState,
+  use_deno_client_permissions: bool,
+) -> Result<Client, HttpClientCreateError> {
+  if !use_deno_client_permissions {
+    let options = state.borrow::<Options>();
+    return create_client_from_options(options, None);
+  }
   if let Some(client) = state.try_borrow::<Client>() {
     Ok(client.clone())
   } else {
@@ -435,13 +482,6 @@ pub fn op_fetch(
   data: Option<Uint8Array>,
   #[smi] resource: Option<ResourceId>,
 ) -> Result<FetchReturn, FetchError> {
-  let (client, allow_host) = if let Some(rid) = client_rid {
-    let r = state.resource_table.get::<HttpClientResource>(rid)?;
-    (r.client.clone(), r.allow_host)
-  } else {
-    (get_or_create_client_from_state(state)?, false)
-  };
-
   let method = Method::from_bytes(&method)?;
   let mut url = Url::parse(&url)?;
 
@@ -467,8 +507,38 @@ pub fn op_fetch(
       (request_rid, maybe_cancel_handle_rid)
     }
     "http" | "https" => {
-      let permissions = state.borrow_mut::<PermissionsContainer>();
-      permissions.check_net_url(&url, "fetch()")?;
+      let egress_gateway_hook = {
+        let options = state.borrow::<Options>();
+        options.egress_gateway_hook
+      };
+      let egress_authorization =
+        if let Some(egress_gateway_hook) = egress_gateway_hook {
+          egress_gateway_hook(
+            state,
+            FetchEgressGatewayRequest {
+              method: &method,
+              url: &url,
+              client_rid,
+            },
+          )
+          .map_err(FetchError::Other)?
+        } else {
+          let permissions = state.borrow_mut::<PermissionsContainer>();
+          permissions.check_net_url(&url, "fetch()")?;
+          FetchEgressGatewayAuthorization::use_deno_permissions()
+        };
+      let (client, allow_host) = if let Some(rid) = client_rid {
+        let r = state.resource_table.get::<HttpClientResource>(rid)?;
+        (r.client.clone(), r.allow_host)
+      } else {
+        (
+          get_or_create_client_from_state_with_permissions(
+            state,
+            egress_authorization.use_deno_client_permissions,
+          )?,
+          false,
+        )
+      };
 
       let maybe_authority = extract_authority(&mut url);
       let uri = url
