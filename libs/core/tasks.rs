@@ -49,6 +49,12 @@ impl V8TaskSpawnerFactory {
     V8CrossThreadTaskSpawner { tasks: self }
   }
 
+  /// Drain and discard any pending tasks for warm reuse.
+  pub(crate) fn clear(&self) {
+    self.has_tasks.store(false, Ordering::Release);
+    self.tasks.lock().unwrap().clear();
+  }
+
   /// `false` guarantees that there are no queued tasks, while `true` means that it is likely (but not guaranteed)
   /// that tasks exist.
   ///
