@@ -199,6 +199,25 @@ impl OpCtx {
     &self.op_driver
   }
 
+  pub(crate) fn clone_for_realm(
+    &self,
+    isolate: v8::UnsafeRawIsolatePtr,
+    op_driver: Rc<OpDriverImpl>,
+    state: Rc<RefCell<OpState>>,
+    runtime_state: *const JsRuntimeState,
+  ) -> Self {
+    Self::new(
+      self.id,
+      isolate,
+      op_driver,
+      self.decl,
+      state,
+      runtime_state,
+      self.metrics_fn.clone(),
+      self.enable_stack_trace,
+    )
+  }
+
   /// Get the [`JsRuntimeState`] for this op.
   pub(crate) fn runtime_state(&self) -> &JsRuntimeState {
     // SAFETY: JsRuntimeState outlives OpCtx
@@ -229,6 +248,11 @@ impl ExternalOpsTracker {
 
   pub(crate) fn has_pending_ops(&self) -> bool {
     self.counter.load(Ordering::Relaxed) > 0
+  }
+
+  /// Reset the counter to zero for warm reuse.
+  pub(crate) fn reset(&self) {
+    self.counter.store(0, Ordering::Relaxed);
   }
 }
 
