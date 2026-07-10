@@ -69,5 +69,8 @@ jobs:
       - name: Test deno_crypto
         run: cargo test --locked -p deno_crypto --lib
 
+      - name: Test deno_fetch
+        run: cargo test --locked -p deno_fetch --lib
+
       - name: Format (nimbus-patched crates)
-        run: cargo fmt -p deno_core -p deno_runtime -- --check
+        run: cargo fmt -p deno_core -p deno_runtime -p deno_fetch -p deno_node -- --check
