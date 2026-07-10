@@ -95,7 +95,7 @@ impl DerefMut for ManagedIsolate {
 
 impl AsMut<v8::Isolate> for ManagedIsolate {
   fn as_mut(&mut self) -> &mut v8::Isolate {
-    &mut **self
+    self
   }
 }
 
