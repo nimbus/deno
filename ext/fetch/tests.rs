@@ -9,6 +9,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 
 use bytes::Bytes;
+use deno_core::OpState;
+use deno_core::url::Url;
+use deno_error::JsErrorBox;
 use deno_permissions::Permissions;
 use deno_permissions::PermissionsContainer;
 use deno_permissions::PermissionsOptions;
@@ -16,6 +19,7 @@ use deno_permissions::RuntimePermissionDescriptorParser;
 use deno_tls::rustls::pki_types::PrivateKeyDer;
 use fast_socks5::server::Config as Socks5Config;
 use fast_socks5::server::Socks5Socket;
+use http::Method;
 use http::header::ACCEPT_ENCODING;
 use http::header::CONTENT_ENCODING;
 use http::header::CONTENT_LENGTH;
@@ -29,6 +33,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use super::CreateHttpClientOptions;
+use super::FetchEgressAuthorizationError;
+use super::FetchEgressGatewayAuthorization;
+use super::FetchEgressGatewayRequest;
+use super::Options;
+use super::authorize_http_request;
 use super::create_http_client;
 use crate::dns;
 
@@ -45,6 +54,53 @@ static BR_HELLO_FROM_SERVER: &[u8] = &[
 static EXAMPLE_CRT: &[u8] = include_bytes!("../tls/testdata/example1_cert.der");
 static EXAMPLE_KEY: &[u8] =
   include_bytes!("../tls/testdata/example1_prikey.der");
+
+fn allow_without_deno_permissions(
+  _state: &mut OpState,
+  _request: FetchEgressGatewayRequest<'_>,
+) -> Result<FetchEgressGatewayAuthorization, JsErrorBox> {
+  Ok(FetchEgressGatewayAuthorization::bypass_deno_permissions())
+}
+
+fn deny_before_deno_permissions(
+  _state: &mut OpState,
+  _request: FetchEgressGatewayRequest<'_>,
+) -> Result<FetchEgressGatewayAuthorization, JsErrorBox> {
+  Err(JsErrorBox::generic("blocked by egress gateway"))
+}
+
+#[test]
+fn egress_gateway_can_authorize_before_permissions_state_exists() {
+  let mut state = OpState::new(None);
+  state.put(Options {
+    egress_gateway_hook: Some(allow_without_deno_permissions),
+    ..Default::default()
+  });
+  let method = Method::GET;
+  let url = Url::parse("https://example.com/").unwrap();
+
+  let authorization =
+    authorize_http_request(&mut state, &method, &url, None).unwrap();
+
+  assert!(!authorization.use_deno_client_permissions);
+}
+
+#[test]
+fn egress_gateway_denies_before_permissions_or_transport_state_is_needed() {
+  let mut state = OpState::new(None);
+  state.put(Options {
+    egress_gateway_hook: Some(deny_before_deno_permissions),
+    ..Default::default()
+  });
+  let method = Method::GET;
+  let url = Url::parse("https://example.com/").unwrap();
+
+  let error = authorize_http_request(&mut state, &method, &url, None)
+    .expect_err("egress denial should fail before permission/client lookup");
+
+  assert!(matches!(error, FetchEgressAuthorizationError::Hook(_)));
+  assert_eq!(error.to_string(), "blocked by egress gateway");
+}
 
 #[test]
 fn test_userspace_resolver() {
