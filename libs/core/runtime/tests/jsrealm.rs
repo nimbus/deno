@@ -31,7 +31,8 @@ use crate::modules::StaticModuleLoader;
 use crate::op2;
 use crate::runtime::CreateRealmOptions;
 
-static EXTENSION_JS_REPLAY_TEST_LOCK: Mutex<()> = Mutex::new(());
+static EXTENSION_JS_REPLAY_TEST_LOCK: tokio::sync::Mutex<()> =
+  tokio::sync::Mutex::const_new(());
 static FRESH_REALM_MODULE_LOAD_RELEASE: Mutex<Option<oneshot::Sender<()>>> =
   Mutex::new(None);
 
@@ -266,9 +267,9 @@ fn create_realm_produces_fresh_global_context_with_core_ops() {
   assert_eq!(fresh_realm.num_unrefed_ops(), 0);
 }
 
-#[test]
-fn init_extension_js_in_realm_replays_extension_globals() {
-  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().unwrap();
+#[tokio::test]
+async fn init_extension_js_in_realm_replays_extension_globals() {
+  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().await;
 
   deno_core::extension!(
     realm_replay_ext,
@@ -346,9 +347,10 @@ fn init_extension_js_in_realm_replays_extension_globals() {
     .unwrap();
 }
 
-#[test]
-fn init_extension_js_in_realm_replays_snapshot_seeded_extension_globals() {
-  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().unwrap();
+#[tokio::test]
+async fn init_extension_js_in_realm_replays_snapshot_seeded_extension_globals()
+{
+  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().await;
 
   deno_core::extension!(
     realm_replay_snapshot_ext,
@@ -423,10 +425,10 @@ fn init_extension_js_in_realm_replays_snapshot_seeded_extension_globals() {
     .unwrap();
 }
 
-#[test]
-fn init_extension_js_in_realm_replays_snapshot_seeded_file_backed_extension_modules()
+#[tokio::test]
+async fn init_extension_js_in_realm_replays_snapshot_seeded_file_backed_extension_modules()
  {
-  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().unwrap();
+  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().await;
 
   deno_core::extension!(
     realm_replay_snapshot_fs_ext,
@@ -638,7 +640,7 @@ async fn create_realm_loads_modules_in_realm_module_map() {
 
 #[tokio::test]
 async fn create_realm_pumps_fresh_realm_event_loop_during_module_load() {
-  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().unwrap();
+  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().await;
 
   deno_core::extension!(
     fresh_realm_pumped_load_ext,

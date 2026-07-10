@@ -986,8 +986,7 @@ impl JsRuntime {
       });
       if options
         .extension_replay_esm_entry_points
-        .iter()
-        .any(|entry_point| *entry_point == specifier)
+        .contains(&specifier)
       {
         extension_replay_sources.esm.push(LoadedSource {
           source_type: ExtensionSourceType::Esm,
