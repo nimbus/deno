@@ -142,6 +142,7 @@ pub struct FetchEgressGatewayRequest<'a> {
   pub client_rid: Option<ResourceId>,
 }
 
+#[derive(Debug)]
 pub struct FetchEgressGatewayAuthorization {
   pub use_deno_client_permissions: bool,
 }
@@ -469,6 +470,52 @@ impl Drop for ResourceToBodyAdapter {
   }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum FetchEgressAuthorizationError {
+  #[error(transparent)]
+  Permission(#[from] PermissionCheckError),
+  #[error(transparent)]
+  Hook(JsErrorBox),
+}
+
+impl From<FetchEgressAuthorizationError> for FetchError {
+  fn from(value: FetchEgressAuthorizationError) -> Self {
+    match value {
+      FetchEgressAuthorizationError::Permission(error) => {
+        Self::Permission(error)
+      }
+      FetchEgressAuthorizationError::Hook(error) => Self::Other(error),
+    }
+  }
+}
+
+fn authorize_http_request(
+  state: &mut OpState,
+  method: &Method,
+  url: &Url,
+  client_rid: Option<ResourceId>,
+) -> Result<FetchEgressGatewayAuthorization, FetchEgressAuthorizationError> {
+  let egress_gateway_hook = {
+    let options = state.borrow::<Options>();
+    options.egress_gateway_hook
+  };
+  if let Some(egress_gateway_hook) = egress_gateway_hook {
+    return egress_gateway_hook(
+      state,
+      FetchEgressGatewayRequest {
+        method,
+        url,
+        client_rid,
+      },
+    )
+    .map_err(FetchEgressAuthorizationError::Hook);
+  }
+
+  let permissions = state.borrow_mut::<PermissionsContainer>();
+  permissions.check_net_url(url, "fetch()")?;
+  Ok(FetchEgressGatewayAuthorization::use_deno_permissions())
+}
+
 #[op2(stack_trace)]
 #[allow(clippy::too_many_arguments, reason = "op")]
 #[allow(clippy::large_enum_variant, reason = "TODO: investigate")]
@@ -508,26 +555,8 @@ pub fn op_fetch(
       (request_rid, maybe_cancel_handle_rid)
     }
     "http" | "https" => {
-      let egress_gateway_hook = {
-        let options = state.borrow::<Options>();
-        options.egress_gateway_hook
-      };
       let egress_authorization =
-        if let Some(egress_gateway_hook) = egress_gateway_hook {
-          egress_gateway_hook(
-            state,
-            FetchEgressGatewayRequest {
-              method: &method,
-              url: &url,
-              client_rid,
-            },
-          )
-          .map_err(FetchError::Other)?
-        } else {
-          let permissions = state.borrow_mut::<PermissionsContainer>();
-          permissions.check_net_url(&url, "fetch()")?;
-          FetchEgressGatewayAuthorization::use_deno_permissions()
-        };
+        authorize_http_request(state, &method, &url, client_rid)?;
       let (client, allow_host) = if let Some(rid) = client_rid {
         let r = state.resource_table.get::<HttpClientResource>(rid)?;
         (r.client.clone(), r.allow_host)
