@@ -63,6 +63,18 @@ jobs:
       - name: Test deno_core
         run: cargo test --locked -p deno_core --lib
 
+      - name: Test serde_v8
+        run: cargo test --locked -p serde_v8 --lib
+
+      - name: Test deno_web
+        run: cargo test --locked -p deno_web --lib
+
+      - name: Test deno_napi
+        run: cargo test --locked -p deno_napi --lib
+
+      - name: Test deno_http
+        run: cargo test --locked -p deno_http --lib
+
       - name: Test deno_node
         run: cargo test --locked -p deno_node --lib
 
@@ -72,5 +84,15 @@ jobs:
       - name: Test deno_fetch
         run: cargo test --locked -p deno_fetch --lib
 
-      - name: Format (nimbus-patched crates)
-        run: cargo fmt -p deno_core -p deno_runtime -p deno_fetch -p deno_node -- --check
+      - name: Format (fork and security-sensitive crates)
+        run: >-
+          cargo fmt
+          -p deno_core
+          -p serde_v8
+          -p deno_web
+          -p deno_napi
+          -p deno_http
+          -p deno_runtime
+          -p deno_fetch
+          -p deno_node
+          -- --check
