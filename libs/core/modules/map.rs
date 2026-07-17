@@ -320,6 +320,34 @@ impl Drop for LoadingInternalModulesGuard<'_> {
   }
 }
 
+struct InternalModuleLoaderGuard<'a> {
+  module_map: &'a ModuleMap,
+  previous_loader: Rc<dyn ModuleLoader>,
+  previous_loading_internal_modules: bool,
+}
+
+impl<'a> InternalModuleLoaderGuard<'a> {
+  fn new(module_map: &'a ModuleMap, loader: Rc<dyn ModuleLoader>) -> Self {
+    Self {
+      previous_loader: module_map.loader.replace(loader),
+      previous_loading_internal_modules: module_map
+        .loading_internal_modules
+        .replace(true),
+      module_map,
+    }
+  }
+}
+
+impl Drop for InternalModuleLoaderGuard<'_> {
+  fn drop(&mut self) {
+    self
+      .module_map
+      .loading_internal_modules
+      .set(self.previous_loading_internal_modules);
+    self.module_map.loader.replace(self.previous_loader.clone());
+  }
+}
+
 /// Outcome of compiling a module's source.
 pub(crate) enum NewModuleResult {
   Ready(ModuleId),
@@ -430,8 +458,19 @@ impl ModuleMap {
     }
   }
 
+  #[cfg(test)]
   pub(crate) fn set_loading_internal_modules(&self, value: bool) {
     self.loading_internal_modules.set(value);
+  }
+
+  /// Temporarily installs an extension loader and authorizes internal-module
+  /// referrers. Dropping the guard restores both values, including when a
+  /// fallible extension replay returns early.
+  pub(crate) fn use_internal_module_loader(
+    &self,
+    loader: Rc<dyn ModuleLoader>,
+  ) -> impl Drop + '_ {
+    InternalModuleLoaderGuard::new(self, loader)
   }
 
   pub(crate) fn update_with_snapshotted_data(

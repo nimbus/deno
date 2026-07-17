@@ -2049,7 +2049,6 @@ impl JsRuntime {
 
     // TODO(bartlomieju): maybe this should be a method on the `ModuleMap`,
     // instead of explicitly changing the `.loader` field?
-    let loader = module_map.loader.borrow().clone();
     let mut modules = Vec::with_capacity(loaded_sources.esm.len());
     let mut sources = Vec::with_capacity(loaded_sources.esm.len());
     for esm in loaded_sources.esm {
@@ -2058,8 +2057,8 @@ impl JsRuntime {
     }
     let ext_loader =
       Rc::new(ExtModuleLoader::new(sources, ext_code_cache.clone()));
-    *module_map.loader.borrow_mut() = ext_loader.clone();
-    module_map.set_loading_internal_modules(true);
+    let _internal_module_loader_guard =
+      module_map.use_internal_module_loader(ext_loader.clone());
 
     // Next, load the extension modules as side modules (but do not execute them)
     for module in modules {
@@ -2122,9 +2121,6 @@ impl JsRuntime {
       module_map.check_all_modules_evaluated(scope)?;
     }
 
-    let module_map = realm.0.module_map();
-    module_map.set_loading_internal_modules(false);
-    *module_map.loader.borrow_mut() = loader;
     ext_loader.finalize()?;
 
     Ok(())

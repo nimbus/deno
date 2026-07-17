@@ -18,6 +18,7 @@ use crate::ModuleLoadOptions;
 use crate::ModuleLoadReferrer;
 use crate::ModuleLoadResponse;
 use crate::ModuleLoader;
+use crate::ModuleResolveResponse;
 use crate::ModuleSource;
 use crate::ModuleSourceCode;
 use crate::ModuleSpecifier;
@@ -345,6 +346,100 @@ async fn init_extension_js_in_realm_replays_extension_globals() {
       "#,
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn failed_extension_replay_restores_loader_and_internal_module_policy() {
+  let _guard = EXTENSION_JS_REPLAY_TEST_LOCK.lock().await;
+
+  struct ExtResolvingLoader;
+
+  impl ModuleLoader for ExtResolvingLoader {
+    fn resolve(
+      &self,
+      specifier: &str,
+      _referrer: &str,
+      _kind: ResolutionKind,
+    ) -> ModuleResolveResponse {
+      if specifier == "mapped" {
+        return Ok(ModuleSpecifier::parse("ext:core/ops").unwrap());
+      }
+      ModuleSpecifier::parse(specifier).map_err(JsErrorBox::from_err)
+    }
+
+    fn load(
+      &self,
+      _module_specifier: &ModuleSpecifier,
+      _maybe_referrer: Option<&ModuleLoadReferrer>,
+      _options: ModuleLoadOptions,
+    ) -> ModuleLoadResponse {
+      unreachable!("the policy check should reject before loading")
+    }
+  }
+
+  deno_core::extension!(
+    realm_replay_failure_ext,
+    esm_entry_point = "ext:realm_replay_failure_ext/entry.js",
+    esm = ["ext:realm_replay_failure_ext/entry.js" = {
+      source = r#"
+        if (globalThis.failExtensionReplay === true) {
+          throw new Error("intentional fresh-realm extension replay failure");
+        }
+        globalThis.successfulExtensionReplay = true;
+        export {};
+      "#
+    }],
+  );
+
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![realm_replay_failure_ext::init()],
+    ..Default::default()
+  });
+  runtime
+    .execute_script(
+      "main-extension-replay-check.js",
+      "if (globalThis.successfulExtensionReplay !== true) throw new Error('main replay failed');",
+    )
+    .unwrap();
+
+  let fresh_realm = runtime
+    .create_realm(CreateRealmOptions {
+      module_loader: Some(Rc::new(ExtResolvingLoader)),
+    })
+    .unwrap();
+  fresh_realm
+    .execute_script(
+      runtime.v8_isolate(),
+      "fail-fresh-extension-replay.js",
+      "globalThis.failExtensionReplay = true;",
+    )
+    .unwrap();
+
+  let error = runtime
+    .init_extension_js_in_realm(&fresh_realm)
+    .expect_err("the fresh-realm extension entry point should throw");
+  assert!(
+    error
+      .to_string()
+      .contains("intentional fresh-realm extension replay failure"),
+    "unexpected replay error: {error}"
+  );
+
+  let module_map = fresh_realm.0.module_map();
+  for (referrer, kind) in [
+    (".", ResolutionKind::MainModule),
+    ("node:vm", ResolutionKind::DynamicImport),
+  ] {
+    let error = module_map
+      .resolve("mapped", referrer, kind)
+      .expect_err("failed replay must not retain internal-module authority");
+    let message = error.to_string();
+    assert!(
+      message.contains("Importing ext: modules is only allowed"),
+      "the original resolver or internal-module policy was not restored: {message}"
+    );
+    assert!(message.contains("ext:core/ops"));
+  }
 }
 
 #[tokio::test]
