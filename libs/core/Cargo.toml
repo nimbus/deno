@@ -53,6 +53,7 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip", "preserve_order"] }
 serde_v8.workspace = true
 smallvec.workspace = true
+socket2.workspace = true
 sourcemap.workspace = true
 static_assertions.workspace = true
 sys_traits = { workspace = true, features = ["real"] }
