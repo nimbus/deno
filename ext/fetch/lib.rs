@@ -123,31 +123,38 @@ pub struct Options {
   /// egress gateway than the coarse `allow_net` list. When this hook is set it
   /// is responsible for fail-closed authorization; when absent, `fetch()` keeps
   /// the upstream `PermissionsContainer::check_net_url` behavior.
-  pub egress_gateway_hook: Option<FetchEgressGatewayHook>,
+  pub egress_gateway_hook: Option<EgressGatewayHook>,
   pub unsafely_ignore_certificate_errors: Option<Vec<String>>,
   pub client_cert_chain_and_key: TlsKeys,
   pub file_fetch_handler: Rc<dyn FetchHandler>,
   pub resolver: dns::Resolver,
 }
 
-pub type FetchEgressGatewayHook =
+pub type EgressGatewayHook =
   for<'a> fn(
     &mut OpState,
-    FetchEgressGatewayRequest<'a>,
-  ) -> Result<FetchEgressGatewayAuthorization, JsErrorBox>;
+    EgressGatewayRequest<'a>,
+  ) -> Result<EgressGatewayAuthorization, JsErrorBox>;
 
-pub struct FetchEgressGatewayRequest<'a> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EgressGatewayTransport {
+  Fetch,
+  WebSocket,
+}
+
+pub struct EgressGatewayRequest<'a> {
+  pub transport: EgressGatewayTransport,
   pub method: &'a Method,
   pub url: &'a Url,
   pub client_rid: Option<ResourceId>,
 }
 
 #[derive(Debug)]
-pub struct FetchEgressGatewayAuthorization {
+pub struct EgressGatewayAuthorization {
   pub use_deno_client_permissions: bool,
 }
 
-impl FetchEgressGatewayAuthorization {
+impl EgressGatewayAuthorization {
   pub fn use_deno_permissions() -> Self {
     Self {
       use_deno_client_permissions: true,
@@ -350,7 +357,7 @@ pub fn get_or_create_client_from_state(
   get_or_create_client_from_state_with_permissions(state, true)
 }
 
-fn get_or_create_client_from_state_with_permissions(
+pub fn get_or_create_client_from_state_with_permissions(
   state: &mut OpState,
   use_deno_client_permissions: bool,
 ) -> Result<Client, HttpClientCreateError> {
@@ -494,7 +501,7 @@ fn authorize_http_request(
   method: &Method,
   url: &Url,
   client_rid: Option<ResourceId>,
-) -> Result<FetchEgressGatewayAuthorization, FetchEgressAuthorizationError> {
+) -> Result<EgressGatewayAuthorization, FetchEgressAuthorizationError> {
   let egress_gateway_hook = {
     let options = state.borrow::<Options>();
     options.egress_gateway_hook
@@ -502,7 +509,8 @@ fn authorize_http_request(
   if let Some(egress_gateway_hook) = egress_gateway_hook {
     return egress_gateway_hook(
       state,
-      FetchEgressGatewayRequest {
+      EgressGatewayRequest {
+        transport: EgressGatewayTransport::Fetch,
         method,
         url,
         client_rid,
@@ -513,7 +521,7 @@ fn authorize_http_request(
 
   let permissions = state.borrow_mut::<PermissionsContainer>();
   permissions.check_net_url(url, "fetch()")?;
-  Ok(FetchEgressGatewayAuthorization::use_deno_permissions())
+  Ok(EgressGatewayAuthorization::use_deno_permissions())
 }
 
 #[op2(stack_trace)]

@@ -33,9 +33,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use super::CreateHttpClientOptions;
+use super::EgressGatewayAuthorization;
+use super::EgressGatewayRequest;
 use super::FetchEgressAuthorizationError;
-use super::FetchEgressGatewayAuthorization;
-use super::FetchEgressGatewayRequest;
 use super::Options;
 use super::authorize_http_request;
 use super::create_http_client;
@@ -57,15 +57,15 @@ static EXAMPLE_KEY: &[u8] =
 
 fn allow_without_deno_permissions(
   _state: &mut OpState,
-  _request: FetchEgressGatewayRequest<'_>,
-) -> Result<FetchEgressGatewayAuthorization, JsErrorBox> {
-  Ok(FetchEgressGatewayAuthorization::bypass_deno_permissions())
+  _request: EgressGatewayRequest<'_>,
+) -> Result<EgressGatewayAuthorization, JsErrorBox> {
+  Ok(EgressGatewayAuthorization::bypass_deno_permissions())
 }
 
 fn deny_before_deno_permissions(
   _state: &mut OpState,
-  _request: FetchEgressGatewayRequest<'_>,
-) -> Result<FetchEgressGatewayAuthorization, JsErrorBox> {
+  _request: EgressGatewayRequest<'_>,
+) -> Result<EgressGatewayAuthorization, JsErrorBox> {
   Err(JsErrorBox::generic("blocked by egress gateway"))
 }
 

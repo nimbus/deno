@@ -419,6 +419,7 @@ class WebSocket extends EventTarget {
     const cancelRid = op_ws_check_permission_and_cancel_handle(
       "WebSocket.abort()",
       this[_url],
+      clientRid,
       true,
     );
 

@@ -26,11 +26,14 @@ use deno_core::url;
 use deno_error::JsErrorBox;
 use deno_fetch::ClientConnectError;
 use deno_fetch::CreateHttpClientOptions;
+use deno_fetch::EgressGatewayAuthorization;
+use deno_fetch::EgressGatewayRequest;
+use deno_fetch::EgressGatewayTransport;
 use deno_fetch::HttpClientCreateError;
 use deno_fetch::HttpClientResource;
 use deno_fetch::Options as FetchOptions;
 use deno_fetch::create_http_client;
-use deno_fetch::get_or_create_client_from_state;
+use deno_fetch::get_or_create_client_from_state_with_permissions;
 use deno_net::raw::NetworkStream;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
@@ -104,9 +107,15 @@ pub enum WebsocketError {
   #[class(inherit)]
   #[error(transparent)]
   Canceled(#[from] deno_core::Canceled),
+  #[class(inherit)]
+  #[error(transparent)]
+  Other(#[from] JsErrorBox),
 }
 
-pub struct WsCancelResource(Rc<CancelHandle>);
+pub struct WsCancelResource {
+  cancel_handle: Rc<CancelHandle>,
+  use_deno_client_permissions: bool,
+}
 
 impl Resource for WsCancelResource {
   fn name(&self) -> Cow<'_, str> {
@@ -114,8 +123,37 @@ impl Resource for WsCancelResource {
   }
 
   fn close(self: Rc<Self>) {
-    self.0.cancel()
+    self.cancel_handle.cancel()
   }
+}
+
+fn authorize_websocket_egress(
+  state: &mut OpState,
+  api_name: &str,
+  url: &url::Url,
+  client_rid: Option<ResourceId>,
+) -> Result<EgressGatewayAuthorization, WebsocketError> {
+  let egress_gateway_hook = {
+    let options = state.borrow::<FetchOptions>();
+    options.egress_gateway_hook
+  };
+  if let Some(egress_gateway_hook) = egress_gateway_hook {
+    return egress_gateway_hook(
+      state,
+      EgressGatewayRequest {
+        transport: EgressGatewayTransport::WebSocket,
+        method: &Method::GET,
+        url,
+        client_rid,
+      },
+    )
+    .map_err(WebsocketError::Other);
+  }
+
+  state
+    .borrow_mut::<PermissionsContainer>()
+    .check_net_url(url, api_name)?;
+  Ok(EgressGatewayAuthorization::use_deno_permissions())
 }
 
 // This op is needed because creating a WS instance in JavaScript is a sync
@@ -127,17 +165,18 @@ pub fn op_ws_check_permission_and_cancel_handle(
   state: &mut OpState,
   #[string] api_name: String,
   #[string] url: String,
+  #[smi] client_rid: Option<ResourceId>,
   cancel_handle: bool,
 ) -> Result<Option<ResourceId>, WebsocketError> {
-  state.borrow_mut::<PermissionsContainer>().check_net_url(
-    &url::Url::parse(&url).map_err(WebsocketError::Url)?,
-    &api_name,
-  )?;
+  let url = url::Url::parse(&url).map_err(WebsocketError::Url)?;
+  let authorization =
+    authorize_websocket_egress(state, &api_name, &url, client_rid)?;
 
   if cancel_handle {
-    let rid = state
-      .resource_table
-      .add(WsCancelResource(CancelHandle::new_rc()));
+    let rid = state.resource_table.add(WsCancelResource {
+      cancel_handle: CancelHandle::new_rc(),
+      use_deno_client_permissions: authorization.use_deno_client_permissions,
+    });
     Ok(Some(rid))
   } else {
     Ok(None)
@@ -409,7 +448,7 @@ fn populate_common_request_headers(
 
 fn create_client_from_websocket_options(
   options: &FetchOptions,
-  permissions: PermissionsContainer,
+  permissions: Option<PermissionsContainer>,
   ca_certs: Vec<String>,
   unsafely_ignore_certificate_errors: bool,
 ) -> Result<deno_fetch::Client, HttpClientCreateError> {
@@ -422,7 +461,7 @@ fn create_client_from_websocket_options(
       ca_certs: ca_certs.into_iter().map(|cert| cert.into_bytes()).collect(),
       proxy: options.proxy.clone(),
       dns_resolver: options.resolver.clone(),
-      permissions: Some(permissions),
+      permissions,
       unsafely_ignore_certificate_errors: unsafely_ignore_certificate_errors
         .then_some(vec![]),
       client_cert_chain_and_key: options
@@ -453,21 +492,30 @@ pub async fn op_ws_create(
   unsafely_ignore_certificate_errors: bool,
   #[smi] client_rid: Option<u32>,
 ) -> Result<CreateResponse, WebsocketError> {
+  let parsed_url = url::Url::parse(&url).map_err(WebsocketError::Url)?;
   let (client, allow_host) = {
     let mut s = state.borrow_mut();
-    s.borrow_mut::<PermissionsContainer>()
-      .check_net_url(
-        &url::Url::parse(&url).map_err(WebsocketError::Url)?,
-        &api_name,
-      )
-      .expect(
-        "Permission check should have been done in op_ws_check_permission",
-      );
+    let use_deno_client_permissions = if let Some(cancel_rid) = cancel_handle {
+      s.resource_table
+        .get::<WsCancelResource>(cancel_rid)?
+        .use_deno_client_permissions
+    } else {
+      authorize_websocket_egress(&mut s, &api_name, &parsed_url, client_rid)?
+        .use_deno_client_permissions
+    };
+    if use_deno_client_permissions {
+      s.borrow_mut::<PermissionsContainer>()
+        .check_net_url(&parsed_url, &api_name)
+        .expect(
+          "Permission check should have been done in op_ws_check_permission",
+        );
+    }
     if let Some(rid) = client_rid {
       let r = s.resource_table.get::<HttpClientResource>(rid)?;
       (r.client.clone(), r.allow_host)
     } else if ca_certs.is_some() || unsafely_ignore_certificate_errors {
-      let permissions = s.borrow::<PermissionsContainer>().clone();
+      let permissions = use_deno_client_permissions
+        .then(|| s.borrow::<PermissionsContainer>().clone());
       let options = s.borrow::<FetchOptions>().clone();
       (
         create_client_from_websocket_options(
@@ -479,7 +527,13 @@ pub async fn op_ws_create(
         false,
       )
     } else {
-      (get_or_create_client_from_state(&mut s)?, false)
+      (
+        get_or_create_client_from_state_with_permissions(
+          &mut s,
+          use_deno_client_permissions,
+        )?,
+        false,
+      )
     }
   };
 
@@ -488,7 +542,7 @@ pub async fn op_ws_create(
       .borrow_mut()
       .resource_table
       .get::<WsCancelResource>(cancel_rid)?;
-    Some(r.0.clone())
+    Some(r.cancel_handle.clone())
   } else {
     None
   };
