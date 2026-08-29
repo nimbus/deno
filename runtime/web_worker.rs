@@ -674,6 +674,7 @@ impl WebWorker {
         crate::worker::create_custom_module_evaluation_callback(),
       ),
       eval_context_code_cache_cbs: None,
+      ..Default::default()
     });
 
     {

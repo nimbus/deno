@@ -62,6 +62,115 @@ fn test_execute_script_return_value() {
   }
 }
 
+#[test]
+fn locker_runtimes_retain_independent_state() {
+  let mut first = JsRuntime::new(RuntimeOptions {
+    use_locker: true,
+    ..Default::default()
+  });
+  assert!(first.release_v8_lock());
+
+  let mut second = JsRuntime::new(RuntimeOptions {
+    use_locker: true,
+    ..Default::default()
+  });
+  assert!(second.release_v8_lock());
+
+  {
+    let mut runtime = first.acquire_v8_lock();
+    runtime
+      .execute_script("first.js", "globalThis.value = 11")
+      .unwrap();
+  }
+  assert!(!first.is_v8_lock_held());
+
+  {
+    let mut runtime = second.acquire_v8_lock();
+    runtime
+      .execute_script("second.js", "globalThis.value = 29")
+      .unwrap();
+  }
+  assert!(!second.is_v8_lock_held());
+
+  first
+    .execute_script(
+      "verify_first.js",
+      "if (globalThis.value !== 11) throw new Error('first state changed')",
+    )
+    .unwrap();
+  assert!(first.is_v8_lock_held());
+  assert!(first.release_v8_lock());
+
+  second
+    .execute_script(
+      "verify_second.js",
+      "if (globalThis.value !== 29) throw new Error('second state changed')",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_locker_guard_preserves_the_outer_lock() {
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    use_locker: true,
+    ..Default::default()
+  });
+  assert!(runtime.release_v8_lock());
+
+  {
+    let mut outer = runtime.acquire_v8_lock();
+    assert!(outer.is_v8_lock_held());
+    {
+      let inner = outer.acquire_v8_lock();
+      assert!(inner.is_v8_lock_held());
+    }
+    assert!(outer.is_v8_lock_held());
+  }
+
+  assert!(!runtime.is_v8_lock_held());
+}
+
+#[test]
+fn warm_reset_preserves_evaluated_global_state() {
+  let mut runtime = JsRuntime::new(RuntimeOptions::default());
+  runtime
+    .execute_script("state.js", "globalThis.warmValue = 41")
+    .unwrap();
+
+  assert!(runtime.is_warm_reuse_safe());
+  runtime.reset_request_state().unwrap();
+  runtime
+    .execute_script(
+      "verify_state.js",
+      "if (globalThis.warmValue !== 41) throw new Error('state lost')",
+    )
+    .unwrap();
+}
+
+#[test]
+fn lazy_esm_termination_returns_an_error() {
+  let mut runtime = JsRuntime::new(RuntimeOptions::default());
+  let handle = runtime.v8_isolate().thread_safe_handle();
+  let terminator = std::thread::spawn(move || {
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(handle.terminate_execution());
+  });
+
+  let error = runtime
+    .lazy_load_es_module_with_code(
+      "ext:terminated",
+      "for (;;) {} export const value = 1;",
+    )
+    .unwrap_err();
+  assert!(
+    matches!(error.as_kind(), CoreErrorKind::ExecutionTerminated),
+    "unexpected error: {error:?} ({error})"
+  );
+
+  assert!(runtime.v8_isolate().cancel_terminate_execution());
+  terminator.join().unwrap();
+}
+
 #[derive(Default)]
 struct LoggingWaker {
   woken: AtomicBool,
