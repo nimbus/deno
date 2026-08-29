@@ -9,6 +9,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 
 use bytes::Bytes;
+use deno_core::OpState;
+use deno_core::url::Url;
+use deno_error::JsErrorBox;
 use deno_permissions::Permissions;
 use deno_permissions::PermissionsContainer;
 use deno_permissions::PermissionsOptions;
@@ -16,6 +19,7 @@ use deno_permissions::RuntimePermissionDescriptorParser;
 use deno_tls::rustls::pki_types::PrivateKeyDer;
 use fast_socks5::server::Config as Socks5Config;
 use fast_socks5::server::Socks5Socket;
+use http::Method;
 use http::header::ACCEPT_ENCODING;
 use http::header::CONTENT_ENCODING;
 use http::header::CONTENT_LENGTH;
@@ -33,7 +37,15 @@ use super::CheckoutTracker;
 use super::ConnectionReused;
 use super::ConnectionUsage;
 use super::CreateHttpClientOptions;
+use super::EgressGatewayAuthorization;
+use super::EgressGatewayRequest;
+use super::FetchEgressAuthorizationError;
+use super::Options;
+use super::authorize_http_request;
 use super::create_http_client;
+use super::create_http_client_with_environment_proxies;
+use super::ensure_custom_client_can_apply_egress_authorization;
+use super::get_or_create_client_from_state_with_authorization;
 use crate::dns;
 
 static GZIP_HELLO_FROM_SERVER: &[u8] = &[
@@ -49,6 +61,80 @@ static BR_HELLO_FROM_SERVER: &[u8] = &[
 static EXAMPLE_CRT: &[u8] = include_bytes!("../tls/testdata/example1_cert.der");
 static EXAMPLE_KEY: &[u8] =
   include_bytes!("../tls/testdata/example1_prikey.der");
+
+fn allow_without_deno_permissions(
+  _state: &mut OpState,
+  _request: EgressGatewayRequest<'_>,
+) -> Result<EgressGatewayAuthorization, JsErrorBox> {
+  Ok(EgressGatewayAuthorization::bypass_deno_permissions())
+}
+
+fn allow_with_deno_permissions(
+  _state: &mut OpState,
+  _request: EgressGatewayRequest<'_>,
+) -> Result<EgressGatewayAuthorization, JsErrorBox> {
+  Ok(EgressGatewayAuthorization::use_deno_permissions())
+}
+
+fn deny_before_deno_permissions(
+  _state: &mut OpState,
+  _request: EgressGatewayRequest<'_>,
+) -> Result<EgressGatewayAuthorization, JsErrorBox> {
+  Err(JsErrorBox::generic("blocked by egress gateway"))
+}
+
+#[test]
+fn egress_gateway_can_authorize_before_permissions_state_exists() {
+  let mut state = OpState::new(None);
+  state.put(Options {
+    egress_gateway_hook: Some(allow_without_deno_permissions),
+    ..Default::default()
+  });
+  let method = Method::GET;
+  let url = Url::parse("https://example.com/").unwrap();
+
+  let authorization =
+    authorize_http_request(&mut state, &method, &url, None).unwrap();
+
+  assert!(!authorization.use_deno_client_permissions);
+}
+
+#[test]
+fn egress_gateway_delegation_runs_deno_url_permissions() {
+  let mut state = OpState::new(None);
+  state.put(Options {
+    egress_gateway_hook: Some(allow_with_deno_permissions),
+    ..Default::default()
+  });
+  state.put(deny_net_permissions(&["example.com"]));
+  let method = Method::GET;
+  let url = Url::parse("https://example.com/").unwrap();
+
+  let error = authorize_http_request(&mut state, &method, &url, None)
+    .expect_err("hook delegation must preserve Deno URL permissions");
+
+  assert!(matches!(
+    error,
+    FetchEgressAuthorizationError::Permission(_)
+  ));
+}
+
+#[test]
+fn egress_gateway_denies_before_permissions_or_transport_state_is_needed() {
+  let mut state = OpState::new(None);
+  state.put(Options {
+    egress_gateway_hook: Some(deny_before_deno_permissions),
+    ..Default::default()
+  });
+  let method = Method::GET;
+  let url = Url::parse("https://example.com/").unwrap();
+
+  let error = authorize_http_request(&mut state, &method, &url, None)
+    .expect_err("egress denial should fail before permission/client lookup");
+
+  assert!(matches!(error, FetchEgressAuthorizationError::Hook(_)));
+  assert_eq!(error.to_string(), "blocked by egress gateway");
+}
 
 #[test]
 fn test_userspace_resolver() {
@@ -173,6 +259,7 @@ async fn run_test_client_with_resolver(
       dns_resolver: resolver,
       permissions: None,
       resolved_deny_check_kind: Default::default(),
+      resolved_address_checker: None,
       http1: true,
       http2: true,
       local_address: None,
@@ -218,6 +305,147 @@ impl dns::Resolve for FixedResolver {
     let addr = self.0;
     Box::pin(async move { Ok(vec![addr].into_iter()) })
   }
+}
+
+#[test]
+fn resolved_address_checker_rejects_explicit_proxy() {
+  let checker = dns::ResolvedAddressChecker::new(|_, _| Ok(()));
+  let error = create_http_client(
+    "fetch/test",
+    CreateHttpClientOptions {
+      proxy: Some(deno_tls::Proxy::Tcp {
+        hostname: "proxy.example".to_string(),
+        port: 8080,
+      }),
+      resolved_address_checker: Some(checker),
+      ..Default::default()
+    },
+  )
+  .expect_err("remote proxy DNS must not bypass the resolved-address checker");
+
+  assert!(matches!(
+    error,
+    crate::HttpClientCreateError::ResolvedAddressCheckerProxyUnsupported
+  ));
+}
+
+#[test]
+fn resolved_address_checker_does_not_load_environment_proxies() {
+  let checker = dns::ResolvedAddressChecker::new(|_, _| Ok(()));
+  create_http_client_with_environment_proxies(
+    "fetch/test",
+    CreateHttpClientOptions {
+      resolved_address_checker: Some(checker),
+      ..Default::default()
+    },
+    || panic!("a resolved-address checker must suppress environment proxies"),
+  )
+  .expect("checker-bearing client should build without environment proxies");
+}
+
+#[test]
+fn bypass_without_checker_reuses_a_cached_client() {
+  let mut state = OpState::new(None);
+  state.put(Options::default());
+
+  let first = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    EgressGatewayAuthorization::bypass_deno_permissions(),
+  )
+  .expect("first bypass client should build");
+  let second = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    EgressGatewayAuthorization::bypass_deno_permissions(),
+  )
+  .expect("second bypass client should reuse the cache");
+
+  assert!(Arc::ptr_eq(
+    &first.connector.proxies,
+    &second.connector.proxies
+  ));
+}
+
+#[test]
+fn equivalent_checker_authorizations_reuse_a_cached_client() {
+  let mut state = OpState::new(None);
+  state.put(Options::default());
+
+  let build_authorization = || {
+    EgressGatewayAuthorization::bypass_deno_permissions()
+      .with_resolved_address_checker(
+        dns::ResolvedAddressChecker::new(|_, _| Ok(()))
+          .with_client_cache_key(b"policy-a".to_vec()),
+      )
+  };
+  let first = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    build_authorization(),
+  )
+  .expect("first checker client should build");
+  let second = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    build_authorization(),
+  )
+  .expect("equivalent checker should reuse the cache");
+
+  assert!(Arc::ptr_eq(
+    &first.connector.proxies,
+    &second.connector.proxies
+  ));
+}
+
+#[test]
+fn checker_authorizations_without_an_equivalence_key_do_not_share_clients() {
+  let mut state = OpState::new(None);
+  state.put(Options::default());
+
+  let build_authorization = || {
+    EgressGatewayAuthorization::bypass_deno_permissions()
+      .with_resolved_address_checker(dns::ResolvedAddressChecker::new(
+        |_, _| Ok(()),
+      ))
+  };
+  let first = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    build_authorization(),
+  )
+  .expect("first uncached checker client should build");
+  let second = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    build_authorization(),
+  )
+  .expect("second uncached checker client should build");
+
+  assert!(!Arc::ptr_eq(
+    &first.connector.proxies,
+    &second.connector.proxies
+  ));
+}
+
+#[test]
+fn custom_fetch_client_rejects_checker_but_can_remain_stricter() {
+  ensure_custom_client_can_apply_egress_authorization(
+    Some(42),
+    &EgressGatewayAuthorization::bypass_deno_permissions(),
+  )
+  .expect("checker-less custom client may retain stricter Deno permissions");
+
+  let authorization = EgressGatewayAuthorization::use_deno_permissions()
+    .with_resolved_address_checker(dns::ResolvedAddressChecker::new(|_, _| {
+      Ok(())
+    }));
+  let error = ensure_custom_client_can_apply_egress_authorization(
+    Some(42),
+    &authorization,
+  )
+  .expect_err("custom client must not drop the resolved-address checker");
+
+  assert!(
+    error.to_string().contains(
+      "custom fetch client cannot apply the egress gateway authorization"
+    ),
+    "custom-client rejection should identify the unavailable enforcement seam: {error}"
+  );
 }
 
 fn deny_net_permissions(deny: &[&str]) -> PermissionsContainer {
@@ -276,6 +504,7 @@ async fn test_import_client_denies_host_resolving_to_denied_ip() {
       dns_resolver: resolver,
       permissions: Some(deny_import_permissions(&[denied_ip])),
       resolved_deny_check_kind: dns::ResolvedDenyCheckKind::Import,
+      resolved_address_checker: None,
       http1: true,
       http2: true,
       local_address: None,
@@ -331,6 +560,7 @@ async fn test_http_proxy_denies_destination_resolving_to_denied_ip() {
       dns_resolver: resolver,
       permissions: Some(deny_net_permissions(&[denied_ip])),
       resolved_deny_check_kind: Default::default(),
+      resolved_address_checker: None,
       http1: true,
       http2: true,
       local_address: None,
@@ -673,6 +903,7 @@ fn create_http_test_client() -> crate::Client {
       http2_max_header_list_size: None,
       permissions: None,
       resolved_deny_check_kind: Default::default(),
+      resolved_address_checker: None,
     },
   )
   .unwrap()

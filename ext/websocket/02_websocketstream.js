@@ -157,7 +157,7 @@ class WebSocketStream {
     const cancelRid = op_ws_check_permission_and_cancel_handle(
       "WebSocketStream.abort()",
       this[_url],
-      true,
+      null,
     );
 
     if (options.signal?.aborted) {

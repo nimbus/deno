@@ -194,6 +194,13 @@ pub(crate) fn from_env() -> Proxies {
   Proxies { intercepts, no }
 }
 
+pub(crate) fn disabled() -> Proxies {
+  Proxies {
+    no: None,
+    intercepts: Vec::new(),
+  }
+}
+
 pub fn basic_auth(user: &str, pass: Option<&str>) -> HeaderValue {
   use std::io::Write;
 

@@ -10,6 +10,7 @@ use std::task::Poll;
 use std::task::{self};
 use std::vec;
 
+use deno_error::JsErrorBox;
 use deno_permissions::PermissionsContainer;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use http::Uri;
@@ -52,6 +53,57 @@ pub type Resolving =
 // `HttpConnector` `Send`.
 pub trait Resolve: Send + Sync + std::fmt::Debug {
   fn resolve(&self, name: Name) -> Resolving;
+}
+
+/// Embedder-owned authorization for one resolved destination address.
+///
+/// The connector calls this before it opens a socket and then connects only to
+/// the already-checked address set. This lets a richer egress gateway enforce
+/// IP-level policy without disabling DNS-rebinding protection when it bypasses
+/// Deno's coarse hostname permissions.
+#[derive(Clone)]
+pub struct ResolvedAddressChecker {
+  check: Arc<ResolvedAddressCheck>,
+  client_cache_key: Option<Arc<[u8]>>,
+}
+
+type ResolvedAddressCheck =
+  dyn Fn(&IpAddr, u16) -> Result<(), JsErrorBox> + Send + Sync;
+
+impl ResolvedAddressChecker {
+  pub fn new(
+    check: impl Fn(&IpAddr, u16) -> Result<(), JsErrorBox> + Send + Sync + 'static,
+  ) -> Self {
+    Self {
+      check: Arc::new(check),
+      client_cache_key: None,
+    }
+  }
+
+  /// Allows clients that enforce equivalent checker behavior to share their
+  /// TLS configuration and connection pool.
+  ///
+  /// The embedder must use the same opaque key only when the checker has the
+  /// same behavior for every destination address and port. Omit the key when
+  /// that equivalence cannot be guaranteed; the client will not be cached.
+  pub fn with_client_cache_key(mut self, key: Vec<u8>) -> Self {
+    self.client_cache_key = Some(key.into());
+    self
+  }
+
+  pub(crate) fn client_cache_key(&self) -> Option<Arc<[u8]>> {
+    self.client_cache_key.clone()
+  }
+
+  fn check(&self, ip: &IpAddr, port: u16) -> Result<(), JsErrorBox> {
+    (self.check)(ip, port)
+  }
+}
+
+impl std::fmt::Debug for ResolvedAddressChecker {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("ResolvedAddressChecker(..)")
+  }
 }
 
 impl Default for Resolver {
@@ -169,12 +221,28 @@ impl Service<Name> for Resolver {
 /// addresses to the inner connector through a pre-resolved resolver, so the
 /// connection goes to exactly the addresses that were checked and no second
 /// DNS query can race with a record change.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PermissionedHttpConnector {
   resolver: Resolver,
   local_address: Option<IpAddr>,
   permissions: Option<PermissionsContainer>,
   deny_check_kind: ResolvedDenyCheckKind,
+  resolved_address_checker: Option<ResolvedAddressChecker>,
+}
+
+impl std::fmt::Debug for PermissionedHttpConnector {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("PermissionedHttpConnector")
+      .field("resolver", &self.resolver)
+      .field("local_address", &self.local_address)
+      .field("permissions", &self.permissions.is_some())
+      .field("deny_check_kind", &self.deny_check_kind)
+      .field(
+        "resolved_address_checker",
+        &self.resolved_address_checker.is_some(),
+      )
+      .finish()
+  }
 }
 
 impl PermissionedHttpConnector {
@@ -183,12 +251,14 @@ impl PermissionedHttpConnector {
     local_address: Option<IpAddr>,
     permissions: Option<PermissionsContainer>,
     deny_check_kind: ResolvedDenyCheckKind,
+    resolved_address_checker: Option<ResolvedAddressChecker>,
   ) -> Self {
     Self {
       resolver,
       local_address,
       permissions,
       deny_check_kind,
+      resolved_address_checker,
     }
   }
 
@@ -244,23 +314,32 @@ pub enum ResolvedDenyCheckKind {
 }
 
 fn check_resolved(
-  permissions: &PermissionsContainer,
+  permissions: Option<&PermissionsContainer>,
   kind: ResolvedDenyCheckKind,
+  resolved_address_checker: Option<&ResolvedAddressChecker>,
   ip: &IpAddr,
   port: u16,
 ) -> Result<(), BoxError> {
-  let mut permissions = permissions.clone();
-  match kind {
-    ResolvedDenyCheckKind::Net => {
-      permissions.check_net_resolved(ip, port, "fetch()")
+  if let Some(permissions) = permissions {
+    let mut permissions = permissions.clone();
+    match kind {
+      ResolvedDenyCheckKind::Net => {
+        permissions.check_net_resolved(ip, port, "fetch()")
+      }
+      ResolvedDenyCheckKind::Import => {
+        permissions.check_import_resolved(ip, port, "import()")
+      }
     }
-    ResolvedDenyCheckKind::Import => {
-      permissions.check_import_resolved(ip, port, "import()")
-    }
+    .map_err(|e| -> BoxError {
+      io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()).into()
+    })?;
   }
-  .map_err(|e| {
-    io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()).into()
-  })
+  if let Some(checker) = resolved_address_checker {
+    checker.check(ip, port).map_err(|e| -> BoxError {
+      io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()).into()
+    })?;
+  }
+  Ok(())
 }
 
 /// Extracts the connection host (with IPv6 brackets stripped) and the
@@ -298,10 +377,10 @@ impl Service<Uri> for PermissionedHttpConnector {
   fn call(&mut self, uri: Uri) -> Self::Future {
     let this = self.clone();
     Box::pin(async move {
-      let Some(permissions) = &this.permissions else {
+      if this.permissions.is_none() && this.resolved_address_checker.is_none() {
         let mut connector = this.http_connector(this.resolver.clone());
         return connector.call(uri).await.map_err(Into::into);
-      };
+      }
 
       let Some((bare_host, port)) = bare_host_and_port(&uri) else {
         return Err(
@@ -312,7 +391,13 @@ impl Service<Uri> for PermissionedHttpConnector {
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
         // IP literal: `HttpConnector` connects to it directly without
         // consulting the resolver.
-        check_resolved(permissions, this.deny_check_kind, &ip, port)?;
+        check_resolved(
+          this.permissions.as_ref(),
+          this.deny_check_kind,
+          this.resolved_address_checker.as_ref(),
+          &ip,
+          port,
+        )?;
         let mut connector = this.http_connector(this.resolver.clone());
         return connector.call(uri).await.map_err(Into::into);
       }
@@ -328,7 +413,13 @@ impl Service<Uri> for PermissionedHttpConnector {
         .map_err(|e| -> BoxError { DnsError(e).into() })?
         .collect();
       for addr in &addrs {
-        check_resolved(permissions, this.deny_check_kind, &addr.ip(), port)?;
+        check_resolved(
+          this.permissions.as_ref(),
+          this.deny_check_kind,
+          this.resolved_address_checker.as_ref(),
+          &addr.ip(),
+          port,
+        )?;
       }
 
       let mut connector =
@@ -364,25 +455,57 @@ impl CheckDst for PermissionedHttpConnector {
   ) -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>> {
     let this = self.clone();
     Box::pin(async move {
-      let Some(permissions) = &this.permissions else {
+      // Checker-bearing clients currently disable every proxy source before
+      // this path can run. Keep these checker branches fail-closed so a future
+      // proxy implementation cannot silently bypass address authorization.
+      if this.permissions.is_none() && this.resolved_address_checker.is_none() {
         return Ok(());
-      };
+      }
       let Some((bare_host, port)) = bare_host_and_port(&uri) else {
+        if this.resolved_address_checker.is_some() {
+          return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "embedder resolved-address checker requires a destination authority",
+          )
+          .into());
+        }
         return Ok(());
       };
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
-        return check_resolved(permissions, this.deny_check_kind, &ip, port);
+        return check_resolved(
+          this.permissions.as_ref(),
+          this.deny_check_kind,
+          this.resolved_address_checker.as_ref(),
+          &ip,
+          port,
+        );
       }
       let Ok(name) = Name::from_str(bare_host) else {
+        if this.resolved_address_checker.is_some() {
+          return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "embedder resolved-address checker rejected an invalid DNS authority",
+          )
+          .into());
+        }
         return Ok(());
       };
-      // Best-effort: if the destination can't be resolved locally, let the
-      // proxy handle it rather than failing the request.
-      let Ok(addrs) = this.resolver.clone().call(name).await else {
-        return Ok(());
+      let addrs = match this.resolver.clone().call(name).await {
+        Ok(addrs) => addrs,
+        // Deno's coarse permission check remains best-effort for a proxy that
+        // may resolve names unavailable locally. An embedder checker must fail
+        // closed because otherwise the proxy can bypass its resolved-IP gate.
+        Err(_error) if this.resolved_address_checker.is_none() => return Ok(()),
+        Err(error) => return Err(DnsError(error).into()),
       };
       for addr in addrs {
-        check_resolved(permissions, this.deny_check_kind, &addr.ip(), port)?;
+        check_resolved(
+          this.permissions.as_ref(),
+          this.deny_check_kind,
+          this.resolved_address_checker.as_ref(),
+          &addr.ip(),
+          port,
+        )?;
       }
       Ok(())
     })
@@ -418,5 +541,65 @@ mod tests {
 
     let addr = addr.next().unwrap();
     assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+  }
+
+  #[tokio::test]
+  async fn embedder_checker_denies_resolved_address_before_connect() {
+    let resolver =
+      Resolver::custom(Arc::new(DebugResolver("127.0.0.1:0".parse().unwrap())));
+    let checker = ResolvedAddressChecker::new(|ip, port| {
+      if ip.is_loopback() {
+        return Err(JsErrorBox::generic(format!(
+          "resolved internal destination {ip}:{port} denied"
+        )));
+      }
+      Ok(())
+    });
+    let mut connector = PermissionedHttpConnector::new(
+      resolver,
+      None,
+      None,
+      ResolvedDenyCheckKind::default(),
+      Some(checker),
+    );
+    let uri = "http://public.example:8080/"
+      .parse::<Uri>()
+      .expect("test URI should parse");
+
+    let error = match connector.call(uri).await {
+      Ok(_) => panic!("resolved-address denial must happen before connect"),
+      Err(error) => error,
+    };
+
+    assert!(
+      error
+        .to_string()
+        .contains("resolved internal destination 127.0.0.1:8080 denied"),
+      "resolved-address checker reason should be retained: {error}"
+    );
+  }
+
+  #[tokio::test]
+  async fn checker_check_dst_fails_closed_if_proxy_support_is_reenabled() {
+    let checker = ResolvedAddressChecker::new(|_, _| Ok(()));
+    let connector = PermissionedHttpConnector::new(
+      Resolver::default(),
+      None,
+      None,
+      ResolvedDenyCheckKind::default(),
+      Some(checker),
+    );
+
+    let uri = "/relative-path"
+      .parse::<Uri>()
+      .expect("test URI should parse");
+    let error = connector
+      .check_dst(uri)
+      .await
+      .expect_err("checker-bearing proxy destination must fail closed");
+    assert!(
+      error.to_string().contains("resolved-address checker"),
+      "invalid destination should retain a checker diagnostic: {error}"
+    );
   }
 }
