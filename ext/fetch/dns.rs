@@ -63,8 +63,11 @@ pub trait Resolve: Send + Sync + std::fmt::Debug {
 /// Deno's coarse hostname permissions.
 #[derive(Clone)]
 pub struct ResolvedAddressChecker {
-  check: Arc<dyn Fn(&IpAddr, u16) -> Result<(), JsErrorBox> + Send + Sync>,
+  check: Arc<ResolvedAddressCheck>,
 }
+
+type ResolvedAddressCheck =
+  dyn Fn(&IpAddr, u16) -> Result<(), JsErrorBox> + Send + Sync;
 
 impl ResolvedAddressChecker {
   pub fn new(

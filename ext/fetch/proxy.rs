@@ -191,10 +191,6 @@ pub(crate) fn disabled() -> Proxies {
   }
 }
 
-pub(crate) fn from_env_unless_disabled(disable: bool) -> Proxies {
-  if disable { disabled() } else { from_env() }
-}
-
 pub fn basic_auth(user: &str, pass: Option<&str>) -> HeaderValue {
   use std::io::Write;
 
@@ -988,14 +984,6 @@ where
       Proxied::Vsock(_) => Connected::new().proxy(true),
     }
   }
-}
-
-#[test]
-fn disabling_environment_proxies_returns_an_empty_proxy_set() {
-  let proxies = from_env_unless_disabled(true);
-
-  assert!(proxies.intercepts.is_empty());
-  assert!(proxies.no.is_none());
 }
 
 #[test]

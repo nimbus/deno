@@ -402,9 +402,7 @@ pub fn get_or_create_client_from_state_with_authorization(
   state: &mut OpState,
   authorization: EgressGatewayAuthorization,
 ) -> Result<Client, HttpClientCreateError> {
-  if !authorization.use_deno_client_permissions
-    || authorization.resolved_address_checker.is_some()
-  {
+  if authorization.resolved_address_checker.is_some() {
     let permissions = authorization
       .use_deno_client_permissions
       .then(|| state.borrow::<PermissionsContainer>().clone());
@@ -414,6 +412,15 @@ pub fn get_or_create_client_from_state_with_authorization(
       permissions,
       authorization.resolved_address_checker,
     );
+  }
+  if !authorization.use_deno_client_permissions {
+    if let Some(client) = state.try_borrow::<BypassPermissionsClient>() {
+      return Ok(client.0.clone());
+    }
+    let options = state.borrow::<Options>();
+    let client = create_client_from_options(options, None, None)?;
+    state.put(BypassPermissionsClient(client.clone()));
+    return Ok(client);
   }
   if let Some(client) = state.try_borrow::<Client>() {
     Ok(client.clone())
@@ -425,6 +432,8 @@ pub fn get_or_create_client_from_state_with_authorization(
     Ok(client)
   }
 }
+
+struct BypassPermissionsClient(Client);
 
 pub fn create_client_from_options(
   options: &Options,
@@ -579,11 +588,14 @@ fn authorize_http_request(
 fn ensure_custom_client_can_apply_egress_authorization(
   client_rid: Option<ResourceId>,
   authorization: &EgressGatewayAuthorization,
-) -> Result<(), FetchError> {
-  if client_rid.is_some() && authorization.resolved_address_checker.is_some() {
-    return Err(FetchError::Other(JsErrorBox::generic(
-      "a custom fetch client cannot apply the egress gateway resolved-address checker",
-    )));
+) -> Result<(), JsErrorBox> {
+  if client_rid.is_some()
+    && (!authorization.use_deno_client_permissions
+      || authorization.resolved_address_checker.is_some())
+  {
+    return Err(JsErrorBox::generic(
+      "a custom fetch client cannot apply the egress gateway authorization",
+    ));
   }
   Ok(())
 }
@@ -632,7 +644,8 @@ pub fn op_fetch(
       ensure_custom_client_can_apply_egress_authorization(
         client_rid,
         &egress_authorization,
-      )?;
+      )
+      .map_err(FetchError::Other)?;
       let (client, allow_host) = if let Some(rid) = client_rid {
         let r = state.resource_table.get::<HttpClientResource>(rid)?;
         (r.client.clone(), r.allow_host)
@@ -1209,6 +1222,18 @@ pub fn create_http_client(
   user_agent: &str,
   options: CreateHttpClientOptions,
 ) -> Result<Client, HttpClientCreateError> {
+  create_http_client_with_environment_proxies(
+    user_agent,
+    options,
+    proxy::from_env,
+  )
+}
+
+fn create_http_client_with_environment_proxies(
+  user_agent: &str,
+  options: CreateHttpClientOptions,
+  environment_proxies: impl FnOnce() -> proxy::Proxies,
+) -> Result<Client, HttpClientCreateError> {
   if options.resolved_address_checker.is_some() && options.proxy.is_some() {
     return Err(HttpClientCreateError::ResolvedAddressCheckerProxyUnsupported);
   }
@@ -1265,8 +1290,11 @@ pub fn create_http_client(
     builder = client_builder_hook(builder);
   }
 
-  let mut proxies =
-    proxy::from_env_unless_disabled(options.resolved_address_checker.is_some());
+  let mut proxies = if options.resolved_address_checker.is_some() {
+    proxy::disabled()
+  } else {
+    environment_proxies()
+  };
   if let Some(proxy) = options.proxy {
     let intercept = match proxy {
       Proxy::Http { url, basic_auth } => {
