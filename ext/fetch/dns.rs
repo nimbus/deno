@@ -415,6 +415,13 @@ impl CheckDst for PermissionedHttpConnector {
         return Ok(());
       }
       let Some((bare_host, port)) = bare_host_and_port(&uri) else {
+        if this.resolved_address_checker.is_some() {
+          return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "embedder resolved-address checker requires a destination authority",
+          )
+          .into());
+        }
         return Ok(());
       };
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
@@ -426,6 +433,13 @@ impl CheckDst for PermissionedHttpConnector {
         );
       }
       let Ok(name) = Name::from_str(bare_host) else {
+        if this.resolved_address_checker.is_some() {
+          return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "embedder resolved-address checker rejected an invalid DNS authority",
+          )
+          .into());
+        }
         return Ok(());
       };
       let addrs = match this.resolver.clone().call(name).await {
@@ -508,6 +522,29 @@ mod tests {
         .to_string()
         .contains("resolved internal destination 127.0.0.1:8080 denied"),
       "resolved-address checker reason should be retained: {error}"
+    );
+  }
+
+  #[tokio::test]
+  async fn embedder_checker_rejects_unusable_proxy_destination_authorities() {
+    let checker = ResolvedAddressChecker::new(|_, _| Ok(()));
+    let connector = PermissionedHttpConnector::new(
+      Resolver::default(),
+      None,
+      None,
+      Some(checker),
+    );
+
+    let uri = "/relative-path"
+      .parse::<Uri>()
+      .expect("test URI should parse");
+    let error = connector
+      .check_dst(uri)
+      .await
+      .expect_err("checker-bearing proxy destination must fail closed");
+    assert!(
+      error.to_string().contains("resolved-address checker"),
+      "invalid destination should retain a checker diagnostic: {error}"
     );
   }
 }

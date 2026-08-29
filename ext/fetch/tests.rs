@@ -39,6 +39,7 @@ use super::FetchEgressAuthorizationError;
 use super::Options;
 use super::authorize_http_request;
 use super::create_http_client;
+use super::ensure_custom_client_can_apply_egress_authorization;
 use crate::dns;
 
 static GZIP_HELLO_FROM_SERVER: &[u8] = &[
@@ -292,6 +293,27 @@ fn resolved_address_checker_rejects_explicit_proxy() {
     error,
     crate::HttpClientCreateError::ResolvedAddressCheckerProxyUnsupported
   ));
+}
+
+#[test]
+fn resolved_address_checker_rejects_custom_fetch_client() {
+  let authorization = EgressGatewayAuthorization::bypass_deno_permissions()
+    .with_resolved_address_checker(dns::ResolvedAddressChecker::new(|_, _| {
+      Ok(())
+    }));
+
+  let error = ensure_custom_client_can_apply_egress_authorization(
+    Some(42),
+    &authorization,
+  )
+  .expect_err("custom client must not drop the resolved-address checker");
+
+  assert!(
+    error
+      .to_string()
+      .contains("custom fetch client cannot apply the egress gateway resolved-address checker"),
+    "custom-client rejection should identify the unavailable enforcement seam: {error}"
+  );
 }
 
 fn deny_net_permissions(deny: &[&str]) -> PermissionsContainer {

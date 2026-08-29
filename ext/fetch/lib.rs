@@ -576,6 +576,18 @@ fn authorize_http_request(
   Ok(EgressGatewayAuthorization::use_deno_permissions())
 }
 
+fn ensure_custom_client_can_apply_egress_authorization(
+  client_rid: Option<ResourceId>,
+  authorization: &EgressGatewayAuthorization,
+) -> Result<(), FetchError> {
+  if client_rid.is_some() && authorization.resolved_address_checker.is_some() {
+    return Err(FetchError::Other(JsErrorBox::generic(
+      "a custom fetch client cannot apply the egress gateway resolved-address checker",
+    )));
+  }
+  Ok(())
+}
+
 #[op2(stack_trace)]
 #[allow(clippy::too_many_arguments, reason = "op")]
 #[allow(clippy::large_enum_variant, reason = "TODO: investigate")]
@@ -617,6 +629,10 @@ pub fn op_fetch(
     "http" | "https" => {
       let egress_authorization =
         authorize_http_request(state, &method, &url, client_rid)?;
+      ensure_custom_client_can_apply_egress_authorization(
+        client_rid,
+        &egress_authorization,
+      )?;
       let (client, allow_host) = if let Some(rid) = client_rid {
         let r = state.resource_table.get::<HttpClientResource>(rid)?;
         (r.client.clone(), r.allow_host)
