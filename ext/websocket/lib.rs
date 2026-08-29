@@ -26,11 +26,14 @@ use deno_core::url;
 use deno_error::JsErrorBox;
 use deno_fetch::ClientConnectError;
 use deno_fetch::CreateHttpClientOptions;
+use deno_fetch::EgressGatewayAuthorization;
+use deno_fetch::EgressGatewayRequest;
+use deno_fetch::EgressGatewayTransport;
 use deno_fetch::HttpClientCreateError;
 use deno_fetch::HttpClientResource;
 use deno_fetch::Options as FetchOptions;
 use deno_fetch::create_http_client;
-use deno_fetch::get_or_create_client_from_state;
+use deno_fetch::get_or_create_client_from_state_with_authorization;
 use deno_net::raw::NetworkStream;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
@@ -63,6 +66,9 @@ use tokio::io::WriteHalf;
 
 use crate::stream::WebSocketStream;
 
+#[cfg(test)]
+#[path = "tests.rs"]
+mod egress_tests;
 mod stream;
 
 static USE_WRITEV: Lazy<bool> = Lazy::new(|| {
@@ -104,9 +110,32 @@ pub enum WebsocketError {
   #[class(inherit)]
   #[error(transparent)]
   Canceled(#[from] deno_core::Canceled),
+  #[class(inherit)]
+  #[error(transparent)]
+  Other(#[from] JsErrorBox),
 }
 
-pub struct WsCancelResource(Rc<CancelHandle>);
+pub struct WsCancelResource {
+  cancel_handle: Rc<CancelHandle>,
+  authorization: EgressGatewayAuthorization,
+  authorized_url: url::Url,
+  client_rid: Option<ResourceId>,
+}
+
+impl WsCancelResource {
+  fn authorization_for(
+    &self,
+    url: &url::Url,
+    client_rid: Option<ResourceId>,
+  ) -> Result<EgressGatewayAuthorization, WebsocketError> {
+    if self.authorized_url != *url || self.client_rid != client_rid {
+      return Err(WebsocketError::Other(JsErrorBox::generic(
+        "WebSocket authorization does not match the connection target",
+      )));
+    }
+    Ok(self.authorization.clone())
+  }
+}
 
 impl Resource for WsCancelResource {
   fn name(&self) -> Cow<'_, str> {
@@ -114,8 +143,54 @@ impl Resource for WsCancelResource {
   }
 
   fn close(self: Rc<Self>) {
-    self.0.cancel()
+    self.cancel_handle.cancel()
   }
+}
+
+fn authorize_websocket_egress(
+  state: &mut OpState,
+  api_name: &str,
+  url: &url::Url,
+  client_rid: Option<ResourceId>,
+) -> Result<EgressGatewayAuthorization, WebsocketError> {
+  let egress_gateway_hook = {
+    let options = state.borrow::<FetchOptions>();
+    options.egress_gateway_hook
+  };
+  let authorization = if let Some(egress_gateway_hook) = egress_gateway_hook {
+    egress_gateway_hook(
+      state,
+      EgressGatewayRequest {
+        transport: EgressGatewayTransport::WebSocket,
+        method: &Method::GET,
+        url,
+        client_rid,
+      },
+    )
+    .map_err(WebsocketError::Other)?
+  } else {
+    EgressGatewayAuthorization::use_deno_permissions()
+  };
+  if authorization.use_deno_client_permissions {
+    state
+      .borrow_mut::<PermissionsContainer>()
+      .check_net_url(url, api_name)?;
+  }
+  Ok(authorization)
+}
+
+fn ensure_custom_client_can_apply_egress_authorization(
+  client_rid: Option<ResourceId>,
+  authorization: &EgressGatewayAuthorization,
+) -> Result<(), JsErrorBox> {
+  // A checker-less bypass permits omitting Deno permissions; it does not
+  // require a custom client to discard its stricter permission checks.
+  if client_rid.is_some() && authorization.resolved_address_checker.is_some() {
+    return Err(JsErrorBox::generic(
+      "a custom WebSocket client cannot apply the egress gateway authorization",
+    ));
+  }
+  Ok(())
 }
 
 // This op is needed because creating a WS instance in JavaScript is a sync
@@ -127,21 +202,32 @@ pub fn op_ws_check_permission_and_cancel_handle(
   state: &mut OpState,
   #[string] api_name: String,
   #[string] url: String,
-  cancel_handle: bool,
-) -> Result<Option<ResourceId>, WebsocketError> {
-  state.borrow_mut::<PermissionsContainer>().check_net_url(
-    &url::Url::parse(&url).map_err(WebsocketError::Url)?,
-    &api_name,
+  #[smi] client_rid: Option<ResourceId>,
+) -> Result<ResourceId, WebsocketError> {
+  check_permission_and_cancel_handle(state, api_name, url, client_rid)
+}
+
+fn check_permission_and_cancel_handle(
+  state: &mut OpState,
+  api_name: String,
+  url: String,
+  client_rid: Option<ResourceId>,
+) -> Result<ResourceId, WebsocketError> {
+  let url = url::Url::parse(&url).map_err(WebsocketError::Url)?;
+  let authorization =
+    authorize_websocket_egress(state, &api_name, &url, client_rid)?;
+  ensure_custom_client_can_apply_egress_authorization(
+    client_rid,
+    &authorization,
   )?;
 
-  if cancel_handle {
-    let rid = state
-      .resource_table
-      .add(WsCancelResource(CancelHandle::new_rc()));
-    Ok(Some(rid))
-  } else {
-    Ok(None)
-  }
+  let rid = state.resource_table.add(WsCancelResource {
+    cancel_handle: CancelHandle::new_rc(),
+    authorization,
+    authorized_url: url,
+    client_rid,
+  });
+  Ok(rid)
 }
 
 #[derive(deno_core::ToV8)]
@@ -413,7 +499,8 @@ fn populate_common_request_headers(
 
 fn create_client_from_websocket_options(
   options: &FetchOptions,
-  permissions: PermissionsContainer,
+  permissions: Option<PermissionsContainer>,
+  resolved_address_checker: Option<deno_fetch::dns::ResolvedAddressChecker>,
   ca_certs: Vec<String>,
   unsafely_ignore_certificate_errors: bool,
 ) -> Result<deno_fetch::Client, HttpClientCreateError> {
@@ -426,8 +513,9 @@ fn create_client_from_websocket_options(
       ca_certs: ca_certs.into_iter().map(|cert| cert.into_bytes()).collect(),
       proxy: options.proxy.clone(),
       dns_resolver: options.resolver.clone(),
-      permissions: Some(permissions),
+      permissions,
       resolved_deny_check_kind: Default::default(),
+      resolved_address_checker,
       unsafely_ignore_certificate_errors: unsafely_ignore_certificate_errors
         .then_some(vec![]),
       client_cert_chain_and_key: options
@@ -491,33 +579,46 @@ async fn op_ws_create_inner(
   unsafely_ignore_certificate_errors: bool,
   client_rid: Option<u32>,
 ) -> Result<CreateResponse, WebsocketError> {
+  let parsed_url = url::Url::parse(&url).map_err(WebsocketError::Url)?;
   let (client, allow_host) = {
     let mut s = state.borrow_mut();
-    s.borrow_mut::<PermissionsContainer>()
-      .check_net_url(
-        &url::Url::parse(&url).map_err(WebsocketError::Url)?,
-        &api_name,
-      )
-      .expect(
-        "Permission check should have been done in op_ws_check_permission",
-      );
+    let authorization = if let Some(cancel_rid) = cancel_handle {
+      s.resource_table
+        .get::<WsCancelResource>(cancel_rid)?
+        .authorization_for(&parsed_url, client_rid)?
+    } else {
+      authorize_websocket_egress(&mut s, &api_name, &parsed_url, client_rid)?
+    };
+    ensure_custom_client_can_apply_egress_authorization(
+      client_rid,
+      &authorization,
+    )?;
     if let Some(rid) = client_rid {
       let r = s.resource_table.get::<HttpClientResource>(rid)?;
       (r.client.clone(), r.allow_host)
     } else if ca_certs.is_some() || unsafely_ignore_certificate_errors {
-      let permissions = s.borrow::<PermissionsContainer>().clone();
+      let permissions = authorization
+        .use_deno_client_permissions
+        .then(|| s.borrow::<PermissionsContainer>().clone());
       let options = s.borrow::<FetchOptions>().clone();
       (
         create_client_from_websocket_options(
           &options,
           permissions,
+          authorization.resolved_address_checker,
           ca_certs.unwrap_or_default(),
           unsafely_ignore_certificate_errors,
         )?,
         false,
       )
     } else {
-      (get_or_create_client_from_state(&mut s)?, false)
+      (
+        get_or_create_client_from_state_with_authorization(
+          &mut s,
+          authorization,
+        )?,
+        false,
+      )
     }
   };
 
@@ -526,7 +627,7 @@ async fn op_ws_create_inner(
       .borrow_mut()
       .resource_table
       .get::<WsCancelResource>(cancel_rid)?;
-    Some(r.0.clone())
+    Some(r.cancel_handle.clone())
   } else {
     None
   };

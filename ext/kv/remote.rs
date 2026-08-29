@@ -181,6 +181,7 @@ impl DatabaseHandler for RemoteDbHandler {
         dns_resolver: Default::default(),
         permissions: None,
         resolved_deny_check_kind: Default::default(),
+        resolved_address_checker: None,
         unsafely_ignore_certificate_errors: options
           .unsafely_ignore_certificate_errors
           .clone(),
