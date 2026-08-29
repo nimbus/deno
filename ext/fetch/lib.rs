@@ -149,22 +149,51 @@ pub struct EgressGatewayRequest<'a> {
   pub client_rid: Option<ResourceId>,
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct EgressGatewayAuthorization {
   pub use_deno_client_permissions: bool,
+  /// Address-level policy that the connector runs after DNS resolution and
+  /// before opening a socket. A gateway that bypasses Deno permissions should
+  /// provide this whenever its policy depends on the resolved destination.
+  pub resolved_address_checker: Option<dns::ResolvedAddressChecker>,
+}
+
+impl std::fmt::Debug for EgressGatewayAuthorization {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("EgressGatewayAuthorization")
+      .field(
+        "use_deno_client_permissions",
+        &self.use_deno_client_permissions,
+      )
+      .field(
+        "resolved_address_checker",
+        &self.resolved_address_checker.is_some(),
+      )
+      .finish()
+  }
 }
 
 impl EgressGatewayAuthorization {
   pub fn use_deno_permissions() -> Self {
     Self {
       use_deno_client_permissions: true,
+      resolved_address_checker: None,
     }
   }
 
   pub fn bypass_deno_permissions() -> Self {
     Self {
       use_deno_client_permissions: false,
+      resolved_address_checker: None,
     }
+  }
+
+  pub fn with_resolved_address_checker(
+    mut self,
+    checker: dns::ResolvedAddressChecker,
+  ) -> Self {
+    self.resolved_address_checker = Some(checker);
+    self
   }
 }
 
@@ -361,16 +390,37 @@ pub fn get_or_create_client_from_state_with_permissions(
   state: &mut OpState,
   use_deno_client_permissions: bool,
 ) -> Result<Client, HttpClientCreateError> {
-  if !use_deno_client_permissions {
+  let authorization = if use_deno_client_permissions {
+    EgressGatewayAuthorization::use_deno_permissions()
+  } else {
+    EgressGatewayAuthorization::bypass_deno_permissions()
+  };
+  get_or_create_client_from_state_with_authorization(state, authorization)
+}
+
+pub fn get_or_create_client_from_state_with_authorization(
+  state: &mut OpState,
+  authorization: EgressGatewayAuthorization,
+) -> Result<Client, HttpClientCreateError> {
+  if !authorization.use_deno_client_permissions
+    || authorization.resolved_address_checker.is_some()
+  {
+    let permissions = authorization
+      .use_deno_client_permissions
+      .then(|| state.borrow::<PermissionsContainer>().clone());
     let options = state.borrow::<Options>();
-    return create_client_from_options(options, None);
+    return create_client_from_options(
+      options,
+      permissions,
+      authorization.resolved_address_checker,
+    );
   }
   if let Some(client) = state.try_borrow::<Client>() {
     Ok(client.clone())
   } else {
     let permissions = state.borrow::<PermissionsContainer>().clone();
     let options = state.borrow::<Options>();
-    let client = create_client_from_options(options, Some(permissions))?;
+    let client = create_client_from_options(options, Some(permissions), None)?;
     state.put::<Client>(client.clone());
     Ok(client)
   }
@@ -379,6 +429,7 @@ pub fn get_or_create_client_from_state_with_permissions(
 pub fn create_client_from_options(
   options: &Options,
   permissions: Option<PermissionsContainer>,
+  resolved_address_checker: Option<dns::ResolvedAddressChecker>,
 ) -> Result<Client, HttpClientCreateError> {
   create_http_client(
     &options.user_agent,
@@ -390,6 +441,7 @@ pub fn create_client_from_options(
       proxy: options.proxy.clone(),
       dns_resolver: options.resolver.clone(),
       permissions,
+      resolved_address_checker,
       unsafely_ignore_certificate_errors: options
         .unsafely_ignore_certificate_errors
         .clone(),
@@ -570,9 +622,9 @@ pub fn op_fetch(
         (r.client.clone(), r.allow_host)
       } else {
         (
-          get_or_create_client_from_state_with_permissions(
+          get_or_create_client_from_state_with_authorization(
             state,
-            egress_authorization.use_deno_client_permissions,
+            egress_authorization,
           )?,
           false,
         )
@@ -1031,6 +1083,7 @@ pub fn op_fetch_custom_client(
       proxy: args.proxy,
       dns_resolver: dns::Resolver::default(),
       permissions: Some(permissions),
+      resolved_address_checker: None,
       unsafely_ignore_certificate_errors: options
         .unsafely_ignore_certificate_errors
         .clone(),
@@ -1069,6 +1122,10 @@ pub struct CreateHttpClientOptions {
   /// When set, every connection runs the net-deny check against the IP it
   /// actually connected to, mirroring `Deno.connect`.
   pub permissions: Option<PermissionsContainer>,
+  /// Optional embedder policy check for each resolved destination address.
+  /// When present, the connector pins the checked address set and ignores
+  /// environment proxies so remote proxy DNS cannot bypass the check.
+  pub resolved_address_checker: Option<dns::ResolvedAddressChecker>,
   pub unsafely_ignore_certificate_errors: Option<Vec<String>>,
   pub client_cert_chain_and_key: Option<TlsKey>,
   pub pool_max_idle_per_host: Option<usize>,
@@ -1088,6 +1145,7 @@ impl Default for CreateHttpClientOptions {
       proxy: None,
       dns_resolver: dns::Resolver::default(),
       permissions: None,
+      resolved_address_checker: None,
       unsafely_ignore_certificate_errors: None,
       client_cert_chain_and_key: None,
       pool_max_idle_per_host: None,
@@ -1119,6 +1177,10 @@ pub enum HttpClientCreateError {
   #[class(inherit)]
   #[error(transparent)]
   RootCertStore(JsErrorBox),
+  #[error(
+    "an explicit proxy cannot be combined with an embedder resolved-address egress checker"
+  )]
+  ResolvedAddressCheckerProxyUnsupported,
   #[error("Unix proxy is not supported on Windows")]
   UnixProxyNotSupportedOnWindows,
   #[error("Vsock proxy is not supported on this platform")]
@@ -1131,6 +1193,9 @@ pub fn create_http_client(
   user_agent: &str,
   options: CreateHttpClientOptions,
 ) -> Result<Client, HttpClientCreateError> {
+  if options.resolved_address_checker.is_some() && options.proxy.is_some() {
+    return Err(HttpClientCreateError::ResolvedAddressCheckerProxyUnsupported);
+  }
   let mut tls_config =
     deno_tls::create_client_config(deno_tls::TlsClientConfigOptions {
       root_cert_store: options.root_cert_store,
@@ -1169,6 +1234,7 @@ pub fn create_http_client(
     options.dns_resolver.clone(),
     local_address,
     options.permissions,
+    options.resolved_address_checker.clone(),
   );
 
   let user_agent = user_agent.parse::<HeaderValue>().map_err(|_| {
@@ -1183,7 +1249,11 @@ pub fn create_http_client(
     builder = client_builder_hook(builder);
   }
 
-  let mut proxies = proxy::from_env();
+  let mut proxies = if options.resolved_address_checker.is_some() {
+    proxy::disabled()
+  } else {
+    proxy::from_env()
+  };
   if let Some(proxy) = options.proxy {
     let intercept = match proxy {
       Proxy::Http { url, basic_auth } => {

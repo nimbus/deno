@@ -33,7 +33,7 @@ use deno_fetch::HttpClientCreateError;
 use deno_fetch::HttpClientResource;
 use deno_fetch::Options as FetchOptions;
 use deno_fetch::create_http_client;
-use deno_fetch::get_or_create_client_from_state_with_permissions;
+use deno_fetch::get_or_create_client_from_state_with_authorization;
 use deno_net::raw::NetworkStream;
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
@@ -116,23 +116,23 @@ pub enum WebsocketError {
 
 pub struct WsCancelResource {
   cancel_handle: Rc<CancelHandle>,
-  use_deno_client_permissions: bool,
+  authorization: EgressGatewayAuthorization,
   authorized_url: url::Url,
   client_rid: Option<ResourceId>,
 }
 
 impl WsCancelResource {
-  fn use_deno_client_permissions_for(
+  fn authorization_for(
     &self,
     url: &url::Url,
     client_rid: Option<ResourceId>,
-  ) -> Result<bool, WebsocketError> {
+  ) -> Result<EgressGatewayAuthorization, WebsocketError> {
     if self.authorized_url != *url || self.client_rid != client_rid {
       return Err(WebsocketError::Other(JsErrorBox::generic(
         "WebSocket authorization does not match the connection target",
       )));
     }
-    Ok(self.use_deno_client_permissions)
+    Ok(self.authorization.clone())
   }
 }
 
@@ -204,7 +204,7 @@ fn check_permission_and_cancel_handle(
 
   let rid = state.resource_table.add(WsCancelResource {
     cancel_handle: CancelHandle::new_rc(),
-    use_deno_client_permissions: authorization.use_deno_client_permissions,
+    authorization,
     authorized_url: url,
     client_rid,
   });
@@ -477,6 +477,7 @@ fn populate_common_request_headers(
 fn create_client_from_websocket_options(
   options: &FetchOptions,
   permissions: Option<PermissionsContainer>,
+  resolved_address_checker: Option<deno_fetch::dns::ResolvedAddressChecker>,
   ca_certs: Vec<String>,
   unsafely_ignore_certificate_errors: bool,
 ) -> Result<deno_fetch::Client, HttpClientCreateError> {
@@ -490,6 +491,7 @@ fn create_client_from_websocket_options(
       proxy: options.proxy.clone(),
       dns_resolver: options.resolver.clone(),
       permissions,
+      resolved_address_checker,
       unsafely_ignore_certificate_errors: unsafely_ignore_certificate_errors
         .then_some(vec![]),
       client_cert_chain_and_key: options
@@ -523,25 +525,32 @@ pub async fn op_ws_create(
   let parsed_url = url::Url::parse(&url).map_err(WebsocketError::Url)?;
   let (client, allow_host) = {
     let mut s = state.borrow_mut();
-    let use_deno_client_permissions = if let Some(cancel_rid) = cancel_handle {
+    let authorization = if let Some(cancel_rid) = cancel_handle {
       s.resource_table
         .get::<WsCancelResource>(cancel_rid)?
-        .use_deno_client_permissions_for(&parsed_url, client_rid)?
+        .authorization_for(&parsed_url, client_rid)?
     } else {
       authorize_websocket_egress(&mut s, &api_name, &parsed_url, client_rid)?
-        .use_deno_client_permissions
     };
+    if client_rid.is_some() && authorization.resolved_address_checker.is_some()
+    {
+      return Err(WebsocketError::Other(JsErrorBox::generic(
+        "a custom WebSocket client cannot apply the egress gateway resolved-address checker",
+      )));
+    }
     if let Some(rid) = client_rid {
       let r = s.resource_table.get::<HttpClientResource>(rid)?;
       (r.client.clone(), r.allow_host)
     } else if ca_certs.is_some() || unsafely_ignore_certificate_errors {
-      let permissions = use_deno_client_permissions
+      let permissions = authorization
+        .use_deno_client_permissions
         .then(|| s.borrow::<PermissionsContainer>().clone());
       let options = s.borrow::<FetchOptions>().clone();
       (
         create_client_from_websocket_options(
           &options,
           permissions,
+          authorization.resolved_address_checker,
           ca_certs.unwrap_or_default(),
           unsafely_ignore_certificate_errors,
         )?,
@@ -549,9 +558,9 @@ pub async fn op_ws_create(
       )
     } else {
       (
-        get_or_create_client_from_state_with_permissions(
+        get_or_create_client_from_state_with_authorization(
           &mut s,
-          use_deno_client_permissions,
+          authorization,
         )?,
         false,
       )

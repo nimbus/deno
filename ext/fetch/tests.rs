@@ -224,6 +224,7 @@ async fn run_test_client_with_resolver(
       pool_idle_timeout: None,
       dns_resolver: resolver,
       permissions: None,
+      resolved_address_checker: None,
       http1: true,
       http2: true,
       local_address: None,
@@ -269,6 +270,28 @@ impl dns::Resolve for FixedResolver {
     let addr = self.0;
     Box::pin(async move { Ok(vec![addr].into_iter()) })
   }
+}
+
+#[test]
+fn resolved_address_checker_rejects_explicit_proxy() {
+  let checker = dns::ResolvedAddressChecker::new(|_, _| Ok(()));
+  let error = create_http_client(
+    "fetch/test",
+    CreateHttpClientOptions {
+      proxy: Some(deno_tls::Proxy::Tcp {
+        hostname: "proxy.example".to_string(),
+        port: 8080,
+      }),
+      resolved_address_checker: Some(checker),
+      ..Default::default()
+    },
+  )
+  .expect_err("remote proxy DNS must not bypass the resolved-address checker");
+
+  assert!(matches!(
+    error,
+    crate::HttpClientCreateError::ResolvedAddressCheckerProxyUnsupported
+  ));
 }
 
 fn deny_net_permissions(deny: &[&str]) -> PermissionsContainer {
@@ -319,6 +342,7 @@ async fn test_http_proxy_denies_destination_resolving_to_denied_ip() {
       pool_idle_timeout: None,
       dns_resolver: resolver,
       permissions: Some(deny_net_permissions(&[denied_ip])),
+      resolved_address_checker: None,
       http1: true,
       http2: true,
       local_address: None,
@@ -660,6 +684,7 @@ fn create_http_test_client() -> crate::Client {
       client_builder_hook: None,
       http2_max_header_list_size: None,
       permissions: None,
+      resolved_address_checker: None,
     },
   )
   .unwrap()

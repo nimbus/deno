@@ -122,12 +122,13 @@ fn websocket_gateway_bypass_is_bound_to_url_and_client() {
 
   assert!(
     !resource
-      .use_deno_client_permissions_for(&authorized_url, Some(42))
+      .authorization_for(&authorized_url, Some(42))
       .expect("the exact authorized target should match")
+      .use_deno_client_permissions
   );
   assert!(
     resource
-      .use_deno_client_permissions_for(
+      .authorization_for(
         &Url::parse("wss://other.example/socket").unwrap(),
         Some(42),
       )
@@ -135,7 +136,7 @@ fn websocket_gateway_bypass_is_bound_to_url_and_client() {
   );
   assert!(
     resource
-      .use_deno_client_permissions_for(&authorized_url, Some(43))
+      .authorization_for(&authorized_url, Some(43))
       .is_err()
   );
 }

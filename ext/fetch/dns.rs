@@ -10,6 +10,7 @@ use std::task::Poll;
 use std::task::{self};
 use std::vec;
 
+use deno_error::JsErrorBox;
 use deno_permissions::PermissionsContainer;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use http::Uri;
@@ -52,6 +53,37 @@ pub type Resolving =
 // `HttpConnector` `Send`.
 pub trait Resolve: Send + Sync + std::fmt::Debug {
   fn resolve(&self, name: Name) -> Resolving;
+}
+
+/// Embedder-owned authorization for one resolved destination address.
+///
+/// The connector calls this before it opens a socket and then connects only to
+/// the already-checked address set. This lets a richer egress gateway enforce
+/// IP-level policy without disabling DNS-rebinding protection when it bypasses
+/// Deno's coarse hostname permissions.
+#[derive(Clone)]
+pub struct ResolvedAddressChecker {
+  check: Arc<dyn Fn(&IpAddr, u16) -> Result<(), JsErrorBox> + Send + Sync>,
+}
+
+impl ResolvedAddressChecker {
+  pub fn new(
+    check: impl Fn(&IpAddr, u16) -> Result<(), JsErrorBox> + Send + Sync + 'static,
+  ) -> Self {
+    Self {
+      check: Arc::new(check),
+    }
+  }
+
+  fn check(&self, ip: &IpAddr, port: u16) -> Result<(), JsErrorBox> {
+    (self.check)(ip, port)
+  }
+}
+
+impl std::fmt::Debug for ResolvedAddressChecker {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("ResolvedAddressChecker(..)")
+  }
 }
 
 impl Default for Resolver {
@@ -169,11 +201,26 @@ impl Service<Name> for Resolver {
 /// addresses to the inner connector through a pre-resolved resolver, so the
 /// connection goes to exactly the addresses that were checked and no second
 /// DNS query can race with a record change.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PermissionedHttpConnector {
   resolver: Resolver,
   local_address: Option<IpAddr>,
   permissions: Option<PermissionsContainer>,
+  resolved_address_checker: Option<ResolvedAddressChecker>,
+}
+
+impl std::fmt::Debug for PermissionedHttpConnector {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("PermissionedHttpConnector")
+      .field("resolver", &self.resolver)
+      .field("local_address", &self.local_address)
+      .field("permissions", &self.permissions.is_some())
+      .field(
+        "resolved_address_checker",
+        &self.resolved_address_checker.is_some(),
+      )
+      .finish()
+  }
 }
 
 impl PermissionedHttpConnector {
@@ -181,11 +228,13 @@ impl PermissionedHttpConnector {
     resolver: Resolver,
     local_address: Option<IpAddr>,
     permissions: Option<PermissionsContainer>,
+    resolved_address_checker: Option<ResolvedAddressChecker>,
   ) -> Self {
     Self {
       resolver,
       local_address,
       permissions,
+      resolved_address_checker,
     }
   }
 
@@ -230,16 +279,25 @@ impl std::error::Error for DnsError {
 }
 
 fn check_resolved(
-  permissions: &PermissionsContainer,
+  permissions: Option<&PermissionsContainer>,
+  resolved_address_checker: Option<&ResolvedAddressChecker>,
   ip: &IpAddr,
   port: u16,
 ) -> Result<(), BoxError> {
-  permissions
-    .clone()
-    .check_net_resolved(ip, port, "fetch()")
-    .map_err(|e| {
+  if let Some(permissions) = permissions {
+    permissions
+      .clone()
+      .check_net_resolved(ip, port, "fetch()")
+      .map_err(|e| -> BoxError {
+        io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()).into()
+      })?;
+  }
+  if let Some(checker) = resolved_address_checker {
+    checker.check(ip, port).map_err(|e| -> BoxError {
       io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()).into()
-    })
+    })?;
+  }
+  Ok(())
 }
 
 /// Extracts the connection host (with IPv6 brackets stripped) and the
@@ -277,10 +335,10 @@ impl Service<Uri> for PermissionedHttpConnector {
   fn call(&mut self, uri: Uri) -> Self::Future {
     let this = self.clone();
     Box::pin(async move {
-      let Some(permissions) = &this.permissions else {
+      if this.permissions.is_none() && this.resolved_address_checker.is_none() {
         let mut connector = this.http_connector(this.resolver.clone());
         return connector.call(uri).await.map_err(Into::into);
-      };
+      }
 
       let Some((bare_host, port)) = bare_host_and_port(&uri) else {
         return Err(
@@ -291,7 +349,12 @@ impl Service<Uri> for PermissionedHttpConnector {
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
         // IP literal: `HttpConnector` connects to it directly without
         // consulting the resolver.
-        check_resolved(permissions, &ip, port)?;
+        check_resolved(
+          this.permissions.as_ref(),
+          this.resolved_address_checker.as_ref(),
+          &ip,
+          port,
+        )?;
         let mut connector = this.http_connector(this.resolver.clone());
         return connector.call(uri).await.map_err(Into::into);
       }
@@ -307,7 +370,12 @@ impl Service<Uri> for PermissionedHttpConnector {
         .map_err(|e| -> BoxError { DnsError(e).into() })?
         .collect();
       for addr in &addrs {
-        check_resolved(permissions, &addr.ip(), port)?;
+        check_resolved(
+          this.permissions.as_ref(),
+          this.resolved_address_checker.as_ref(),
+          &addr.ip(),
+          port,
+        )?;
       }
 
       let mut connector =
@@ -343,25 +411,38 @@ impl CheckDst for PermissionedHttpConnector {
   ) -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>> {
     let this = self.clone();
     Box::pin(async move {
-      let Some(permissions) = &this.permissions else {
+      if this.permissions.is_none() && this.resolved_address_checker.is_none() {
         return Ok(());
-      };
+      }
       let Some((bare_host, port)) = bare_host_and_port(&uri) else {
         return Ok(());
       };
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
-        return check_resolved(permissions, &ip, port);
+        return check_resolved(
+          this.permissions.as_ref(),
+          this.resolved_address_checker.as_ref(),
+          &ip,
+          port,
+        );
       }
       let Ok(name) = Name::from_str(bare_host) else {
         return Ok(());
       };
-      // Best-effort: if the destination can't be resolved locally, let the
-      // proxy handle it rather than failing the request.
-      let Ok(addrs) = this.resolver.clone().call(name).await else {
-        return Ok(());
+      let addrs = match this.resolver.clone().call(name).await {
+        Ok(addrs) => addrs,
+        // Deno's coarse permission check remains best-effort for a proxy that
+        // may resolve names unavailable locally. An embedder checker must fail
+        // closed because otherwise the proxy can bypass its resolved-IP gate.
+        Err(_error) if this.resolved_address_checker.is_none() => return Ok(()),
+        Err(error) => return Err(DnsError(error).into()),
       };
       for addr in addrs {
-        check_resolved(permissions, &addr.ip(), port)?;
+        check_resolved(
+          this.permissions.as_ref(),
+          this.resolved_address_checker.as_ref(),
+          &addr.ip(),
+          port,
+        )?;
       }
       Ok(())
     })
@@ -397,5 +478,36 @@ mod tests {
 
     let addr = addr.next().unwrap();
     assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+  }
+
+  #[tokio::test]
+  async fn embedder_checker_denies_resolved_address_before_connect() {
+    let resolver =
+      Resolver::custom(Arc::new(DebugResolver("127.0.0.1:0".parse().unwrap())));
+    let checker = ResolvedAddressChecker::new(|ip, port| {
+      if ip.is_loopback() {
+        return Err(JsErrorBox::generic(format!(
+          "resolved internal destination {ip}:{port} denied"
+        )));
+      }
+      Ok(())
+    });
+    let mut connector =
+      PermissionedHttpConnector::new(resolver, None, None, Some(checker));
+    let uri = "http://public.example:8080/"
+      .parse::<Uri>()
+      .expect("test URI should parse");
+
+    let error = match connector.call(uri).await {
+      Ok(_) => panic!("resolved-address denial must happen before connect"),
+      Err(error) => error,
+    };
+
+    assert!(
+      error
+        .to_string()
+        .contains("resolved internal destination 127.0.0.1:8080 denied"),
+      "resolved-address checker reason should be retained: {error}"
+    );
   }
 }
