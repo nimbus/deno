@@ -313,11 +313,17 @@ impl JsRealmInner {
     self.function_templates.clone()
   }
 
-  pub fn destroy(self) {
+  pub fn destroy(self, isolate: &mut v8::Isolate) {
     let state = self.state();
-    let raw_ptr = self.state().isolate.unwrap();
-    // SAFETY: We know the isolate outlives the realm
-    let mut isolate = unsafe { v8::Isolate::from_raw_isolate_ptr(raw_ptr) };
+    let expected_isolate = state
+      .isolate
+      .expect("realm must retain its isolate identity until destruction");
+    let actual_isolate = unsafe { isolate.as_raw_isolate_ptr() };
+    assert_eq!(
+      super::setup::isolate_ptr_to_key(expected_isolate),
+      super::setup::isolate_ptr_to_key(actual_isolate),
+      "realm must be destroyed through its owning isolate"
+    );
 
     // Close the immediate check/idle handles before the uv loop is dropped.
     // SAFETY: The uv loop is still alive (op_state hasn't been cleared yet).
@@ -331,19 +337,18 @@ impl JsRealmInner {
       // `Global::into_raw()` pointer during registration. We
       // reconstruct the Global via `from_raw` so it is properly
       // dropped. `NonNull::new_unchecked` is safe because we checked
-      // `!is_null()`. `isolate` is valid because we just obtained it
-      // from the raw isolate pointer above.
+      // `!is_null()`.
       unsafe {
         let data = (*loop_ptr).data;
         if !data.is_null() {
           let raw = std::ptr::NonNull::new_unchecked(data as *mut v8::Context);
-          let _global = v8::Global::from_raw(&mut isolate, raw);
+          let _global = v8::Global::from_raw(isolate, raw);
           (*loop_ptr).data = std::ptr::null_mut();
         }
       }
     }
 
-    v8::scope!(let scope, &mut isolate);
+    v8::scope!(let scope, isolate);
     // These globals will prevent snapshots from completing, take them
     state.exception_state.prepare_to_destroy();
     std::mem::take(&mut *state.js_event_loop_tick_cb.borrow_mut());

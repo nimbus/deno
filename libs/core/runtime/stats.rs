@@ -68,6 +68,10 @@ impl RuntimeActivityTraces {
     self.traces.borrow_mut()[activity_type as usize].remove(&id);
   }
 
+  pub(crate) fn clear_traces(&self) {
+    *self.traces.borrow_mut() = Default::default();
+  }
+
   pub fn is_enabled(&self) -> bool {
     self.enabled.get()
   }
