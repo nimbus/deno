@@ -1,0 +1,89 @@
+# Nimbus fork CI.
+#
+# The upstream generated workflows assume denoland infrastructure, including
+# larger runners, release secrets, and upload buckets. This workflow is the
+# required fork signal. It checks the full workspace and runs the focused
+# verification for each crate that carries a Nimbus runtime contract.
+#
+# Linux-only on purpose: Nimbus proves the published fork tags on both Linux
+# and macOS in the consuming repository's release-readiness gates.
+
+name: nimbus_ci
+
+on:
+  push:
+    branches:
+      - 'nimbus/**'
+    tags:
+      - 'v*-nimbus.*'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: nimbus-ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  check-and-test:
+    name: check and test (linux-x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - uses: dsherret/rust-toolchain-file@3551321aa44dd44a0393eb3b6bdfbc5d25ecf621
+
+      - name: Install Deno for deno_core consistency tests
+        uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282
+        with:
+          deno-version: v2.x
+
+      - name: Cache Cargo registry and Git sources
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: nimbus-ci-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: nimbus-ci-cargo-
+
+      - name: Check workspace
+        run: cargo check --locked --workspace
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Nimbus carry crates
+        run: >-
+          cargo clippy --locked
+          -p deno_core
+          -p serde_v8
+          -p deno_node
+          -p deno_fetch
+          -p deno_websocket
+          -p deno_kv
+          -p deno_runtime
+          --lib -- -D warnings
+
+      - name: Test deno_core
+        run: cargo test --locked -p deno_core --lib
+
+      - name: Test serde_v8
+        run: cargo test --locked -p serde_v8 --lib
+
+      - name: Test deno_node
+        run: cargo test --locked -p deno_node --lib
+
+      - name: Test deno_fetch
+        run: cargo test --locked -p deno_fetch --lib
+
+      - name: Test deno_websocket
+        run: cargo test --locked -p deno_websocket --lib
+
+      - name: Test deno_runtime
+        run: cargo test --locked -p deno_runtime --lib
