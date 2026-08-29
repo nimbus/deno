@@ -1265,11 +1265,8 @@ pub fn create_http_client(
     builder = client_builder_hook(builder);
   }
 
-  let mut proxies = if options.resolved_address_checker.is_some() {
-    proxy::disabled()
-  } else {
-    proxy::from_env()
-  };
+  let mut proxies =
+    proxy::from_env_unless_disabled(options.resolved_address_checker.is_some());
   if let Some(proxy) = options.proxy {
     let intercept = match proxy {
       Proxy::Http { url, basic_auth } => {

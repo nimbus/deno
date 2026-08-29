@@ -178,6 +178,18 @@ fn authorize_websocket_egress(
   Ok(authorization)
 }
 
+fn ensure_custom_client_can_apply_egress_authorization(
+  client_rid: Option<ResourceId>,
+  authorization: &EgressGatewayAuthorization,
+) -> Result<(), WebsocketError> {
+  if client_rid.is_some() && authorization.resolved_address_checker.is_some() {
+    return Err(WebsocketError::Other(JsErrorBox::generic(
+      "a custom WebSocket client cannot apply the egress gateway resolved-address checker",
+    )));
+  }
+  Ok(())
+}
+
 // This op is needed because creating a WS instance in JavaScript is a sync
 // operation and should throw error when permissions are not fulfilled,
 // but actual op that connects WS is async.
@@ -532,12 +544,10 @@ pub async fn op_ws_create(
     } else {
       authorize_websocket_egress(&mut s, &api_name, &parsed_url, client_rid)?
     };
-    if client_rid.is_some() && authorization.resolved_address_checker.is_some()
-    {
-      return Err(WebsocketError::Other(JsErrorBox::generic(
-        "a custom WebSocket client cannot apply the egress gateway resolved-address checker",
-      )));
-    }
+    ensure_custom_client_can_apply_egress_authorization(
+      client_rid,
+      &authorization,
+    )?;
     if let Some(rid) = client_rid {
       let r = s.resource_table.get::<HttpClientResource>(rid)?;
       (r.client.clone(), r.allow_host)

@@ -17,6 +17,7 @@ use deno_permissions::RuntimePermissionDescriptorParser;
 use super::WebsocketError;
 use super::WsCancelResource;
 use super::check_permission_and_cancel_handle;
+use super::ensure_custom_client_can_apply_egress_authorization;
 
 fn allow_with_deno_permissions(
   _state: &mut OpState,
@@ -138,5 +139,26 @@ fn websocket_gateway_bypass_is_bound_to_url_and_client() {
     resource
       .authorization_for(&authorized_url, Some(43))
       .is_err()
+  );
+}
+
+#[test]
+fn resolved_address_checker_rejects_custom_websocket_client() {
+  let authorization = EgressGatewayAuthorization::bypass_deno_permissions()
+    .with_resolved_address_checker(
+      deno_fetch::dns::ResolvedAddressChecker::new(|_, _| Ok(())),
+    );
+
+  let error = ensure_custom_client_can_apply_egress_authorization(
+    Some(42),
+    &authorization,
+  )
+  .expect_err("custom client must not drop the resolved-address checker");
+
+  assert!(
+    error.to_string().contains(
+      "custom WebSocket client cannot apply the egress gateway resolved-address checker"
+    ),
+    "custom-client rejection should identify the unavailable enforcement seam: {error}"
   );
 }
