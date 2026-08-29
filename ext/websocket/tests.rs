@@ -71,7 +71,6 @@ fn websocket_gateway_deno_permission_denial_is_returned() {
     "new WebSocket()".to_string(),
     "wss://example.com/socket".to_string(),
     None,
-    true,
   )
   .expect_err(
     "Deno net permission denial should reject WebSocket authorization",
@@ -93,7 +92,6 @@ fn websocket_gateway_denial_precedes_permission_state() {
     "new WebSocket()".to_string(),
     "wss://example.com/socket".to_string(),
     None,
-    true,
   )
   .expect_err("egress gateway denial should reject before permission lookup");
 
@@ -114,10 +112,8 @@ fn websocket_gateway_bypass_is_bound_to_url_and_client() {
     "new WebSocket()".to_string(),
     authorized_url.to_string(),
     Some(42),
-    true,
   )
-  .expect("gateway bypass should not require a permissions container")
-  .expect("cancel resource should be created");
+  .expect("gateway bypass should not require a permissions container");
   let resource = state
     .resource_table
     .get::<WsCancelResource>(rid)

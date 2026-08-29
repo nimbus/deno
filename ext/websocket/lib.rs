@@ -188,15 +188,8 @@ pub fn op_ws_check_permission_and_cancel_handle(
   #[string] api_name: String,
   #[string] url: String,
   #[smi] client_rid: Option<ResourceId>,
-  cancel_handle: bool,
-) -> Result<Option<ResourceId>, WebsocketError> {
-  check_permission_and_cancel_handle(
-    state,
-    api_name,
-    url,
-    client_rid,
-    cancel_handle,
-  )
+) -> Result<ResourceId, WebsocketError> {
+  check_permission_and_cancel_handle(state, api_name, url, client_rid)
 }
 
 fn check_permission_and_cancel_handle(
@@ -204,23 +197,18 @@ fn check_permission_and_cancel_handle(
   api_name: String,
   url: String,
   client_rid: Option<ResourceId>,
-  cancel_handle: bool,
-) -> Result<Option<ResourceId>, WebsocketError> {
+) -> Result<ResourceId, WebsocketError> {
   let url = url::Url::parse(&url).map_err(WebsocketError::Url)?;
   let authorization =
     authorize_websocket_egress(state, &api_name, &url, client_rid)?;
 
-  if cancel_handle {
-    let rid = state.resource_table.add(WsCancelResource {
-      cancel_handle: CancelHandle::new_rc(),
-      use_deno_client_permissions: authorization.use_deno_client_permissions,
-      authorized_url: url,
-      client_rid,
-    });
-    Ok(Some(rid))
-  } else {
-    Ok(None)
-  }
+  let rid = state.resource_table.add(WsCancelResource {
+    cancel_handle: CancelHandle::new_rc(),
+    use_deno_client_permissions: authorization.use_deno_client_permissions,
+    authorized_url: url,
+    client_rid,
+  });
+  Ok(rid)
 }
 
 #[derive(deno_core::ToV8)]

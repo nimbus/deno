@@ -158,7 +158,6 @@ class WebSocketStream {
       "WebSocketStream.abort()",
       this[_url],
       null,
-      true,
     );
 
     if (options.signal?.aborted) {

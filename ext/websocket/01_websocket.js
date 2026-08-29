@@ -420,7 +420,6 @@ class WebSocket extends EventTarget {
       "WebSocket.abort()",
       this[_url],
       clientRid,
-      true,
     );
 
     this[_cancelHandle] = cancelRid;
