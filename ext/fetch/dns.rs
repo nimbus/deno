@@ -64,6 +64,7 @@ pub trait Resolve: Send + Sync + std::fmt::Debug {
 #[derive(Clone)]
 pub struct ResolvedAddressChecker {
   check: Arc<ResolvedAddressCheck>,
+  client_cache_key: Option<Arc<[u8]>>,
 }
 
 type ResolvedAddressCheck =
@@ -75,7 +76,23 @@ impl ResolvedAddressChecker {
   ) -> Self {
     Self {
       check: Arc::new(check),
+      client_cache_key: None,
     }
+  }
+
+  /// Allows clients that enforce equivalent checker behavior to share their
+  /// TLS configuration and connection pool.
+  ///
+  /// The embedder must use the same opaque key only when the checker has the
+  /// same behavior for every destination address and port. Omit the key when
+  /// that equivalence cannot be guaranteed; the client will not be cached.
+  pub fn with_client_cache_key(mut self, key: Vec<u8>) -> Self {
+    self.client_cache_key = Some(key.into());
+    self
+  }
+
+  pub(crate) fn client_cache_key(&self) -> Option<Arc<[u8]>> {
+    self.client_cache_key.clone()
   }
 
   fn check(&self, ip: &IpAddr, port: u16) -> Result<(), JsErrorBox> {
@@ -414,6 +431,9 @@ impl CheckDst for PermissionedHttpConnector {
   ) -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>> {
     let this = self.clone();
     Box::pin(async move {
+      // Checker-bearing clients currently disable every proxy source before
+      // this path can run. Keep these checker branches fail-closed so a future
+      // proxy implementation cannot silently bypass address authorization.
       if this.permissions.is_none() && this.resolved_address_checker.is_none() {
         return Ok(());
       }
@@ -529,7 +549,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn embedder_checker_rejects_unusable_proxy_destination_authorities() {
+  async fn checker_check_dst_fails_closed_if_proxy_support_is_reenabled() {
     let checker = ResolvedAddressChecker::new(|_, _| Ok(()));
     let connector = PermissionedHttpConnector::new(
       Resolver::default(),

@@ -9,6 +9,7 @@ mod tests;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::min;
+use std::collections::VecDeque;
 use std::convert::From;
 use std::future;
 use std::future::Future;
@@ -402,16 +403,32 @@ pub fn get_or_create_client_from_state_with_authorization(
   state: &mut OpState,
   authorization: EgressGatewayAuthorization,
 ) -> Result<Client, HttpClientCreateError> {
-  if authorization.resolved_address_checker.is_some() {
-    let permissions = authorization
-      .use_deno_client_permissions
+  if let Some(checker) = authorization.resolved_address_checker {
+    let use_deno_client_permissions = authorization.use_deno_client_permissions;
+    let cache_key = checker.client_cache_key();
+    if let Some(cache_key) = cache_key.as_deref()
+      && let Some(cache) = state.try_borrow_mut::<CheckerClientCache>()
+      && let Some(client) = cache.get(cache_key, use_deno_client_permissions)
+    {
+      return Ok(client);
+    }
+    let permissions = use_deno_client_permissions
       .then(|| state.borrow::<PermissionsContainer>().clone());
     let options = state.borrow::<Options>();
-    return create_client_from_options(
-      options,
-      permissions,
-      authorization.resolved_address_checker,
-    );
+    let client =
+      create_client_from_options(options, permissions, Some(checker))?;
+    if let Some(cache_key) = cache_key {
+      if let Some(cache) = state.try_borrow_mut::<CheckerClientCache>() {
+        cache.insert(cache_key, use_deno_client_permissions, client.clone());
+      } else {
+        state.put(CheckerClientCache::new(
+          cache_key,
+          use_deno_client_permissions,
+          client.clone(),
+        ));
+      }
+    }
+    return Ok(client);
   }
   if !authorization.use_deno_client_permissions {
     if let Some(client) = state.try_borrow::<BypassPermissionsClient>() {
@@ -434,6 +451,64 @@ pub fn get_or_create_client_from_state_with_authorization(
 }
 
 struct BypassPermissionsClient(Client);
+
+const CHECKER_CLIENT_CACHE_CAPACITY: usize = 16;
+
+#[derive(Default)]
+struct CheckerClientCache {
+  entries: VecDeque<CheckerClientCacheEntry>,
+}
+
+struct CheckerClientCacheEntry {
+  key: Arc<[u8]>,
+  use_deno_client_permissions: bool,
+  client: Client,
+}
+
+impl CheckerClientCache {
+  fn new(
+    key: Arc<[u8]>,
+    use_deno_client_permissions: bool,
+    client: Client,
+  ) -> Self {
+    let mut cache = Self::default();
+    cache.insert(key, use_deno_client_permissions, client);
+    cache
+  }
+
+  fn get(
+    &mut self,
+    key: &[u8],
+    use_deno_client_permissions: bool,
+  ) -> Option<Client> {
+    let position = self.entries.iter().position(|entry| {
+      entry.key.as_ref() == key
+        && entry.use_deno_client_permissions == use_deno_client_permissions
+    })?;
+    let entry = self.entries.remove(position)?;
+    let client = entry.client.clone();
+    self.entries.push_front(entry);
+    Some(client)
+  }
+
+  fn insert(
+    &mut self,
+    key: Arc<[u8]>,
+    use_deno_client_permissions: bool,
+    client: Client,
+  ) {
+    self.entries.retain(|entry| {
+      entry.key != key
+        || entry.use_deno_client_permissions != use_deno_client_permissions
+    });
+    self.entries.push_front(CheckerClientCacheEntry {
+      key,
+      use_deno_client_permissions,
+      client,
+    });
+    self.entries.truncate(CHECKER_CLIENT_CACHE_CAPACITY);
+  }
+}
 
 pub fn create_client_from_options(
   options: &Options,
@@ -589,10 +664,9 @@ fn ensure_custom_client_can_apply_egress_authorization(
   client_rid: Option<ResourceId>,
   authorization: &EgressGatewayAuthorization,
 ) -> Result<(), JsErrorBox> {
-  if client_rid.is_some()
-    && (!authorization.use_deno_client_permissions
-      || authorization.resolved_address_checker.is_some())
-  {
+  // A checker-less bypass permits omitting Deno permissions; it does not
+  // require a custom client to discard its stricter permission checks.
+  if client_rid.is_some() && authorization.resolved_address_checker.is_some() {
     return Err(JsErrorBox::generic(
       "a custom fetch client cannot apply the egress gateway authorization",
     ));

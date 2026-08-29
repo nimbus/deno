@@ -182,10 +182,9 @@ fn ensure_custom_client_can_apply_egress_authorization(
   client_rid: Option<ResourceId>,
   authorization: &EgressGatewayAuthorization,
 ) -> Result<(), JsErrorBox> {
-  if client_rid.is_some()
-    && (!authorization.use_deno_client_permissions
-      || authorization.resolved_address_checker.is_some())
-  {
+  // A checker-less bypass permits omitting Deno permissions; it does not
+  // require a custom client to discard its stricter permission checks.
+  if client_rid.is_some() && authorization.resolved_address_checker.is_some() {
     return Err(JsErrorBox::generic(
       "a custom WebSocket client cannot apply the egress gateway authorization",
     ));

@@ -334,29 +334,86 @@ fn bypass_without_checker_reuses_a_cached_client() {
 }
 
 #[test]
-fn custom_fetch_client_rejects_unsupported_gateway_authorization() {
-  let authorizations = [
-    EgressGatewayAuthorization::bypass_deno_permissions(),
-    EgressGatewayAuthorization::use_deno_permissions()
+fn equivalent_checker_authorizations_reuse_a_cached_client() {
+  let mut state = OpState::new(None);
+  state.put(Options::default());
+
+  let build_authorization = || {
+    EgressGatewayAuthorization::bypass_deno_permissions()
+      .with_resolved_address_checker(
+        dns::ResolvedAddressChecker::new(|_, _| Ok(()))
+          .with_client_cache_key(b"policy-a".to_vec()),
+      )
+  };
+  let first = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    build_authorization(),
+  )
+  .expect("first checker client should build");
+  let second = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    build_authorization(),
+  )
+  .expect("equivalent checker should reuse the cache");
+
+  assert!(Arc::ptr_eq(
+    &first.connector.proxies,
+    &second.connector.proxies
+  ));
+}
+
+#[test]
+fn checker_authorizations_without_an_equivalence_key_do_not_share_clients() {
+  let mut state = OpState::new(None);
+  state.put(Options::default());
+
+  let build_authorization = || {
+    EgressGatewayAuthorization::bypass_deno_permissions()
       .with_resolved_address_checker(dns::ResolvedAddressChecker::new(
         |_, _| Ok(()),
-      )),
-  ];
+      ))
+  };
+  let first = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    build_authorization(),
+  )
+  .expect("first uncached checker client should build");
+  let second = get_or_create_client_from_state_with_authorization(
+    &mut state,
+    build_authorization(),
+  )
+  .expect("second uncached checker client should build");
 
-  for authorization in authorizations {
-    let error = ensure_custom_client_can_apply_egress_authorization(
-      Some(42),
-      &authorization,
-    )
-    .expect_err("custom client must not change the gateway authorization");
+  assert!(!Arc::ptr_eq(
+    &first.connector.proxies,
+    &second.connector.proxies
+  ));
+}
 
-    assert!(
-      error.to_string().contains(
-        "custom fetch client cannot apply the egress gateway authorization"
-      ),
-      "custom-client rejection should identify the unavailable enforcement seam: {error}"
-    );
-  }
+#[test]
+fn custom_fetch_client_rejects_checker_but_can_remain_stricter() {
+  ensure_custom_client_can_apply_egress_authorization(
+    Some(42),
+    &EgressGatewayAuthorization::bypass_deno_permissions(),
+  )
+  .expect("checker-less custom client may retain stricter Deno permissions");
+
+  let authorization = EgressGatewayAuthorization::use_deno_permissions()
+    .with_resolved_address_checker(dns::ResolvedAddressChecker::new(|_, _| {
+      Ok(())
+    }));
+  let error = ensure_custom_client_can_apply_egress_authorization(
+    Some(42),
+    &authorization,
+  )
+  .expect_err("custom client must not drop the resolved-address checker");
+
+  assert!(
+    error.to_string().contains(
+      "custom fetch client cannot apply the egress gateway authorization"
+    ),
+    "custom-client rejection should identify the unavailable enforcement seam: {error}"
+  );
 }
 
 fn deny_net_permissions(deny: &[&str]) -> PermissionsContainer {

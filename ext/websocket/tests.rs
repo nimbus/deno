@@ -143,27 +143,27 @@ fn websocket_gateway_bypass_is_bound_to_url_and_client() {
 }
 
 #[test]
-fn custom_websocket_client_rejects_unsupported_gateway_authorization() {
-  let authorizations = [
-    EgressGatewayAuthorization::bypass_deno_permissions(),
-    EgressGatewayAuthorization::use_deno_permissions()
-      .with_resolved_address_checker(
-        deno_fetch::dns::ResolvedAddressChecker::new(|_, _| Ok(())),
-      ),
-  ];
+fn custom_websocket_client_rejects_checker_but_can_remain_stricter() {
+  ensure_custom_client_can_apply_egress_authorization(
+    Some(42),
+    &EgressGatewayAuthorization::bypass_deno_permissions(),
+  )
+  .expect("checker-less custom client may retain stricter Deno permissions");
 
-  for authorization in authorizations {
-    let error = ensure_custom_client_can_apply_egress_authorization(
-      Some(42),
-      &authorization,
-    )
-    .expect_err("custom client must not change the gateway authorization");
-
-    assert!(
-      error.to_string().contains(
-        "custom WebSocket client cannot apply the egress gateway authorization"
-      ),
-      "custom-client rejection should identify the unavailable enforcement seam: {error}"
+  let authorization = EgressGatewayAuthorization::use_deno_permissions()
+    .with_resolved_address_checker(
+      deno_fetch::dns::ResolvedAddressChecker::new(|_, _| Ok(())),
     );
-  }
+  let error = ensure_custom_client_can_apply_egress_authorization(
+    Some(42),
+    &authorization,
+  )
+  .expect_err("custom client must not drop the resolved-address checker");
+
+  assert!(
+    error.to_string().contains(
+      "custom WebSocket client cannot apply the egress gateway authorization"
+    ),
+    "custom-client rejection should identify the unavailable enforcement seam: {error}"
+  );
 }
