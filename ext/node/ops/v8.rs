@@ -28,6 +28,35 @@ use v8::ValueSerializerHelper;
 
 static EXPOSE_GC_FROM_SET_FLAGS: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeapSnapshotNearHeapLimitPolicy {
+  /// Preserve Node process-lifetime callback semantics.
+  AllowProcessLifetime,
+  /// Reject callback registration before permissions or allocation.
+  Deny,
+}
+
+impl HeapSnapshotNearHeapLimitPolicy {
+  fn ensure_allowed(self) -> Result<(), SetHeapSnapshotNearHeapLimitError> {
+    match self {
+      Self::AllowProcessLifetime => Ok(()),
+      Self::Deny => Err(SetHeapSnapshotNearHeapLimitError::DisabledByEmbedder),
+    }
+  }
+}
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+pub enum SetHeapSnapshotNearHeapLimitError {
+  #[class(generic)]
+  #[error(
+    "v8.setHeapSnapshotNearHeapLimit is disabled by the runtime embedder"
+  )]
+  DisabledByEmbedder,
+  #[class(inherit)]
+  #[error(transparent)]
+  Permission(#[from] deno_permissions::PermissionCheckError),
+}
+
 #[op2(fast)]
 pub fn op_v8_cached_data_version_tag() -> u32 {
   v8::script_compiler::cached_data_version_tag()
@@ -361,7 +390,10 @@ pub fn op_v8_set_heap_snapshot_near_heap_limit(
   state: &mut OpState,
   scope: &mut v8::PinScope<'_, '_>,
   #[smi] limit: u32,
-) -> Result<(), deno_permissions::PermissionCheckError> {
+) -> Result<(), SetHeapSnapshotNearHeapLimitError> {
+  state
+    .borrow::<HeapSnapshotNearHeapLimitPolicy>()
+    .ensure_allowed()?;
   let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
   let dir = state
     .borrow_mut::<PermissionsContainer>()
@@ -385,6 +417,29 @@ pub fn op_v8_set_heap_snapshot_near_heap_limit(
   let data = Box::into_raw(state) as *mut c_void;
   scope.add_near_heap_limit_callback(near_heap_limit_snapshot_callback, data);
   Ok(())
+}
+
+#[cfg(test)]
+mod policy_tests {
+  use super::HeapSnapshotNearHeapLimitPolicy;
+  use super::SetHeapSnapshotNearHeapLimitError;
+
+  #[test]
+  fn process_lifetime_policy_allows_callback_registration() {
+    assert!(
+      HeapSnapshotNearHeapLimitPolicy::AllowProcessLifetime
+        .ensure_allowed()
+        .is_ok()
+    );
+  }
+
+  #[test]
+  fn deny_policy_rejects_callback_registration() {
+    assert!(matches!(
+      HeapSnapshotNearHeapLimitPolicy::Deny.ensure_allowed(),
+      Err(SetHeapSnapshotNearHeapLimitError::DisabledByEmbedder)
+    ));
+  }
 }
 
 // Walks the V8 heap snapshot and counts nodes that look like instances of a
