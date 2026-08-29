@@ -30,3 +30,6 @@ hyper-util.workspace = true
 once_cell.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+sys_traits = { workspace = true, features = ["libc", "real", "winapi"] }
