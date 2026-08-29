@@ -37,6 +37,7 @@ use deno_permissions::PermissionCheckError;
 pub use node_resolver::DENO_SUPPORTED_BUILTIN_NODE_MODULES as SUPPORTED_BUILTIN_NODE_MODULES;
 pub use node_resolver::PathClean;
 pub use ops::ipc::ChildPipeFd;
+pub use ops::v8::HeapSnapshotNearHeapLimitPolicy;
 use ops::vm;
 pub use ops::vm::ContextInitMode;
 pub use ops::vm::VM_CONTEXT_INDEX;
@@ -805,9 +806,11 @@ deno_core::extension!(deno_node,
   options = {
     maybe_init: Option<NodeExtInitServices<TInNpmPackageChecker, TNpmPackageFolderResolver, TSys>>,
     fs: deno_fs::FileSystemRc,
+    heap_snapshot_near_heap_limit_policy: HeapSnapshotNearHeapLimitPolicy,
   },
   state = |state, options| {
     state.put(options.fs.clone());
+    state.put(options.heap_snapshot_near_heap_limit_policy);
     state.put(ops::module_hooks::LoaderHookRegistry::default());
 
     if let Some(init) = &options.maybe_init {

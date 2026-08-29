@@ -2270,6 +2270,7 @@ dependencies = [
  "serde_json",
  "serde_v8",
  "smallvec",
+ "socket2 0.5.5",
  "sourcemap",
  "static_assertions",
  "sys_traits",

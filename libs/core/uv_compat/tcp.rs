@@ -815,7 +815,9 @@ pub unsafe fn uv_tcp_reset(tcp: *mut uv_tcp_t) -> c_int {
   // SAFETY: Caller guarantees tcp is valid and initialized.
   unsafe {
     if let Some(ref stream) = (*tcp).internal_stream
-      && stream.set_linger(Some(std::time::Duration::ZERO)).is_err()
+      && socket2::SockRef::from(stream)
+        .set_linger(Some(std::time::Duration::ZERO))
+        .is_err()
     {
       return UV_EINVAL;
     }

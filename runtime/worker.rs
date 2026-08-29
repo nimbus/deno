@@ -672,7 +672,11 @@ impl MainWorker {
           TInNpmPackageChecker,
           TNpmPackageFolderResolver,
           TExtNodeSys,
-        >(services.node_services, services.fs.clone()),
+        >(
+          services.node_services,
+          services.fs.clone(),
+          deno_node::HeapSnapshotNearHeapLimitPolicy::AllowProcessLifetime,
+        ),
         ops::runtime::deno_runtime::args(main_module.clone()),
         ops::worker_host::deno_worker_host::args(
           options.create_web_worker_cb.clone(),
