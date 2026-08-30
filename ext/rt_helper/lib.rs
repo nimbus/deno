@@ -203,6 +203,10 @@ fn create_native_addon_cache_dir(temp_dir: &Path) -> std::io::Result<PathBuf> {
     builder.permissions(fs::Permissions::from_mode(0o700));
   }
   let fallback = builder.tempdir_in(temp_dir)?;
+  #[allow(
+    deprecated,
+    reason = "TempDir::keep is unavailable in Deno's locked tempfile 3.10.1"
+  )]
   let fallback = fallback.into_path();
   validate_private_native_addon_dir(&fallback)?;
   Ok(fallback)

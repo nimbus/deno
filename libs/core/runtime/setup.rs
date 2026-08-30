@@ -27,7 +27,7 @@ const _: () = assert!(
     == std::mem::size_of::<usize>()
 );
 
-pub fn isolate_ptr_to_key(ptr: v8::UnsafeRawIsolatePtr) -> usize {
+pub(crate) fn isolate_ptr_to_key(ptr: v8::UnsafeRawIsolatePtr) -> usize {
   // SAFETY: UnsafeRawIsolatePtr is #[repr(transparent)] over *mut RealIsolate,
   // which is pointer-sized. The compile-time assert above guarantees this.
   unsafe { std::mem::transmute::<v8::UnsafeRawIsolatePtr, usize>(ptr) }
@@ -76,11 +76,13 @@ pub fn unregister_isolate(isolate_ptr: usize) {
   map.remove(&isolate_ptr);
 }
 
-/// Run each foreground task that is currently queued for an isolate.
+/// Run each foreground task that is currently queued for the scoped isolate.
 ///
 /// This function releases the registry lock before it runs a task. It does not
-/// run a microtask checkpoint.
-pub fn run_foreground_tasks(isolate_ptr: usize) -> bool {
+/// run a microtask checkpoint. The live scope pins the isolate and proves that
+/// the caller has exclusive V8 access, including the Locker when enabled.
+pub fn run_foreground_tasks(scope: &mut v8::PinScope) -> bool {
+  let isolate_ptr = isolate_ptr_to_key(unsafe { scope.as_raw_isolate_ptr() });
   let tasks = {
     let map = ISOLATE_ENTRIES.lock().unwrap();
     match map.get(&isolate_ptr) {

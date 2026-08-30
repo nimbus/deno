@@ -147,6 +147,40 @@ fn warm_reset_preserves_evaluated_global_state() {
     .unwrap();
 }
 
+#[tokio::test]
+async fn warm_reset_revokes_stale_task_spawners() {
+  let mut runtime = create_spawner_runtime();
+  let stale_spawner = runtime
+    .op_state()
+    .borrow()
+    .borrow::<V8CrossThreadTaskSpawner>()
+    .clone();
+
+  runtime.reset_request_state().unwrap();
+
+  let stale_task_ran = Arc::new(AtomicBool::new(false));
+  let stale_task_ran_clone = stale_task_ran.clone();
+  stale_spawner.spawn(move |_| {
+    stale_task_ran_clone.store(true, Ordering::SeqCst);
+  });
+
+  let current_task_ran = Arc::new(AtomicBool::new(false));
+  let current_task_ran_clone = current_task_ran.clone();
+  runtime
+    .op_state()
+    .borrow()
+    .borrow::<V8CrossThreadTaskSpawner>()
+    .spawn(move |_| {
+      current_task_ran_clone.store(true, Ordering::SeqCst);
+    });
+
+  poll_fn(|cx| runtime.poll_event_loop(cx, Default::default()))
+    .await
+    .unwrap();
+  assert!(!stale_task_ran.load(Ordering::SeqCst));
+  assert!(current_task_ran.load(Ordering::SeqCst));
+}
+
 #[test]
 fn lazy_esm_termination_returns_an_error() {
   let mut runtime = JsRuntime::new(RuntimeOptions::default());

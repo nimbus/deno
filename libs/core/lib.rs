@@ -201,7 +201,6 @@ pub use crate::runtime::host_defined_options::read_host_defined_options_key;
 pub use crate::runtime::host_defined_options::read_host_defined_options_kind;
 pub use crate::runtime::host_defined_options::register_external_module_import_meta_cb;
 pub use crate::runtime::host_defined_options::register_vm_dynamic_import_callback;
-pub use crate::runtime::isolate_ptr_to_key;
 pub use crate::runtime::run_foreground_tasks;
 pub use crate::runtime::shared_ro_heap_serialize_lock;
 pub use crate::runtime::stats;
