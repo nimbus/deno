@@ -2038,6 +2038,10 @@ impl LaufeyBackendResolver {
       std::fs::remove_dir_all(&dir)?;
     }
 
+    #[allow(
+      deprecated,
+      reason = "TempDir::keep is unavailable in Deno's locked tempfile 3.10.1"
+    )]
     let staging_path = staging.into_path();
     if let Err(e) = std::fs::rename(&staging_path, &dir) {
       // Lost a rename race with a concurrent process — its dir is at

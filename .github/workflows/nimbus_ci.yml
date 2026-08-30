@@ -79,6 +79,11 @@ jobs:
       - name: Test deno_node
         run: cargo test --locked -p deno_node --lib
 
+      - name: Test Node module integration
+        run: |
+          cargo build --locked -p deno -p test_server --bin deno --bin test_server
+          cargo test --locked -p unit_node_tests --test unit_node -- module_test
+
       - name: Test deno_fetch
         run: cargo test --locked -p deno_fetch --lib
 

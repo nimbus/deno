@@ -1618,7 +1618,11 @@ impl JsRuntime {
     context_state.external_ops_tracker.reset();
     context_state.activity_traces.clear_traces();
     *context_state.event_loop_phases.borrow_mut() = Default::default();
-    context_state.task_spawner_factory.clear();
+    let (same_thread_spawner, cross_thread_spawner) =
+      context_state.task_spawner_factory.rotate_spawners();
+    let mut op_state = self.inner.state.op_state.borrow_mut();
+    op_state.put(same_thread_spawner);
+    op_state.put(cross_thread_spawner);
 
     Ok(())
   }

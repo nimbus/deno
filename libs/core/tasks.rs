@@ -1,7 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::marker::PhantomData;
-use std::ops::DerefMut;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -13,6 +12,12 @@ use futures::task::AtomicWaker;
 
 type UnsendTask = Box<dyn FnOnce(&mut v8::PinScope) + 'static>;
 type SendTask = Box<dyn FnOnce(&mut v8::PinScope) + Send + 'static>;
+
+#[derive(Default)]
+struct TaskQueue {
+  generation: u64,
+  tasks: Vec<SendTask>,
+}
 
 static_assertions::assert_not_impl_any!(V8TaskSpawnerFactory: Send);
 static_assertions::assert_not_impl_any!(V8TaskSpawner: Send);
@@ -28,7 +33,7 @@ pub(crate) struct V8TaskSpawnerFactory {
   // TODO(mmastrac): ideally we wouldn't box if we could use arena allocation and a max submission size
   // TODO(mmastrac): we may want to split the Send and !Send tasks
   /// The set of tasks, non-empty if `has_tasks` is set.
-  tasks: Mutex<Vec<SendTask>>,
+  tasks: Mutex<TaskQueue>,
   /// A flag we can poll without any locks.
   has_tasks: AtomicBool,
   /// The polled waker, woken on task submission.
@@ -39,19 +44,48 @@ pub(crate) struct V8TaskSpawnerFactory {
 
 impl V8TaskSpawnerFactory {
   pub fn new_same_thread_spawner(self: Arc<Self>) -> V8TaskSpawner {
+    let generation = self.tasks.lock().unwrap().generation;
     V8TaskSpawner {
       tasks: self,
+      generation,
       _unsend_marker: PhantomData,
     }
   }
 
   pub fn new_cross_thread_spawner(self: Arc<Self>) -> V8CrossThreadTaskSpawner {
-    V8CrossThreadTaskSpawner { tasks: self }
+    let generation = self.tasks.lock().unwrap().generation;
+    V8CrossThreadTaskSpawner {
+      tasks: self,
+      generation,
+    }
   }
 
-  pub(crate) fn clear(&self) {
-    self.has_tasks.store(false, Ordering::Release);
-    self.tasks.lock().unwrap().clear();
+  /// Discard queued work, revoke existing spawners, and return spawners for
+  /// the next warm-runtime lease.
+  pub(crate) fn rotate_spawners(
+    self: &Arc<Self>,
+  ) -> (V8TaskSpawner, V8CrossThreadTaskSpawner) {
+    let generation = {
+      let mut queue = self.tasks.lock().unwrap();
+      queue.generation = queue
+        .generation
+        .checked_add(1)
+        .expect("V8 task spawner generation exhausted");
+      queue.tasks.clear();
+      self.has_tasks.store(false, Ordering::Release);
+      queue.generation
+    };
+    (
+      V8TaskSpawner {
+        tasks: self.clone(),
+        generation,
+        _unsend_marker: PhantomData,
+      },
+      V8CrossThreadTaskSpawner {
+        tasks: self.clone(),
+        generation,
+      },
+    )
   }
 
   /// `false` guarantees that there are no queued tasks, while `true` means that it is likely (but not guaranteed)
@@ -78,8 +112,8 @@ impl V8TaskSpawnerFactory {
       return Poll::Pending;
     }
 
-    let mut lock = self.tasks.lock().unwrap();
-    let tasks = std::mem::take(lock.deref_mut());
+    let mut queue = self.tasks.lock().unwrap();
+    let tasks = std::mem::take(&mut queue.tasks);
     if tasks.is_empty() {
       // Unlikely race lost -- the task submission to the queue and flag are not atomic, so it's
       // possible we ended up with an extra poll here. This only shows up under Miri, but as it is
@@ -95,12 +129,18 @@ impl V8TaskSpawnerFactory {
     Poll::Ready(tasks)
   }
 
-  fn spawn(&self, task: SendTask) {
-    self.tasks.lock().unwrap().push(task);
+  fn spawn(&self, generation: u64, task: SendTask) -> bool {
+    let mut queue = self.tasks.lock().unwrap();
+    if queue.generation != generation {
+      return false;
+    }
+    queue.tasks.push(task);
     // TODO(mmastrac): can we skip the mutex here?
     // Release ordering means that the writes in the above lock happen-before the atomic store
     self.has_tasks.store(true, Ordering::Release);
+    drop(queue);
     self.waker.wake();
+    true
   }
 }
 
@@ -109,6 +149,7 @@ impl V8TaskSpawnerFactory {
 pub struct V8TaskSpawner {
   // TODO(mmastrac): can we split the waker into a send and !send one?
   tasks: Arc<V8TaskSpawnerFactory>,
+  generation: u64,
   _unsend_marker: PhantomData<*const ()>,
 }
 
@@ -120,6 +161,9 @@ impl V8TaskSpawner {
   ///
   /// The task is handed off to be run the next time the event loop is polled, and there are
   /// no guarantees as to when this may happen.
+  ///
+  /// A spawner belongs to one warm-runtime lease. Submission through a
+  /// spawner from an earlier lease discards the task.
   ///
   /// # Safety
   ///
@@ -138,7 +182,7 @@ impl V8TaskSpawner {
     // leave the current thread because `V8TaskSpawner` is !Send.
     let task: Box<dyn FnOnce(&mut v8::PinScope<'_, '_>) + Send> =
       unsafe { std::mem::transmute(task) };
-    self.tasks.spawn(task)
+    _ = self.tasks.spawn(self.generation, task);
   }
 }
 
@@ -146,6 +190,7 @@ impl V8TaskSpawner {
 #[derive(Clone)]
 pub struct V8CrossThreadTaskSpawner {
   tasks: Arc<V8TaskSpawnerFactory>,
+  generation: u64,
 }
 
 // SAFETY: the underlying V8TaskSpawnerFactory is not Send, but we always submit Send tasks
@@ -159,6 +204,9 @@ impl V8CrossThreadTaskSpawner {
   /// The task is handed off to be run the next time the event loop is polled, and there are
   /// no guarantees as to when this may happen.
   ///
+  /// A spawner belongs to one warm-runtime lease. Submission through a
+  /// spawner from an earlier lease discards the task.
+  ///
   /// # Safety
   ///
   /// The task shares the same [`v8::HandleScope`] as the core event loop, which means that it
@@ -171,7 +219,7 @@ impl V8CrossThreadTaskSpawner {
   where
     F: FnOnce(&mut v8::PinScope<'_, '_>) + Send + 'static,
   {
-    self.tasks.spawn(Box::new(f))
+    _ = self.tasks.spawn(self.generation, Box::new(f));
   }
 
   /// Spawn a task that runs within the [`crate::JsRuntime`] event loop from a different thread
@@ -195,6 +243,10 @@ impl V8CrossThreadTaskSpawner {
   /// For example, if the code called by this task can raise an exception, the task must ensure
   /// that it calls that code within a new [`v8::TryCatch`] to avoid the exception leaking to the
   /// event loop's [`v8::HandleScope`].
+  ///
+  /// # Panics
+  ///
+  /// Panics if a warm-runtime reset revoked this spawner's lease.
   pub fn spawn_blocking<'a, F, T>(&self, f: F) -> T
   where
     F: FnOnce(&mut v8::PinScope) -> T + Send + 'a,
@@ -209,7 +261,10 @@ impl V8CrossThreadTaskSpawner {
     // SAFETY: We can safely transmute to the 'static lifetime because we guarantee this method will either
     // complete fully by the time it returns, deadlock or panic.
     let task: SendTask = unsafe { std::mem::transmute(task) };
-    self.tasks.spawn(task);
+    assert!(
+      self.tasks.spawn(self.generation, task),
+      "V8 cross-thread task spawner lease expired"
+    );
     rx.recv().unwrap()
   }
 }
@@ -295,5 +350,45 @@ mod tests {
         _ = task.await;
       }
     });
+  }
+
+  #[test]
+  fn stale_spawner_cannot_enqueue_after_rotation() {
+    let factory = Arc::<V8TaskSpawnerFactory>::default();
+    let stale_spawner = factory.clone().new_cross_thread_spawner();
+    let (_, current_spawner) = factory.rotate_spawners();
+
+    stale_spawner.spawn(|_| panic!("stale task must not run"));
+    assert!(!factory.has_pending_tasks());
+
+    current_spawner.spawn(|_| {});
+    assert!(factory.has_pending_tasks());
+    let tasks = futures::executor::block_on(std::future::poll_fn(|cx| {
+      factory.poll_inner(cx)
+    }));
+    assert_eq!(tasks.len(), 1);
+  }
+
+  #[test]
+  fn racing_stale_spawner_cannot_cross_rotation() {
+    let factory = Arc::<V8TaskSpawnerFactory>::default();
+    let stale_spawner = factory.clone().new_cross_thread_spawner();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let producer_barrier = barrier.clone();
+    let producer = std::thread::spawn(move || {
+      producer_barrier.wait();
+      stale_spawner.spawn(|_| panic!("stale task must not run"));
+    });
+
+    barrier.wait();
+    let (_, current_spawner) = factory.rotate_spawners();
+    producer.join().unwrap();
+    assert!(!factory.has_pending_tasks());
+
+    current_spawner.spawn(|_| {});
+    let tasks = futures::executor::block_on(std::future::poll_fn(|cx| {
+      factory.poll_inner(cx)
+    }));
+    assert_eq!(tasks.len(), 1);
   }
 }
