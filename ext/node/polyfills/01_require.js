@@ -50,6 +50,7 @@ const {
   ArrayPrototypeSplice,
   Error,
   JSONParse,
+  NumberParseInt,
   ObjectCreate,
   ObjectDefineProperty,
   ObjectEntries,
@@ -1470,6 +1471,25 @@ Module._load = function (request, parent, isMain) {
       : "node:" + filename;
     // Slice 'node:' prefix
     const id = StringPrototypeSlice(builtinFilename, 5);
+
+    // Node 24 and earlier reject loading `domain` while an uncaught-exception
+    // capture callback is active. The domain extension is already evaluated
+    // in the startup snapshot, so enforce the versioned contract at the user
+    // require() boundary. Node 25 and later allow the two features together.
+    if (id === "domain") {
+      const nodeVersion = globalThis.process?.versions?.node;
+      const nodeMajor = typeof nodeVersion === "string"
+        ? NumberParseInt(nodeVersion, 10)
+        : 24;
+      if (
+        nodeMajor <= 24 &&
+        typeof globalThis.process?.hasUncaughtExceptionCaptureCallback ===
+          "function" &&
+        globalThis.process.hasUncaughtExceptionCaptureCallback()
+      ) {
+        throw new internalErrors.ERR_DOMAIN_CALLBACK_NOT_AVAILABLE();
+      }
+    }
 
     // Run load hooks for builtins if registered. Node invokes the load hook
     // chain on every require() of a builtin, so do this before the cache

@@ -464,6 +464,46 @@ Deno.test("[node/module require] throws ERR_INVALID_ARG_VALUE for empty string i
   );
 });
 
+Deno.test("[node/module require] applies the versioned domain capture-callback contract", async () => {
+  async function runForNodeVersion(nodeVersion: string, expectsError: boolean) {
+    const source = `
+import process from "node:process";
+import { createRequire } from "node:module";
+
+process.versions.node = ${JSON.stringify(nodeVersion)};
+process.setUncaughtExceptionCaptureCallback(() => {});
+try {
+  createRequire(import.meta.url)("node:domain");
+  if (${expectsError}) {
+    console.error("expected ERR_DOMAIN_CALLBACK_NOT_AVAILABLE");
+    Deno.exit(1);
+  }
+} catch (error) {
+  if (!${expectsError} || error?.code !== "ERR_DOMAIN_CALLBACK_NOT_AVAILABLE") {
+    console.error(error);
+    Deno.exit(2);
+  }
+} finally {
+  process.setUncaughtExceptionCaptureCallback(null);
+}
+`;
+    const output = await new Deno.Command(Deno.execPath(), {
+      args: ["eval", source],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(
+      output.code,
+      0,
+      new TextDecoder().decode(output.stdout) +
+        new TextDecoder().decode(output.stderr),
+    );
+  }
+
+  await runForNodeVersion("24.16.0", true);
+  await runForNodeVersion("26.3.0", false);
+});
+
 Deno.test("[node/module require] loads .node files through CJS addon path", async () => {
   const tempDir = await Deno.makeTempDir();
   try {
