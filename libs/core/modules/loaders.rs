@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -425,16 +426,19 @@ impl ModuleLoader for ExtModuleLoader {
 pub(crate) struct LazyEsmModuleLoader {
   sources: Rc<RefCell<HashMap<ModuleName, ModuleCodeString>>>,
   residual_sources: &'static [(&'static str, &'static str)],
+  consumed_specifiers: Rc<RefCell<HashSet<String>>>,
 }
 
 impl LazyEsmModuleLoader {
   pub fn new(
     sources: Rc<RefCell<HashMap<ModuleName, ModuleCodeString>>>,
     residual_sources: &'static [(&'static str, &'static str)],
+    consumed_specifiers: Rc<RefCell<HashSet<String>>>,
   ) -> Self {
     LazyEsmModuleLoader {
       sources,
       residual_sources,
+      consumed_specifiers,
     }
   }
 }
@@ -496,6 +500,10 @@ impl ModuleLoader for LazyEsmModuleLoader {
         }
       }
     };
+    self
+      .consumed_specifiers
+      .borrow_mut()
+      .insert(specifier.as_str().to_string());
     ModuleLoadResponse::Sync(Ok(ModuleSource::new(
       ModuleType::JavaScript,
       ModuleSourceCode::String(source),

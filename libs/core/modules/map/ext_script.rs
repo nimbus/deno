@@ -313,15 +313,19 @@ impl ModuleMap {
       );
     }
 
-    let (lazy_esm_sources, residual_lazy_esm_sources) = {
+    let (lazy_esm_sources, residual_lazy_esm_sources, consumed_lazy_specifiers) = {
       let data = self.data.borrow();
       (
         data.lazy_esm_sources.clone(),
         data.residual_lazy_esm_sources,
+        data.consumed_lazy_specifiers.clone(),
       )
     };
-    let loader =
-      LazyEsmModuleLoader::new(lazy_esm_sources, residual_lazy_esm_sources);
+    let loader = LazyEsmModuleLoader::new(
+      lazy_esm_sources,
+      residual_lazy_esm_sources,
+      consumed_lazy_specifiers,
+    );
 
     // Check if this module has already been loaded. We release the
     // `self.data` borrow before doing anything that could re-enter the

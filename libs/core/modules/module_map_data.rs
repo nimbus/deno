@@ -242,7 +242,9 @@ pub(crate) struct ModuleMapData {
   /// Specifiers of `lazy_loaded_esm` / `lazy_loaded_js` files whose source
   /// was actually compiled by V8 during snapshot creation. Their bytes live
   /// in the snapshot blob; the binary does not need a separate copy.
-  pub(crate) consumed_lazy_specifiers: RefCell<HashSet<String>>,
+  /// Shared with `LazyEsmModuleLoader` so recursive ESM dependencies are
+  /// recorded as consumed too.
+  pub(crate) consumed_lazy_specifiers: Rc<RefCell<HashSet<String>>>,
 }
 
 /// Snapshot-compatible representation of this data.

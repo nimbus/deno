@@ -572,3 +572,69 @@ fn lazy_loaded_esm_not_snapshotted_but_metadata_survives() {
     );
   }
 }
+
+#[test]
+fn lazy_loaded_esm_graph_consumed_during_snapshot_keeps_source_bytes() {
+  let _snapshot_lock = super::snapshot_test_lock();
+  const DEPENDENCY_SOURCE: &str = "export const value = 'dependency';";
+  const ROOT_SOURCE: &str = "import { value } from 'custom:dependency'; globalThis.LAZY_GRAPH_VALUE = value; export { value };";
+
+  deno_core::extension!(
+    test_ext,
+    lazy_loaded_esm = [
+      "custom:dependency" = { source = "export const value = 'dependency';" },
+      "custom:root" = {
+        source = "import { value } from 'custom:dependency'; globalThis.LAZY_GRAPH_VALUE = value; export { value };"
+      },
+    ]
+  );
+
+  let snapshot = {
+    let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
+      extensions: vec![test_ext::init()],
+      ..Default::default()
+    });
+    runtime
+      .execute_script(
+        "consume_lazy_graph.js",
+        r#"
+        const mod = Deno.core.createLazyLoader("custom:root")();
+        if (mod.value !== "dependency") throw new Error("lazy graph did not evaluate");
+        "#,
+      )
+      .unwrap();
+
+    assert_eq!(
+      runtime.consumed_lazy_specifiers(),
+      vec!["custom:dependency".to_string(), "custom:root".to_string()]
+    );
+    runtime.snapshot()
+  };
+
+  let snapshot = Box::leak(snapshot);
+  let (_, sidecar) = crate::runtime::snapshot::deconstruct(snapshot);
+  assert!(
+    sidecar
+      .snapshot_data
+      .external_strings
+      .contains(&DEPENDENCY_SOURCE.as_bytes()),
+    "a recursively loaded lazy ESM dependency must keep its snapshot source bytes"
+  );
+  assert!(
+    sidecar
+      .snapshot_data
+      .external_strings
+      .contains(&ROOT_SOURCE.as_bytes()),
+    "the lazy ESM root must keep its snapshot source bytes"
+  );
+
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    startup_snapshot: Some(snapshot),
+    extensions: vec![test_ext::init()],
+    ..Default::default()
+  });
+  deno_core::scope!(scope, runtime);
+  let value: v8::Local<v8::String> =
+    JsRuntime::eval(scope, "globalThis.LAZY_GRAPH_VALUE").unwrap();
+  assert_eq!(value.to_rust_string_lossy(scope), "dependency");
+}
