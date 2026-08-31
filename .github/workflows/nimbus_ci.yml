@@ -77,7 +77,7 @@ jobs:
         run: cargo test --locked -p serde_v8 --lib
 
       - name: Test deno_node
-        run: cargo test --locked -p deno_node --lib
+        run: cargo test --locked -p deno_node --lib --features deno_core/default
 
       - name: Test Node module integration
         run: |
