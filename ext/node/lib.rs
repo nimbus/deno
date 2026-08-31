@@ -44,6 +44,13 @@ pub use ops::vm::VM_CONTEXT_INDEX;
 pub use ops::vm::create_v8_context;
 pub use ops::vm::init_global_template;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AesGcmImplicitShortTagPolicy {
+  AllowPendingDeprecation,
+  WarnDeprecated,
+  Deny,
+}
+
 /// The Node.js version that Deno emulates. This is the single source of truth
 /// for the value reported through `process.version` / `process.versions.node`:
 /// the `__NODE_VERSION__` token in `_process/process.ts` is substituted with it
@@ -120,6 +127,24 @@ pub fn default_resolve_require_node_module_paths(from: &Path) -> Vec<String> {
 #[string]
 fn op_node_build_os() -> String {
   env!("TARGET").split('-').nth(2).unwrap().to_string()
+}
+
+#[op2(fast)]
+fn op_node_gcm_implicit_short_tag_allowed(state: &OpState) -> bool {
+  !matches!(
+    state.borrow::<AesGcmImplicitShortTagPolicy>(),
+    AesGcmImplicitShortTagPolicy::Deny
+  )
+}
+
+#[op2(fast)]
+fn op_node_gcm_implicit_short_tag_warns_unconditionally(
+  state: &OpState,
+) -> bool {
+  matches!(
+    state.borrow::<AesGcmImplicitShortTagPolicy>(),
+    AesGcmImplicitShortTagPolicy::WarnDeprecated
+  )
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -355,6 +380,8 @@ deno_core::extension!(deno_node,
     ops::os::op_cpus,
     ops::os::op_homedir,
     op_node_build_os,
+    op_node_gcm_implicit_short_tag_allowed,
+    op_node_gcm_implicit_short_tag_warns_unconditionally,
     op_node_load_env_file,
     ops::module::op_node_strip_typescript_types,
     ops::require::op_require_can_parse_as_esm,
@@ -807,10 +834,12 @@ deno_core::extension!(deno_node,
     maybe_init: Option<NodeExtInitServices<TInNpmPackageChecker, TNpmPackageFolderResolver, TSys>>,
     fs: deno_fs::FileSystemRc,
     heap_snapshot_near_heap_limit_policy: HeapSnapshotNearHeapLimitPolicy,
+    aes_gcm_implicit_short_tag_policy: AesGcmImplicitShortTagPolicy,
   },
   state = |state, options| {
     state.put(options.fs.clone());
     state.put(options.heap_snapshot_near_heap_limit_policy);
+    state.put(options.aes_gcm_implicit_short_tag_policy);
     state.put(ops::module_hooks::LoaderHookRegistry::default());
 
     if let Some(init) = &options.maybe_init {

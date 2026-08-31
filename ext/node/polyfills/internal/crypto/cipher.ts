@@ -50,6 +50,8 @@ const {
   op_node_decipheriv_set_aad,
   op_node_export_private_key_pem,
   op_node_export_secret_key,
+  op_node_gcm_implicit_short_tag_allowed,
+  op_node_gcm_implicit_short_tag_warns_unconditionally,
   op_node_private_decrypt,
   op_node_private_encrypt,
   op_node_public_decrypt,
@@ -58,8 +60,12 @@ const {
 } = core.ops;
 
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
+const { getOptionValue } = core.loadExtScript(
+  "ext:deno_node/internal/options.ts",
+);
 
 const lazyStream = core.createLazyLoader("node:stream");
+const lazyProcess = core.createLazyLoader("node:process");
 
 const {
   createPrivateKey,
@@ -638,6 +644,8 @@ Decipheriv.prototype.setAAD = function (
   return this;
 };
 
+let gcmShortTagDeprecationEmitted = false;
+
 Decipheriv.prototype.setAuthTag = function (
   buffer: any,
   _encoding?: string,
@@ -645,22 +653,34 @@ Decipheriv.prototype.setAuthTag = function (
   if (this._authTag) {
     throw new ERR_CRYPTO_INVALID_STATE("setAuthTag");
   }
-  // When no explicit `authTagLength` was given at decipher creation time, a
-  // GCM authentication tag must be the full 128 bits (16 bytes); shorter tags
-  // are only accepted when `authTagLength` is set. This used to be the DEP0182
-  // deprecation warning and is now a hard error (matching Node.js).
   // deno-lint-ignore deno-internal/prefer-primordials -- `buffer` may be Buffer/TypedArray/DataView
   const tagByteLength = buffer.byteLength;
+  let emitImplicitShortTagDeprecation = false;
   if (
     this._isGcmMode && this._authTagLength === -1 &&
     tagByteLength !== 16
   ) {
-    throw new TypeError(
-      `Invalid authentication tag length: ${tagByteLength}`,
-    );
+    if (!op_node_gcm_implicit_short_tag_allowed()) {
+      throw new TypeError(
+        `Invalid authentication tag length: ${tagByteLength}`,
+      );
+    }
+    emitImplicitShortTagDeprecation =
+      op_node_gcm_implicit_short_tag_warns_unconditionally() ||
+      getOptionValue("--pending-deprecation") === true;
   }
   // deno-lint-ignore deno-internal/prefer-primordials -- `buffer` may be Buffer/TypedArray/DataView
   op_node_decipheriv_auth_tag(this._context, buffer.byteLength);
+  if (emitImplicitShortTagDeprecation && !gcmShortTagDeprecationEmitted) {
+    gcmShortTagDeprecationEmitted = true;
+    lazyProcess().default.emitWarning(
+      "Using AES-GCM authentication tags of less than 128 bits without " +
+        "specifying the authTagLength option when initializing decryption " +
+        "is deprecated.",
+      "DeprecationWarning",
+      "DEP0182",
+    );
+  }
   this._authTag = buffer;
   return this;
 };
