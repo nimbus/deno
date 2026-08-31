@@ -89,10 +89,10 @@ jobs:
           cargo test --locked -p unit_node_tests --test unit_node -- crypto_cipher_gcm_test
 
       - name: Test deno_fetch
-        run: cargo test --locked -p deno_fetch --lib
+        run: cargo test --locked -p deno_fetch --lib --features deno_core/default
 
       - name: Test deno_websocket
-        run: cargo test --locked -p deno_websocket --lib
+        run: cargo test --locked -p deno_websocket --lib --features deno_core/default
 
       - name: Test deno_runtime
-        run: cargo test --locked -p deno_runtime --lib
+        run: cargo test --locked -p deno_runtime --lib --features deno_core/default
