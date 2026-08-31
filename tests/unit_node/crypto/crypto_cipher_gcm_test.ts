@@ -232,6 +232,22 @@ Deno.test({
 Deno.test({
   name: "aes gcm setAuthTag validates tag length",
   fn() {
+    const implicitShortTagDecipher = crypto.createDecipheriv(
+      "aes-128-gcm",
+      Buffer.alloc(16),
+      Buffer.alloc(12),
+    );
+    assertThrows(
+      () => implicitShortTagDecipher.setAuthTag(Buffer.alloc(12)),
+      TypeError,
+      "Invalid authentication tag length: 12",
+    );
+    try {
+      implicitShortTagDecipher.final();
+    } catch {
+      // final() throws because no valid auth tag was set.
+    }
+
     const invalidLengths = [0, 1, 2, 3, 5, 6, 7, 9, 10, 11, 17];
     for (const length of invalidLengths) {
       const d = crypto.createDecipheriv(

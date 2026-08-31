@@ -57,6 +57,7 @@ pub fn get_extensions_in_snapshot() -> Vec<Extension> {
       None,
       fs.clone(),
       deno_node::HeapSnapshotNearHeapLimitPolicy::AllowProcessLifetime,
+      deno_node::AesGcmImplicitShortTagPolicy::Deny,
     ),
     ops::runtime::deno_runtime::init("deno:runtime".parse().unwrap()),
     ops::worker_host::deno_worker_host::init(
