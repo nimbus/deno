@@ -11230,8 +11230,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "150.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42a978ff11f15b24e5c05a7123cf2b68f41e763546699781a924ef4e2cf43a49"
+source = "git+https://github.com/nimbus/rusty_v8?tag=v150.4.0-nimbus.1#961a76d0cee88efdecfa9224c519fd153c404b51"
 dependencies = [
  "bindgen 0.72.1",
  "bitflags 2.9.3",
@@ -11240,6 +11239,7 @@ dependencies = [
  "home",
  "miniz_oxide 0.8.8",
  "paste",
+ "sha2",
  "temporal_capi",
  "which 6.0.1",
 ]
