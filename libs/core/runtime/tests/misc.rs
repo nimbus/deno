@@ -852,6 +852,49 @@ fn test_v8_platform() {
   runtime.execute_script("<none>", "").unwrap();
 }
 
+#[test]
+fn extension_source_provider_supplies_build_only_source() {
+  const SPECIFIER: &str = "ext:nimbus/source_provider.js";
+  const MISSING_PATH: &str =
+    "/nimbus-build-only-path-that-must-not-exist/source_provider.js";
+  let extension = || Extension {
+    name: "nimbus_source_provider_test",
+    js_files: Cow::Owned(vec![ExtensionFileSource::loaded_during_snapshot(
+      SPECIFIER,
+      MISSING_PATH,
+    )]),
+    ..Default::default()
+  };
+
+  assert!(
+    JsRuntime::try_new(RuntimeOptions {
+      extensions: vec![extension()],
+      ..Default::default()
+    })
+    .is_err(),
+    "a missing build-only source must fail without a provider"
+  );
+
+  let mut runtime = JsRuntime::try_new(RuntimeOptions {
+    extensions: vec![extension()],
+    extension_source_provider: Some(Rc::new(|source| {
+      (source.specifier == SPECIFIER).then(|| {
+        "globalThis.__nimbusExtensionSourceProvider = 42;"
+          .to_string()
+          .into()
+      })
+    })),
+    ..Default::default()
+  })
+  .expect("the provider should make the runtime self-contained");
+  runtime
+    .execute_script(
+      "verify_source_provider.js",
+      "if (globalThis.__nimbusExtensionSourceProvider !== 42) throw new Error('source missing')",
+    )
+    .unwrap();
+}
+
 #[ignore] // TODO(@littledivy): Fast API ops when snapshot is not loaded.
 #[test]
 fn test_is_proxy() {

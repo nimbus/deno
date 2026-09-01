@@ -30,6 +30,7 @@ pub(crate) use jsrealm::UnrefedOps;
 pub use jsruntime::CompiledWasmModuleStore;
 pub use jsruntime::CreateRealmOptions;
 pub use jsruntime::CrossIsolateStore;
+pub use jsruntime::ExtensionSourceProvider;
 pub use jsruntime::ExtensionTranspiler;
 pub use jsruntime::ExternalModuleImportMetaCb;
 pub(crate) use jsruntime::InitMode;
