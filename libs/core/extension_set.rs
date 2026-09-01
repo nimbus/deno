@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use crate::_ops::OpMethodDecl;
 use crate::ExtensionFileSource;
+use crate::ExtensionSourceProvider;
 use crate::FastString;
 use crate::ModuleCodeString;
 use crate::OpDecl;
@@ -293,10 +294,19 @@ impl<'a> IntoIterator for &'a mut LoadedSources {
 fn load(
   transpiler: Option<&ExtensionTranspiler>,
   source: &ExtensionFileSource,
+  source_provider: Option<&ExtensionSourceProvider>,
   load_callback: &mut impl FnMut(&ExtensionFileSource),
 ) -> Result<(ModuleCodeString, Option<SourceMapData>), CoreError> {
   load_callback(source);
-  let mut source_code = source.load()?;
+  let mut source_code = if source.is_runtime_loadable() {
+    source.load()?
+  } else if let Some(source_code) =
+    source_provider.and_then(|provider| provider(source))
+  {
+    source_code
+  } else {
+    source.load()?
+  };
   let mut source_map = None;
   if let Some(transpiler) = transpiler {
     (source_code, source_map) =
@@ -315,6 +325,7 @@ pub fn into_sources_and_source_maps(
   extensions: &[Extension],
   extensions_in_snapshot: Option<&[&'static str]>,
   for_snapshot: bool,
+  source_provider: Option<&ExtensionSourceProvider>,
   mut load_callback: impl FnMut(&ExtensionFileSource),
 ) -> Result<LoadedSources, CoreError> {
   let mut sources = LoadedSources::default();
@@ -357,7 +368,7 @@ pub fn into_sources_and_source_maps(
         continue;
       }
       let (code, maybe_source_map) =
-        load(transpiler, file, &mut load_callback)?;
+        load(transpiler, file, source_provider, &mut load_callback)?;
       sources.lazy_esm.push(LoadedSource {
         source_type: ExtensionSourceType::LazyEsm,
         specifier: ModuleName::from_static(file.specifier),
@@ -371,7 +382,7 @@ pub fn into_sources_and_source_maps(
         continue;
       }
       let (mut code, maybe_source_map) =
-        load(transpiler, file, &mut load_callback)?;
+        load(transpiler, file, source_provider, &mut load_callback)?;
       // When building the snapshot, pre-wrap `lazy_loaded_js` into the
       // `compile_function` body (`"use strict"; return (<IIFE>);`) so it can be
       // externalized below and baked into the snapshot as an external (clean,
@@ -410,7 +421,7 @@ pub fn into_sources_and_source_maps(
     }
     for file in &*extension.js_files {
       let (code, maybe_source_map) =
-        load(transpiler, file, &mut load_callback)?;
+        load(transpiler, file, source_provider, &mut load_callback)?;
       sources.js.push(LoadedSource {
         source_type: ExtensionSourceType::Js,
         specifier: ModuleName::from_static(file.specifier),
@@ -420,7 +431,7 @@ pub fn into_sources_and_source_maps(
     }
     for file in &*extension.esm_files {
       let (code, maybe_source_map) =
-        load(transpiler, file, &mut load_callback)?;
+        load(transpiler, file, source_provider, &mut load_callback)?;
       sources.esm.push(LoadedSource {
         source_type: ExtensionSourceType::Esm,
         specifier: ModuleName::from_static(file.specifier),

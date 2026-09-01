@@ -533,6 +533,15 @@ pub type SharedArrayBufferStore =
 
 pub type CompiledWasmModuleStore = CrossIsolateStore<v8::CompiledWasmModule>;
 
+/// Supplies source text for an extension file that was declared as available
+/// only while a startup snapshot was built.
+///
+/// This lets an embedder package those sources for an unsnapshotted runtime
+/// without retaining the provider in [`JsRuntimeState`]. Returning `None`
+/// preserves the normal filesystem load and its error.
+pub type ExtensionSourceProvider =
+  dyn Fn(&ExtensionFileSource) -> Option<ModuleCodeString>;
+
 /// Internal state for JsRuntime which is stored in one of v8::Isolate's
 /// embedder slots.
 pub struct JsRuntimeState {
@@ -592,6 +601,11 @@ pub struct RuntimeOptions {
 
   /// If specified, transpiles extensions before loading.
   pub extension_transpiler: Option<Rc<ExtensionTranspiler>>,
+
+  /// Supplies build-only extension sources during runtime construction.
+  /// Sources that are already available in the binary are never delegated to
+  /// this provider. The provider is dropped after construction.
+  pub extension_source_provider: Option<Rc<ExtensionSourceProvider>>,
 
   /// Provide a function that may optionally provide a metrics collector
   /// for a given op.
@@ -907,6 +921,7 @@ impl JsRuntime {
       &extensions,
       sidecar_data.as_ref().map(|s| &*s.snapshot_data.extensions),
       externalize_lazy_js,
+      options.extension_source_provider.as_deref(),
       |source| {
         mark_as_loaded_from_fs_during_snapshot(&mut files_loaded, &source.code)
       },
