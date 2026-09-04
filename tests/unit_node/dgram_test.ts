@@ -8,24 +8,42 @@ import dns from "node:dns";
 const listenPort = 4503;
 const listenPort2 = 4504;
 
-Deno.test("[node/dgram] default lookup observes mutable dns.lookup", async () => {
+Deno.test("[node/dgram] default lookup follows Node DNS routing", async () => {
   const originalLookup = dns.lookup;
   let lookupCalls = 0;
-  dns.lookup = ((hostname, family, callback) => {
+  dns.lookup = ((_hostname, _family, callback) => {
     lookupCalls++;
-    return originalLookup(hostname, family, callback);
+    queueMicrotask(() => callback(null, "127.0.0.1", 4));
   }) as typeof dns.lookup;
 
-  const socket = createSocket("udp4");
+  const hostnameSocket = createSocket("udp4");
+  const literalSocket = createSocket("udp4");
+  let hostnameBound = false;
+  let literalBound = false;
   try {
     await new Promise<void>((resolve, reject) => {
-      socket.once("error", reject);
-      socket.bind(0, "127.0.0.1", resolve);
+      hostnameSocket.once("error", reject);
+      hostnameSocket.bind(0, "nimbus-dgram.invalid", resolve);
     });
+    hostnameBound = true;
+    assertEquals(lookupCalls, 1);
+
+    await new Promise<void>((resolve, reject) => {
+      literalSocket.once("error", reject);
+      literalSocket.bind(0, "127.0.0.1", resolve);
+    });
+    literalBound = true;
     assertEquals(lookupCalls, 1);
   } finally {
     dns.lookup = originalLookup;
-    await new Promise<void>((resolve) => socket.close(resolve));
+    await Promise.all([
+      hostnameBound
+        ? new Promise<void>((resolve) => hostnameSocket.close(resolve))
+        : Promise.resolve(),
+      literalBound
+        ? new Promise<void>((resolve) => literalSocket.close(resolve))
+        : Promise.resolve(),
+    ]);
   }
 });
 
