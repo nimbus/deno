@@ -23,6 +23,9 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const lazyNodeModule = core.createLazyLoader("node:module");
+// `nextTick()` silently drops callbacks until node:process has been
+// bootstrapped, so make sure it is loaded before scheduling one.
+const lazyProcess = core.createLazyLoader("node:process");
 const { ERR_SOCKET_BAD_TYPE } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -37,6 +40,8 @@ const {
   isInt32,
   validateFunction,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
+const { nextTick } = core.loadExtScript("ext:deno_node/_next_tick.ts");
+const { isIP } = core.loadExtScript("ext:deno_node/internal/net.ts");
 const { FunctionPrototypeBind, MapPrototypeGet, Symbol } = primordials;
 
 type SocketType = "udp4" | "udp6";
@@ -72,6 +77,11 @@ function defaultLookup(
   family: number,
   callback: (err: unknown, address: string, family: number) => void,
 ) {
+  if (isIP(address) === family) {
+    lazyProcess();
+    nextTick(callback, null, address, family);
+    return;
+  }
   // Read the CommonJS cache because the public object is mutable. A lookup
   // replacement installed through `require("dns")` must be observed.
   return lazyNodeModule().getBuiltinModule("dns").lookup(
