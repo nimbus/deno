@@ -2023,12 +2023,34 @@ fn get_errno() -> i32 {
 }
 
 #[cfg(unix)]
-fn assert_fd_closed(fd: i32) {
-  unsafe {
-    set_errno(0);
-    assert_eq!(libc::fcntl(fd, libc::F_GETFD), -1);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FdIdentity {
+  device: libc::dev_t,
+  inode: libc::ino_t,
+}
+
+#[cfg(unix)]
+fn fd_identity(fd: i32) -> std::io::Result<FdIdentity> {
+  let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+  if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } == -1 {
+    return Err(std::io::Error::last_os_error());
   }
-  assert_eq!(get_errno(), libc::EBADF);
+  let metadata = unsafe { metadata.assume_init() };
+  Ok(FdIdentity {
+    device: metadata.st_dev,
+    inode: metadata.st_ino,
+  })
+}
+
+#[cfg(unix)]
+fn assert_fd_owner_released(fd: i32, original: FdIdentity) {
+  match fd_identity(fd) {
+    Err(error) => assert_eq!(error.raw_os_error(), Some(libc::EBADF)),
+    Ok(current) => assert_ne!(
+      current, original,
+      "descriptor {fd} still identifies the resource that should have closed"
+    ),
+  }
 }
 
 #[cfg(unix)]
@@ -3085,6 +3107,8 @@ async fn pipe_open_not_active_until_read_start() {
     let read_fd = pipe_fds[0];
     let write_fd = pipe_fds[1];
     let _write_guard = FdGuard(write_fd);
+    let read_identity =
+      fd_identity(read_fd).expect("pipe read fd should exist");
 
     // Init and open a uv_pipe_t on the read end.
     let mut pipe = new_pipe(false);
@@ -3156,7 +3180,7 @@ async fn pipe_open_not_active_until_read_start() {
       uv_close(&mut pipe as *mut uv_pipe_t as *mut uv_handle_t, None);
     }
     tick(runtime).await;
-    assert_fd_closed(read_fd);
+    assert_fd_owner_released(read_fd, read_identity);
   })
   .await;
 }
@@ -3174,6 +3198,7 @@ async fn pipe_listener_transfers_raw_fd_ownership() {
       assert_ok(pipe::uv_pipe_bind(&mut pipe, &socket_path));
     }
     let fd = pipe.fd().expect("bound pipe should have a descriptor");
+    let fd_identity = fd_identity(fd).expect("bound pipe fd should exist");
     assert_eq!(pipe.internal_fd, Some(fd));
 
     unsafe {
@@ -3190,7 +3215,7 @@ async fn pipe_listener_transfers_raw_fd_ownership() {
       uv_close(&mut pipe as *mut uv_pipe_t as *mut uv_handle_t, None);
     }
     tick(runtime).await;
-    assert_fd_closed(fd);
+    assert_fd_owner_released(fd, fd_identity);
   })
   .await;
 }
@@ -3205,6 +3230,7 @@ async fn pipe_accept_keeps_only_the_tokio_fd_owner() {
     accepted.set_nonblocking(true).unwrap();
     let accepted = tokio::net::UnixStream::from_std(accepted).unwrap();
     let fd = accepted.as_raw_fd();
+    let fd_identity = fd_identity(fd).expect("accepted pipe fd should exist");
 
     let mut server = new_pipe(false);
     let mut client = new_pipe(false);
@@ -3229,7 +3255,7 @@ async fn pipe_accept_keeps_only_the_tokio_fd_owner() {
       uv_close(&mut server as *mut uv_pipe_t as *mut uv_handle_t, None);
     }
     tick(runtime).await;
-    assert_fd_closed(fd);
+    assert_fd_owner_released(fd, fd_identity);
     drop(peer);
   })
   .await;
@@ -3252,6 +3278,7 @@ async fn pipe_bound_connect_transfers_raw_fd_ownership() {
       assert_ok(pipe::uv_pipe_bind(&mut pipe, &client_path));
     }
     let fd = pipe.fd().expect("bound pipe should have a descriptor");
+    let fd_identity = fd_identity(fd).expect("bound pipe fd should exist");
 
     unsafe {
       assert_ok(pipe::uv_pipe_connect(
@@ -3286,7 +3313,7 @@ async fn pipe_bound_connect_transfers_raw_fd_ownership() {
       uv_close(&mut pipe as *mut uv_pipe_t as *mut uv_handle_t, None);
     }
     tick(runtime).await;
-    assert_fd_closed(fd);
+    assert_fd_owner_released(fd, fd_identity);
 
     drop(listener);
     #[allow(
