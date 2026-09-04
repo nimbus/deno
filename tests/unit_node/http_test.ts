@@ -19,7 +19,7 @@ import zlib from "node:zlib";
 import net, { type AddressInfo, Socket } from "node:net";
 import fs from "node:fs";
 import process from "node:process";
-import type { Duplex } from "node:stream";
+import { Duplex } from "node:stream";
 import { text } from "node:stream/consumers";
 import { channel } from "node:diagnostics_channel";
 import * as v8 from "node:v8";
@@ -45,6 +45,106 @@ import { execCode } from "../unit/test_util.ts";
 // tests reusing the same port (e.g. 4505) don't fail with EADDRINUSE.
 Deno.test.beforeEach(() => {
   http.globalAgent.destroy();
+});
+
+Deno.test("[node/http] failed writes do not finish outgoing messages", async () => {
+  const writeError = new Error("forced write failure");
+  const socket = new Duplex({
+    read() {},
+    write(_chunk, _encoding, callback) {
+      callback(writeError);
+    },
+  });
+  const request = http.request({
+    createConnection: () => socket,
+    method: "POST",
+  });
+
+  let emittedFinish = false;
+  request.on("finish", () => emittedFinish = true);
+  const emittedError = new Promise<Error>((resolve) => {
+    request.once("error", resolve);
+  });
+  const closed = new Promise<void>((resolve) => request.once("close", resolve));
+  const writeResult = new Promise<Error | null | undefined>((resolve) => {
+    request.write("body", resolve);
+  });
+  const endResult = new Promise<Error | null | undefined>((resolve) => {
+    request.end(resolve);
+  });
+
+  assert((await writeResult) === writeError);
+  assert((await endResult) === writeError);
+  assert((await emittedError) === writeError);
+  await closed;
+  assertEquals(request.writableFinished, false);
+  assertEquals(emittedFinish, false);
+});
+
+Deno.test("[node/http] immediate direct write errors defer end callbacks", async () => {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const server = http.createServer((_request, response) => {
+    // @ts-ignore: override the internal stream-base method to force the
+    // synchronous libuv error path without depending on a socket race.
+    response.socket._handle.writeUtf8String = () => -32;
+
+    let inEnd = true;
+    let emittedFinish = false;
+    response.on("finish", () => emittedFinish = true);
+    response.end("body", (error) => {
+      try {
+        assertEquals(inEnd, false);
+        assertEquals((error as NodeJS.ErrnoException).code, "EPIPE");
+        assertEquals(response.writableFinished, false);
+        assertEquals(emittedFinish, false);
+        resolve();
+      } catch (cause) {
+        reject(cause);
+      }
+    });
+    inEnd = false;
+  });
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {
+    const port = (server.address() as AddressInfo).port;
+    const request = http.get({ host: "127.0.0.1", port });
+    request.on("error", () => {});
+  });
+
+  try {
+    await promise;
+  } finally {
+    server.close();
+  }
+});
+
+Deno.test("[node/http] consumed parser preserves the llhttp error code", async () => {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const server = http.createServer(() => fail("request must not parse"));
+  server.once("clientError", (error: Error & { code?: string }, socket) => {
+    socket.destroy();
+    try {
+      assertEquals(error.code, "HPE_LF_EXPECTED");
+      resolve();
+    } catch (cause) {
+      reject(cause);
+    }
+  });
+  server.listen(0, "127.0.0.1", () => {
+    const port = (server.address() as AddressInfo).port;
+    const socket = net.connect(port, "127.0.0.1", () => {
+      socket.end(
+        "GET / HTTP/1.1\r\nDummy: Header\rContent-Length: 1\r\n\r\n",
+      );
+    });
+    socket.on("error", reject);
+  });
+
+  try {
+    await promise;
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 Deno.test("[node/http] HTTPParser.consume keeps stream handle alive", async () => {

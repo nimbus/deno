@@ -320,12 +320,9 @@ function cleanParser(parser) {
   parser._lastRawPacket = null;
 }
 
-// The Rust binding collapses every llhttp errno into the generic HPE_ERROR;
-// Node.js surfaces the specific code (e.g. HPE_INVALID_TRANSFER_ENCODING)
-// straight from llhttp. Recover the smuggling-relevant case in JS by checking
-// whether the raw packet combined Content-Length with Transfer-Encoding:
-// chunked, a combination RFC 9112 forbids precisely because it enables request
-// smuggling.
+// The consume path receives a generic HPE_ERROR object from the Rust binding.
+// Recover its recorded llhttp code and reason. Retain the raw-packet fallback
+// for request-smuggling errors from bindings that do not expose that state.
 const contentLengthHeaderRegex = new SafeRegExp(
   "^content-length[ \\t]*:",
   "im",
@@ -337,6 +334,16 @@ const transferEncodingChunkedRegex = new SafeRegExp(
 
 function prepareError(err, parser, rawPacket) {
   err.rawPacket = rawPacket || parser.getCurrentBuffer();
+  if (err.code === "HPE_ERROR") {
+    const code = parser._native.getLastErrorCode();
+    const reason = parser._native.getLastErrorReason();
+    if (code && code !== "HPE_OK") {
+      err.code = code;
+    }
+    if (reason) {
+      err.reason = reason;
+    }
+  }
   if (
     err.code === "HPE_ERROR" && err.rawPacket &&
     TypedArrayPrototypeGetByteLength(err.rawPacket) > 0

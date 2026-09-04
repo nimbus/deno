@@ -3,9 +3,31 @@
 import { assert, assertEquals } from "@std/assert";
 import { execCode } from "../unit/test_util.ts";
 import { createSocket, type Socket } from "node:dgram";
+import dns from "node:dns";
 
 const listenPort = 4503;
 const listenPort2 = 4504;
+
+Deno.test("[node/dgram] default lookup observes mutable dns.lookup", async () => {
+  const originalLookup = dns.lookup;
+  let lookupCalls = 0;
+  dns.lookup = ((hostname, family, callback) => {
+    lookupCalls++;
+    return originalLookup(hostname, family, callback);
+  }) as typeof dns.lookup;
+
+  const socket = createSocket("udp4");
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once("error", reject);
+      socket.bind(0, "127.0.0.1", resolve);
+    });
+    assertEquals(lookupCalls, 1);
+  } finally {
+    dns.lookup = originalLookup;
+    await new Promise<void>((resolve) => socket.close(resolve));
+  }
+});
 
 Deno.test("[node/dgram] udp ref and unref", {
   permissions: { read: true, run: true, net: true },
