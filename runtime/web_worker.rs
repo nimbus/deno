@@ -610,6 +610,7 @@ impl WebWorker {
         services.fs,
         deno_node::HeapSnapshotNearHeapLimitPolicy::AllowProcessLifetime,
         deno_node::AesGcmImplicitShortTagPolicy::Deny,
+        deno_node::DgramDefaultLookupPolicy::BypassIpLiterals,
       ),
       // Runtime ops that are always initialized for WebWorkers
       ops::runtime::deno_runtime::init(options.main_module.clone()),

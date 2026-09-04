@@ -22,6 +22,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_node_dgram_default_lookup_bypasses_ip_literals } = core.ops;
 const lazyNodeModule = core.createLazyLoader("node:module");
 // `nextTick()` silently drops callbacks until node:process has been
 // bootstrapped, so make sure it is loaded before scheduling one.
@@ -77,7 +78,10 @@ function defaultLookup(
   family: number,
   callback: (err: unknown, address: string, family: number) => void,
 ) {
-  if (isIP(address) === family) {
+  if (
+    isIP(address) === family &&
+    op_node_dgram_default_lookup_bypasses_ip_literals()
+  ) {
     lazyProcess();
     nextTick(callback, null, address, family);
     return;

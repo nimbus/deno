@@ -51,6 +51,35 @@ pub enum AesGcmImplicitShortTagPolicy {
   Deny,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DgramDefaultLookupPolicy {
+  /// Match Node.js 20 and 22, where the default lookup remains observable for
+  /// IP literals through the mutable public `node:dns` module.
+  ResolveIpLiteralsThroughPublicDns,
+  /// Match Node.js 24 and later by bypassing DNS for IP literals.
+  BypassIpLiterals,
+}
+
+impl DgramDefaultLookupPolicy {
+  pub(crate) fn bypasses_ip_literals(self) -> bool {
+    matches!(self, Self::BypassIpLiterals)
+  }
+}
+
+#[cfg(test)]
+mod dgram_policy_tests {
+  use super::DgramDefaultLookupPolicy;
+
+  #[test]
+  fn distinguishes_legacy_and_current_literal_lookup_contracts() {
+    assert!(
+      !DgramDefaultLookupPolicy::ResolveIpLiteralsThroughPublicDns
+        .bypasses_ip_literals()
+    );
+    assert!(DgramDefaultLookupPolicy::BypassIpLiterals.bypasses_ip_literals());
+  }
+}
+
 /// The Node.js version that Deno emulates. This is the single source of truth
 /// for the value reported through `process.version` / `process.versions.node`:
 /// the `__NODE_VERSION__` token in `_process/process.ts` is substituted with it
@@ -382,6 +411,7 @@ deno_core::extension!(deno_node,
     op_node_build_os,
     op_node_gcm_implicit_short_tag_allowed,
     op_node_gcm_implicit_short_tag_warns_unconditionally,
+    ops::udp::op_node_dgram_default_lookup_bypasses_ip_literals,
     op_node_load_env_file,
     ops::module::op_node_strip_typescript_types,
     ops::require::op_require_can_parse_as_esm,
@@ -835,11 +865,13 @@ deno_core::extension!(deno_node,
     fs: deno_fs::FileSystemRc,
     heap_snapshot_near_heap_limit_policy: HeapSnapshotNearHeapLimitPolicy,
     aes_gcm_implicit_short_tag_policy: AesGcmImplicitShortTagPolicy,
+    dgram_default_lookup_policy: DgramDefaultLookupPolicy,
   },
   state = |state, options| {
     state.put(options.fs.clone());
     state.put(options.heap_snapshot_near_heap_limit_policy);
     state.put(options.aes_gcm_implicit_short_tag_policy);
+    state.put(options.dgram_default_lookup_policy);
     state.put(ops::module_hooks::LoaderHookRegistry::default());
 
     if let Some(init) = &options.maybe_init {
