@@ -12,7 +12,6 @@ const {
   ArrayPrototypePushApply,
   ArrayPrototypeShift,
   ArrayPrototypeUnshift,
-  Error,
   FunctionPrototypeBind,
   FunctionPrototypeCall,
   MathFloor,
@@ -70,6 +69,7 @@ const {
   ERR_INVALID_HTTP_TOKEN,
   ERR_METHOD_NOT_IMPLEMENTED,
   ERR_STREAM_CANNOT_PIPE,
+  ERR_STREAM_ALREADY_FINISHED,
   ERR_STREAM_DESTROYED,
   ERR_STREAM_NULL_VALUES,
   ERR_STREAM_WRITE_AFTER_END,
@@ -103,6 +103,10 @@ const kSocket = Symbol("kSocket");
 const kChunkedBuffer = Symbol("kChunkedBuffer");
 const kChunkedLength = Symbol("kChunkedLength");
 const kBytesWritten = Symbol("kBytesWritten");
+const kErrored = Symbol("errored");
+const kWritableFinished = Symbol("kWritableFinished");
+const kEndCallbacks = Symbol("kEndCallbacks");
+const kFlushError = Symbol("kFlushError");
 export const kRejectNonStandardBodyWrites = Symbol(
   "kRejectNonStandardBodyWrites",
 );
@@ -168,6 +172,10 @@ export function OutgoingMessage(options?: any) {
   this[kBytesWritten] = 0;
   this[kChunkedBuffer] = [];
   this[kChunkedLength] = 0;
+  this[kErrored] = null;
+  this[kWritableFinished] = false;
+  this[kEndCallbacks] = null;
+  this[kFlushError] = null;
 
   this._bodyWriter = null;
 }
@@ -176,14 +184,18 @@ ObjectSetPrototypeOf(OutgoingMessage.prototype, Stream.prototype);
 ObjectSetPrototypeOf(OutgoingMessage, Stream);
 
 ObjectDefineProperties(OutgoingMessage.prototype, {
+  errored: {
+    __proto__: null,
+    get: function errored() {
+      return this[kErrored];
+    },
+    enumerable: true,
+    configurable: true,
+  },
   writableFinished: {
     __proto__: null,
     get: function writableFinished() {
-      return (
-        this.finished &&
-        this.outputSize === 0 &&
-        (!this[kSocket] || this[kSocket].writableLength === 0)
-      );
+      return this[kWritableFinished];
     },
     enumerable: true,
     configurable: true,
@@ -310,6 +322,7 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
         return this;
       }
       this.destroyed = true;
+      this[kErrored] = error;
 
       if (this.socket) {
         this.socket.destroy(error);
@@ -586,11 +599,7 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
         write_(this, chunk, encoding, null, true);
       } else if (this.finished) {
         if (typeof callback === "function") {
-          if (!this.writableFinished) {
-            this.on("finish", callback);
-          } else {
-            callback(new Error("end already called"));
-          }
+          queueEndCallback(this, callback);
         }
         return this;
       } else if (tryDirectEmptyEnd(this, callback)) {
@@ -604,9 +613,7 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
         this._implicitHeader();
       }
 
-      if (typeof callback === "function") {
-        this.once("finish", callback);
-      }
+      if (typeof callback === "function") queueEndCallback(this, callback);
 
       if (
         _checkStrictContentLength(this) &&
@@ -1546,9 +1553,7 @@ function tryDirectEnd(
     return false;
   }
 
-  if (typeof callback === "function") {
-    msg.once("finish", callback);
-  }
+  if (typeof callback === "function") queueEndCallback(msg, callback);
 
   const data = msg._header + chunk;
   const finish = FunctionPrototypeBind(onFinish, undefined, msg);
@@ -1567,7 +1572,9 @@ function tryDirectEnd(
   if (result === 0) {
     (globalThis as any).process.nextTick(finish);
   } else if (result < 0) {
-    socket.destroy(errnoException(result, "write"));
+    const error = errnoException(result, "write");
+    (globalThis as any).process.nextTick(finish, error);
+    socket.destroy(error);
   }
 
   return true;
@@ -1631,9 +1638,7 @@ function tryDirectEmptyEnd(
     return false;
   }
 
-  if (typeof callback === "function") {
-    msg.once("finish", callback);
-  }
+  if (typeof callback === "function") queueEndCallback(msg, callback);
 
   const finish = FunctionPrototypeBind(onFinish, undefined, msg);
   const result = writeDirectString(socket, msg._header, "latin1", finish);
@@ -1651,7 +1656,9 @@ function tryDirectEmptyEnd(
   if (result === 0) {
     (globalThis as any).process.nextTick(finish);
   } else if (result < 0) {
-    socket.destroy(errnoException(result, "write"));
+    const error = errnoException(result, "write");
+    (globalThis as any).process.nextTick(finish, error);
+    socket.destroy(error);
   }
 
   return true;
@@ -1678,7 +1685,7 @@ function writeDirectString(
   socket: any,
   data: string,
   encoding: string,
-  finish: () => void,
+  finish: (error?: unknown) => void,
 ) {
   const handle = socket._handle;
   // This terminal response write bypasses stream_base_commons completion
@@ -1688,7 +1695,9 @@ function writeDirectString(
   const req = {
     oncomplete(status: number) {
       if (status < 0) {
-        socket.destroy(errnoException(status, "write"));
+        const error = errnoException(status, "write");
+        finish(error);
+        socket.destroy(error);
         return;
       }
       finish();
@@ -1712,12 +1721,43 @@ function writeDirectString(
   return streamBaseState[kLastWriteWasAsync] ? 1 : 0;
 }
 
-function onFinish(outmsg: any) {
-  if (outmsg?.socket?._hadError) return;
-  // If the response (or its socket) was destroyed before `res.end()` ran
-  // (e.g. the client aborted the connection), do not emit 'finish' - Node
-  // only emits 'close' in that scenario.
-  if (outmsg?.destroyed || outmsg?.socket?.destroyed) return;
+function flushEndCallbacks(outmsg: any, error: unknown) {
+  const callbacks = outmsg[kEndCallbacks];
+  if (callbacks === null) return;
+  outmsg[kEndCallbacks] = null;
+  for (let i = 0; i < callbacks.length; i++) callbacks[i](error);
+}
+
+function getEndCallbackError(outmsg: any) {
+  return outmsg[kErrored] ?? outmsg[kSocket]?.errored ??
+    new ERR_STREAM_DESTROYED("end");
+}
+
+function queueEndCallback(outmsg: any, callback: any) {
+  if (outmsg[kWritableFinished]) {
+    callback(new ERR_STREAM_ALREADY_FINISHED("end"));
+    return;
+  }
+  if (outmsg[kFlushError] !== null) {
+    (globalThis as any).process.nextTick(callback, outmsg[kFlushError]);
+    return;
+  }
+  outmsg[kEndCallbacks] ??= [];
+  ArrayPrototypePush(outmsg[kEndCallbacks], callback);
+}
+
+function onFinish(outmsg: any, error?: unknown) {
+  if (
+    error || outmsg[kErrored] || outmsg[kSocket]?.errored ||
+    outmsg[kSocket]?._hadError || outmsg.destroyed ||
+    outmsg[kSocket]?.destroyed
+  ) {
+    outmsg[kFlushError] = error ?? getEndCallbackError(outmsg);
+    flushEndCallbacks(outmsg, outmsg[kFlushError]);
+    return;
+  }
+  outmsg[kWritableFinished] = true;
+  flushEndCallbacks(outmsg, null);
   outmsg.emit("finish");
 }
 
