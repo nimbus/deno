@@ -151,6 +151,20 @@ function isWritableFinished(stream, strict) {
   if (!isWritableNodeStream(stream)) return null;
   if (stream.writableFinished === true) return true;
   const wState = stream._writableState;
+  // HTTP OutgoingMessage is a legacy writable without _writableState. Its
+  // `finished` flag means end() ran, and its drained output state was the
+  // writableFinished contract before the explicit flush-status field existed.
+  // Keep that signal for finished()/pipeline() without weakening the public
+  // writableFinished value used to distinguish a failed transport flush.
+  if (
+    wState == null &&
+    stream.errored == null &&
+    stream.finished === true &&
+    stream.outputSize === 0 &&
+    (!stream.socket || stream.socket.writableLength === 0)
+  ) {
+    return true;
+  }
   if (wState?.errored) return false;
   if (typeof wState?.finished !== "boolean") return null;
   return !!(

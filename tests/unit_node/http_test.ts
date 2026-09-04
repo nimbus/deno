@@ -19,7 +19,7 @@ import zlib from "node:zlib";
 import net, { type AddressInfo, Socket } from "node:net";
 import fs from "node:fs";
 import process from "node:process";
-import { Duplex } from "node:stream";
+import { Duplex, finished as finishedCallback } from "node:stream";
 import { text } from "node:stream/consumers";
 import { channel } from "node:diagnostics_channel";
 import * as v8 from "node:v8";
@@ -45,6 +45,25 @@ import { execCode } from "../unit/test_util.ts";
 // tests reusing the same port (e.g. 4505) don't fail with EADDRINUSE.
 Deno.test.beforeEach(() => {
   http.globalAgent.destroy();
+});
+
+Deno.test("[node/http] finished accepts a drained legacy response", async () => {
+  const response = new ServerResponse({
+    method: "GET",
+    httpVersionMajor: 1,
+    httpVersionMinor: 1,
+    headers: {},
+  } as IncomingMessage);
+  response.finished = true;
+  response.outputSize = 0;
+
+  const result = new Promise<Error | undefined>((resolve) => {
+    finishedCallback(response, { readable: false }, resolve);
+  });
+  response.emit("close");
+
+  assertEquals(await result, undefined);
+  assertEquals(response.writableFinished, false);
 });
 
 Deno.test("[node/http] failed writes do not finish outgoing messages", async () => {
