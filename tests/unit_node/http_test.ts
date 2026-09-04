@@ -55,11 +55,13 @@ Deno.test("[node/http] finished accepts a drained legacy response", async () => 
     headers: {},
   } as IncomingMessage);
   response.finished = true;
-  response.outputSize = 0;
+  (response as ServerResponse & { outputSize: number }).outputSize = 0;
 
-  const result = new Promise<Error | undefined>((resolve) => {
-    finishedCallback(response, { readable: false }, resolve);
-  });
+  const result = new Promise<NodeJS.ErrnoException | null | undefined>(
+    (resolve) => {
+      finishedCallback(response, { readable: false }, resolve);
+    },
+  );
   response.emit("close");
 
   assertEquals(await result, undefined);
@@ -110,10 +112,10 @@ Deno.test("[node/http] immediate direct write errors defer end callbacks", async
     let inEnd = true;
     let emittedFinish = false;
     response.on("finish", () => emittedFinish = true);
-    response.end("body", (error) => {
+    response.end("body", (error?: NodeJS.ErrnoException | null) => {
       try {
         assertEquals(inEnd, false);
-        assertEquals((error as NodeJS.ErrnoException).code, "EPIPE");
+        assertEquals(error?.code, "EPIPE");
         assertEquals(response.writableFinished, false);
         assertEquals(emittedFinish, false);
         resolve();
