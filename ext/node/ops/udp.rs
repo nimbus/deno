@@ -23,6 +23,8 @@ use socket2::Socket;
 use socket2::Type;
 use tokio::net::UdpSocket;
 
+use crate::DgramDefaultLookupPolicy;
+
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum NodeUdpError {
   #[class(inherit)]
@@ -51,6 +53,15 @@ pub enum NodeUdpError {
 pub struct NodeUdpSocketResource {
   pub socket: UdpSocket,
   pub cancel: CancelHandle,
+}
+
+#[op2(fast)]
+pub fn op_node_dgram_default_lookup_bypasses_ip_literals(
+  state: &OpState,
+) -> bool {
+  state
+    .borrow::<DgramDefaultLookupPolicy>()
+    .bypasses_ip_literals()
 }
 
 impl Resource for NodeUdpSocketResource {

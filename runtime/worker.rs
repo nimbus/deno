@@ -677,6 +677,7 @@ impl MainWorker {
           services.fs.clone(),
           deno_node::HeapSnapshotNearHeapLimitPolicy::AllowProcessLifetime,
           deno_node::AesGcmImplicitShortTagPolicy::Deny,
+          deno_node::DgramDefaultLookupPolicy::BypassIpLiterals,
         ),
         ops::runtime::deno_runtime::args(main_module.clone()),
         ops::worker_host::deno_worker_host::args(
