@@ -8,6 +8,20 @@ use deno_core::url::form_urlencoded;
 use deno_core::url::quirks;
 use deno_error::JsErrorBox;
 
+use crate::UrlSearchParamsNullPolicy;
+
+fn url_search_params_null_is_missing(state: &OpState) -> bool {
+  matches!(
+    state.try_borrow::<UrlSearchParamsNullPolicy>(),
+    Some(UrlSearchParamsNullPolicy::TreatAsMissing)
+  )
+}
+
+#[op2(fast)]
+pub fn op_url_search_params_null_is_missing(state: &OpState) -> bool {
+  url_search_params_null_is_missing(state)
+}
+
 /// Parse `href` with a `base_href`. Fills the out `buf` with URL components.
 #[op2(fast)]
 #[smi]
@@ -404,4 +418,21 @@ pub fn op_url_stringify_search_params(
   form_urlencoded::Serializer::new(String::new())
     .extend_pairs(args)
     .finish()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn url_search_params_null_policy_defaults_to_stringify() {
+    let mut state = OpState::new(None);
+    assert!(!url_search_params_null_is_missing(&state));
+
+    state.put(UrlSearchParamsNullPolicy::TreatAsMissing);
+    assert!(url_search_params_null_is_missing(&state));
+
+    state.put(UrlSearchParamsNullPolicy::Stringify);
+    assert!(!url_search_params_null_is_missing(&state));
+  }
 }

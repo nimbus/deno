@@ -68,6 +68,13 @@ use crate::timers::op_now;
 use crate::timers::op_time_origin;
 pub mod locks;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UrlSearchParamsNullPolicy {
+  TreatAsMissing,
+  #[default]
+  Stringify,
+}
+
 deno_core::extension!(deno_web,
   deps = [ deno_webidl ],
   ops = [
@@ -130,6 +137,7 @@ deno_core::extension!(deno_web,
     url::op_url_parse_with_base,
     url::op_url_parse_search_params,
     url::op_url_stringify_search_params,
+    url::op_url_search_params_null_is_missing,
     urlpattern::op_urlpattern_parse,
     urlpattern::op_urlpattern_process_match_input,
     console::op_preview_entries,
@@ -198,6 +206,7 @@ deno_core::extension!(deno_web,
     maybe_location: Option<Url>,
     enable_css_parser_features: bool,
     bc: InMemoryBroadcastChannel,
+    url_search_params_null_policy: UrlSearchParamsNullPolicy,
   },
   state = |state, options| {
     state.put(options.blob_store);
@@ -207,6 +216,7 @@ deno_core::extension!(deno_web,
     state.put(StartTime::default());
     state.put(geometry::State::new(options.enable_css_parser_features));
     state.put(options.bc);
+    state.put(options.url_search_params_null_policy);
     state.put(broadcast_channel::BroadcastSabStash::default());
   }
 );

@@ -2,6 +2,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 (function () {
 const { core } = __bootstrap;
+const { op_node_webstreams_error_sentinel_enabled } = core.ops;
 const { destroy, destroyer } = core.loadExtScript(
   "ext:deno_node/internal/streams/destroy.js",
 );
@@ -37,6 +38,17 @@ const { isAnyArrayBuffer } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
 );
 const lazyStream = core.createLazyLoader("node:stream");
+const kErrorSentinelAttached = Symbol("kErrorSentinelAttached");
+
+function attachErrorSentinel(stream) {
+  if (
+    op_node_webstreams_error_sentinel_enabled() &&
+    !(kErrorSentinelAttached in stream)
+  ) {
+    stream.on("error", () => {});
+    stream[kErrorSentinelAttached] = true;
+  }
+}
 
 function isWritableStream(object) {
   return object instanceof WritableStream;
@@ -506,6 +518,7 @@ function newReadableStreamFromStreamReadable(
   }
 
   if (isDestroyed(streamReadable) || !isReadable(streamReadable)) {
+    attachErrorSentinel(streamReadable);
     const readable = new ReadableStream();
     readable.cancel();
     return readable;
@@ -584,7 +597,7 @@ function newReadableStreamFromStreamReadable(
     cleanup();
     // This is a protection against non-standard, legacy streams
     // that happen to emit an error event again after finished is called.
-    streamReadable.on("error", () => {});
+    attachErrorSentinel(streamReadable);
     if (error) {
       return controller.error(error);
     }
