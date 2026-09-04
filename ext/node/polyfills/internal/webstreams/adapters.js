@@ -2,7 +2,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 (function () {
 const { core } = __bootstrap;
-const { op_node_webstreams_error_sentinel_enabled } = core.ops;
+const { op_node_webstreams_closed_error_sentinel_enabled } = core.ops;
 const { destroy, destroyer } = core.loadExtScript(
   "ext:deno_node/internal/streams/destroy.js",
 );
@@ -41,10 +41,7 @@ const lazyStream = core.createLazyLoader("node:stream");
 const kErrorSentinelAttached = Symbol("kErrorSentinelAttached");
 
 function attachErrorSentinel(stream) {
-  if (
-    op_node_webstreams_error_sentinel_enabled() &&
-    !(kErrorSentinelAttached in stream)
-  ) {
+  if (!(kErrorSentinelAttached in stream)) {
     stream.on("error", () => {});
     stream[kErrorSentinelAttached] = true;
   }
@@ -518,7 +515,9 @@ function newReadableStreamFromStreamReadable(
   }
 
   if (isDestroyed(streamReadable) || !isReadable(streamReadable)) {
-    attachErrorSentinel(streamReadable);
+    if (op_node_webstreams_closed_error_sentinel_enabled()) {
+      attachErrorSentinel(streamReadable);
+    }
     const readable = new ReadableStream();
     readable.cancel();
     return readable;

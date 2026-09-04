@@ -61,9 +61,9 @@ pub enum DgramDefaultLookupPolicy {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WebStreamsErrorSentinelPolicy {
-  LegacyNone,
-  AttachOnce,
+pub enum ClosedReadableErrorSentinelPolicy {
+  AfterCompletionOnly,
+  IncludeAlreadyClosed,
 }
 
 impl DgramDefaultLookupPolicy {
@@ -183,10 +183,10 @@ fn op_node_gcm_implicit_short_tag_warns_unconditionally(
 }
 
 #[op2(fast)]
-fn op_node_webstreams_error_sentinel_enabled(state: &OpState) -> bool {
+fn op_node_webstreams_closed_error_sentinel_enabled(state: &OpState) -> bool {
   !matches!(
-    state.try_borrow::<WebStreamsErrorSentinelPolicy>(),
-    Some(WebStreamsErrorSentinelPolicy::LegacyNone)
+    state.try_borrow::<ClosedReadableErrorSentinelPolicy>(),
+    Some(ClosedReadableErrorSentinelPolicy::AfterCompletionOnly)
   )
 }
 
@@ -425,7 +425,7 @@ deno_core::extension!(deno_node,
     op_node_build_os,
     op_node_gcm_implicit_short_tag_allowed,
     op_node_gcm_implicit_short_tag_warns_unconditionally,
-    op_node_webstreams_error_sentinel_enabled,
+    op_node_webstreams_closed_error_sentinel_enabled,
     ops::udp::op_node_dgram_default_lookup_bypasses_ip_literals,
     op_node_load_env_file,
     ops::module::op_node_strip_typescript_types,
@@ -881,14 +881,14 @@ deno_core::extension!(deno_node,
     heap_snapshot_near_heap_limit_policy: HeapSnapshotNearHeapLimitPolicy,
     aes_gcm_implicit_short_tag_policy: AesGcmImplicitShortTagPolicy,
     dgram_default_lookup_policy: DgramDefaultLookupPolicy,
-    webstreams_error_sentinel_policy: WebStreamsErrorSentinelPolicy,
+    closed_readable_error_sentinel_policy: ClosedReadableErrorSentinelPolicy,
   },
   state = |state, options| {
     state.put(options.fs.clone());
     state.put(options.heap_snapshot_near_heap_limit_policy);
     state.put(options.aes_gcm_implicit_short_tag_policy);
     state.put(options.dgram_default_lookup_policy);
-    state.put(options.webstreams_error_sentinel_policy);
+    state.put(options.closed_readable_error_sentinel_policy);
     state.put(ops::module_hooks::LoaderHookRegistry::default());
 
     if let Some(init) = &options.maybe_init {
