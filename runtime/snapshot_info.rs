@@ -22,6 +22,7 @@ pub fn get_extensions_in_snapshot() -> Vec<Extension> {
       Default::default(),
       Default::default(),
       deno_web::InMemoryBroadcastChannel::default(),
+      Default::default(),
     ),
     deno_webgpu::deno_webgpu::init(),
     deno_image::deno_image::init(),
@@ -59,6 +60,7 @@ pub fn get_extensions_in_snapshot() -> Vec<Extension> {
       deno_node::HeapSnapshotNearHeapLimitPolicy::AllowProcessLifetime,
       deno_node::AesGcmImplicitShortTagPolicy::Deny,
       deno_node::DgramDefaultLookupPolicy::BypassIpLiterals,
+      deno_node::WebStreamsErrorSentinelPolicy::AttachOnce,
     ),
     ops::runtime::deno_runtime::init("deno:runtime".parse().unwrap()),
     ops::worker_host::deno_worker_host::init(

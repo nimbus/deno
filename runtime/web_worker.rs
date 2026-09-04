@@ -549,6 +549,7 @@ impl WebWorker {
         Some(options.main_module.clone()),
         Default::default(),
         services.broadcast_channel,
+        Default::default(),
       ),
       deno_webgpu::deno_webgpu::init(),
       deno_image::deno_image::init(),
@@ -611,6 +612,7 @@ impl WebWorker {
         deno_node::HeapSnapshotNearHeapLimitPolicy::AllowProcessLifetime,
         deno_node::AesGcmImplicitShortTagPolicy::Deny,
         deno_node::DgramDefaultLookupPolicy::BypassIpLiterals,
+        deno_node::WebStreamsErrorSentinelPolicy::AttachOnce,
       ),
       // Runtime ops that are always initialized for WebWorkers
       ops::runtime::deno_runtime::init(options.main_module.clone()),

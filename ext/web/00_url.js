@@ -11,6 +11,7 @@ const {
   op_url_get_serialization,
   op_url_parse,
   op_url_parse_search_params,
+  op_url_search_params_null_is_missing,
   op_url_parse_with_base,
   op_url_reparse,
   op_url_stringify_search_params,
@@ -127,9 +128,12 @@ class URLSearchParams {
   constructor(init = undefined) {
     this[webidl.brand] = webidl.brand;
     // `undefined` is the default value of an optional argument, so it means
-    // "not passed". `null` is a value, and per WebIDL union resolution it
-    // reaches the USVString overload as "null".
-    if (init === undefined) {
+    // "not passed". Current WebIDL and Node releases stringify `null`; older
+    // supported Node targets treat it as another missing argument.
+    if (
+      init === undefined ||
+      (init === null && op_url_search_params_null_is_missing())
+    ) {
       this[_list] = [];
       return;
     }

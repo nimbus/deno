@@ -7,6 +7,7 @@ import {
   Duplex,
   finished as finishedCallback,
   getDefaultHighWaterMark,
+  PassThrough,
   promises,
   Readable,
   Stream,
@@ -14,7 +15,7 @@ import {
 } from "node:stream";
 import { TextEncoderStream } from "node:stream/web";
 import { createReadStream, createWriteStream } from "node:fs";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 
 Deno.test("stream/promises pipeline", async () => {
   const filePath = relative(
@@ -152,6 +153,23 @@ Deno.test("Writable toWeb", async () => {
     .pipeTo(webWritable);
 
   await finished(nodeWritable);
+});
+
+Deno.test("Readable toWeb keeps one error sentinel after close", async () => {
+  const readable = new PassThrough();
+  readable.end();
+  readable.destroy();
+  await once(readable, "close");
+  assertEquals(readable.listenerCount("error"), 0);
+
+  const webReadable = Readable.toWeb(readable);
+  assertEquals(readable.listenerCount("error"), 1);
+  Readable.toWeb(readable);
+  assertEquals(readable.listenerCount("error"), 1);
+  assertEquals(await webReadable.getReader().read(), {
+    value: undefined,
+    done: true,
+  });
 });
 
 Deno.test("Duplex fromWeb handles readable errors", async () => {

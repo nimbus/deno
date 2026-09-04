@@ -88,6 +88,7 @@ jobs:
           cargo test --locked -p unit_node_tests --test unit_node -- module_test
           cargo test --locked -p unit_node_tests --test unit_node -- crypto_cipher_gcm_test
           cargo test --locked -p unit_node_tests --test unit_node -- http_test
+          cargo test --locked -p unit_node_tests --test unit_node -- stream_test
 
       - name: Test deno_fetch
         run: cargo test --locked -p deno_fetch --lib --features deno_core/default
