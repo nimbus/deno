@@ -41,6 +41,9 @@ pub enum DecryptError {
   #[error("invalid tag length")]
   InvalidTagLength,
   #[class("DOMExceptionOperationError")]
+  #[error("initialization vector must not be empty")]
+  InvalidGcmIvLength,
+  #[class("DOMExceptionOperationError")]
   #[error("invalid key or iv")]
   InvalidKeyOrIv,
   #[class("DOMExceptionOperationError")]
@@ -193,6 +196,9 @@ pub(crate) fn decrypt_aes_gcm(
       }
       crate::aes_gcm::AesGcmError::InvalidTagLength => {
         DecryptError::InvalidTagLength
+      }
+      crate::aes_gcm::AesGcmError::InvalidIvLength => {
+        DecryptError::InvalidGcmIvLength
       }
       crate::aes_gcm::AesGcmError::TooMuchData => DecryptError::TooMuchData,
       crate::aes_gcm::AesGcmError::AuthenticationFailed => DecryptError::Failed,

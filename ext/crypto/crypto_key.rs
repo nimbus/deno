@@ -279,52 +279,6 @@ impl CryptoKey {
   }
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::shared::RawKeyData;
-
-  #[test]
-  fn key_material_comparison_covers_all_private_shapes() {
-    assert!(key_material_equal(
-      &RawKeyData::Secret(Box::new([1, 2, 3])),
-      &RawKeyData::Secret(Box::new([1, 2, 3])),
-    ));
-    assert!(!key_material_equal(
-      &RawKeyData::Secret(Box::new([1, 2, 3])),
-      &RawKeyData::Secret(Box::new([1, 2, 4])),
-    ));
-    assert!(!key_material_equal(
-      &RawKeyData::Secret(Box::new([1, 2, 3])),
-      &RawKeyData::Secret(Box::new([1, 2])),
-    ));
-    assert!(!key_material_equal(
-      &RawKeyData::Private(Box::new([1, 2, 3])),
-      &RawKeyData::Public(Box::new([1, 2, 3])),
-    ));
-    assert!(key_material_equal(
-      &RawKeyData::SeededPrivate {
-        seed: Some(Box::new([1, 2])),
-        private_key: Box::new([3, 4]),
-      },
-      &RawKeyData::SeededPrivate {
-        seed: Some(Box::new([1, 2])),
-        private_key: Box::new([3, 4]),
-      },
-    ));
-    assert!(!key_material_equal(
-      &RawKeyData::SeededPrivate {
-        seed: None,
-        private_key: Box::new([3, 4]),
-      },
-      &RawKeyData::SeededPrivate {
-        seed: Some(Box::new([1, 2])),
-        private_key: Box::new([3, 4]),
-      },
-    ));
-  }
-}
-
 #[allow(
   dead_code,
   reason = "wired up incrementally as each SubtleCrypto method moves into Rust"
@@ -454,5 +408,51 @@ impl CryptoKey {
       public_algorithm: v8::Global::new(scope, public_algorithm),
       handle: v8::Global::new(scope, handle),
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::shared::RawKeyData;
+
+  #[test]
+  fn key_material_comparison_covers_all_private_shapes() {
+    assert!(key_material_equal(
+      &RawKeyData::Secret(Box::new([1, 2, 3])),
+      &RawKeyData::Secret(Box::new([1, 2, 3])),
+    ));
+    assert!(!key_material_equal(
+      &RawKeyData::Secret(Box::new([1, 2, 3])),
+      &RawKeyData::Secret(Box::new([1, 2, 4])),
+    ));
+    assert!(!key_material_equal(
+      &RawKeyData::Secret(Box::new([1, 2, 3])),
+      &RawKeyData::Secret(Box::new([1, 2])),
+    ));
+    assert!(!key_material_equal(
+      &RawKeyData::Private(Box::new([1, 2, 3])),
+      &RawKeyData::Public(Box::new([1, 2, 3])),
+    ));
+    assert!(key_material_equal(
+      &RawKeyData::SeededPrivate {
+        seed: Some(Box::new([1, 2])),
+        private_key: Box::new([3, 4]),
+      },
+      &RawKeyData::SeededPrivate {
+        seed: Some(Box::new([1, 2])),
+        private_key: Box::new([3, 4]),
+      },
+    ));
+    assert!(!key_material_equal(
+      &RawKeyData::SeededPrivate {
+        seed: None,
+        private_key: Box::new([3, 4]),
+      },
+      &RawKeyData::SeededPrivate {
+        seed: Some(Box::new([1, 2])),
+        private_key: Box::new([3, 4]),
+      },
+    ));
   }
 }

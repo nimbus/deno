@@ -1907,6 +1907,29 @@ Deno.test(async function testAesGcmEncrypt() {
   }
 });
 
+Deno.test(async function testAesGcmRejectsEmptyIv() {
+  const key = await crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 128 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+  const algorithm = { name: "AES-GCM", iv: new Uint8Array() };
+
+  const encryptError = await assertRejects(
+    () => crypto.subtle.encrypt(algorithm, key, new Uint8Array()),
+    DOMException,
+    "initialization vector must not be empty",
+  );
+  assertEquals(encryptError.name, "OperationError");
+
+  const decryptError = await assertRejects(
+    () => crypto.subtle.decrypt(algorithm, key, new Uint8Array(16)),
+    DOMException,
+    "initialization vector must not be empty",
+  );
+  assertEquals(decryptError.name, "OperationError");
+});
+
 async function roundTripSecretJwk(
   jwk: JsonWebKey,
   algId: AlgorithmIdentifier | HmacImportParams,

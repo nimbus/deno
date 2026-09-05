@@ -12,6 +12,7 @@ use subtle::ConstantTimeEq;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AesGcmError {
   AuthenticationFailed,
+  InvalidIvLength,
   InvalidKeyLength,
   InvalidTagLength,
   TooMuchData,
@@ -68,6 +69,10 @@ fn initial_counter(
   cipher: &AesCipher,
   iv: &[u8],
 ) -> Result<[u8; 16], AesGcmError> {
+  if iv.is_empty() {
+    return Err(AesGcmError::InvalidIvLength);
+  }
+
   if iv.len() == 12 {
     let mut counter = [0_u8; 16];
     counter[..12].copy_from_slice(iv);
@@ -219,6 +224,19 @@ mod tests {
     assert_eq!(
       decrypt(&key, 64, &iv, additional_data, &encrypted).unwrap(),
       plaintext
+    );
+  }
+
+  #[test]
+  fn rejects_empty_iv() {
+    let key = [0_u8; 16];
+    assert_eq!(
+      encrypt(&key, 128, &[], &[], b"plaintext"),
+      Err(AesGcmError::InvalidIvLength)
+    );
+    assert_eq!(
+      decrypt(&key, 128, &[], &[], &[0_u8; 16]),
+      Err(AesGcmError::InvalidIvLength)
     );
   }
 
