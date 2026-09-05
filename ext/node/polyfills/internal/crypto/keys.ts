@@ -1134,6 +1134,10 @@ class PrivateKeyObject extends AsymmetricKeyObject {
           "does not support encryption",
         );
       }
+      const rawType = options.type;
+      if (rawType !== undefined) {
+        throw new ERR_INVALID_ARG_VALUE("options.type", rawType);
+      }
       const keyType = this.asymmetricKeyType;
       if (options.format === "raw-private") {
         if (

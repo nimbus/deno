@@ -8,6 +8,28 @@ import {
   assertThrows,
 } from "./test_util.ts";
 
+Deno.test(async function cryptoKeyInstancesShareIsolatePrototype() {
+  const keyData = new Uint8Array(32);
+  const first = await crypto.subtle.importKey(
+    "raw",
+    keyData,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const second = await crypto.subtle.importKey(
+    "raw",
+    keyData,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const internalPrototype = Object.getPrototypeOf(first);
+  assert(internalPrototype === Object.getPrototypeOf(second));
+  assert(Object.getPrototypeOf(internalPrototype) === CryptoKey.prototype);
+});
+
 // https://github.com/denoland/deno/issues/11664
 Deno.test(async function testImportArrayBufferKey() {
   const subtle = globalThis.crypto.subtle;

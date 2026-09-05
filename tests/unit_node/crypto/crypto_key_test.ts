@@ -44,6 +44,17 @@ const generateKeyPairAsync = promisify(
 
 const testDir = new URL(".", import.meta.url);
 
+Deno.test("raw private exports reject a type option", () => {
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const error = assertThrows(() =>
+    privateKey.export({
+      format: "raw-private",
+      type: "pkcs8",
+    } as any)
+  ) as NodeJS.ErrnoException;
+  assertEquals(error.code, "ERR_INVALID_ARG_VALUE");
+});
+
 function x448PrivateKey(raw: Buffer): KeyObject {
   const pkcs8 = Buffer.concat([
     Buffer.from("3046020100300506032b656f043a0438", "hex"),
