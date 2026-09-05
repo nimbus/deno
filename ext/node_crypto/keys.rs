@@ -66,6 +66,17 @@ use super::pkcs3;
 use super::pkcs3::DhParameter;
 use super::primes::Prime;
 
+mod post_quantum;
+mod raw;
+
+pub use post_quantum::PqJwkError;
+pub use post_quantum::UnsupportedPostQuantumAlgorithmError;
+pub use post_quantum::op_node_generate_post_quantum_key;
+pub use post_quantum::op_node_generate_post_quantum_key_async;
+pub use raw::op_node_export_private_key_raw;
+pub use raw::op_node_export_private_key_seed;
+pub use raw::op_node_export_public_key_raw;
+
 #[derive(Clone)]
 pub enum KeyObjectHandle {
   AsymmetricPrivate(AsymmetricPrivateKey),
@@ -618,31 +629,6 @@ pub enum EcJwkError {
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
-pub enum PqJwkError {
-  #[class(generic)]
-  #[property("code" = "ERR_CRYPTO_INVALID_JWK")]
-  #[error("{0}")]
-  Invalid(&'static str),
-  #[class(inherit)]
-  #[error(transparent)]
-  Unsupported(
-    #[from]
-    #[inherit]
-    UnsupportedPostQuantumAlgorithmError,
-  ),
-}
-
-impl PqJwkError {
-  fn invalid() -> Self {
-    Self::Invalid("Invalid JWK")
-  }
-
-  fn missing_private() -> Self {
-    Self::Invalid("JWK does not contain private key material")
-  }
-}
-
-#[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum EdRawError {
   #[class(generic)]
   #[error(transparent)]
@@ -666,12 +652,6 @@ pub enum EdRawError {
 #[error("unsupported")]
 #[property("code" = "ERR_OSSL_UNSUPPORTED")]
 pub struct UnsupportedPrivateKeyOidError;
-
-#[derive(Debug, thiserror::Error, deno_error::JsError)]
-#[class(generic)]
-#[error("unsupported post-quantum algorithm")]
-#[property("code" = "ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM")]
-pub struct UnsupportedPostQuantumAlgorithmError;
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[class(type)]
@@ -1051,16 +1031,6 @@ fn normalize_pem_line_width(pem: &str) -> Cow<'_, str> {
   Cow::Owned(result)
 }
 
-fn ensure_node_pq_algorithm_supported(
-  algorithm: deno_crypto::pq_interop::Algorithm,
-) -> Result<(), UnsupportedPostQuantumAlgorithmError> {
-  if algorithm == deno_crypto::pq_interop::Algorithm::MlKem512 {
-    Err(UnsupportedPostQuantumAlgorithmError)
-  } else {
-    Ok(())
-  }
-}
-
 impl KeyObjectHandle {
   pub fn new_asymmetric_private_key_from_js(
     key: &[u8],
@@ -1069,80 +1039,10 @@ impl KeyObjectHandle {
     passphrase: Option<&[u8]>,
     named_curve: Option<&str>,
   ) -> Result<KeyObjectHandle, AsymmetricPrivateKeyError> {
-    if format == "raw-private" {
-      let private_key = match typ {
-        "ec" => {
-          let key = match named_curve {
-            Some("P-224" | "secp224r1") if key.len() == 28 => {
-              p224::SecretKey::from_slice(key).map(EcPrivateKey::P224)
-            }
-            Some("P-256" | "prime256v1" | "secp256r1") if key.len() == 32 => {
-              p256::SecretKey::from_slice(key).map(EcPrivateKey::P256)
-            }
-            Some("P-384" | "secp384r1") if key.len() == 48 => {
-              p384::SecretKey::from_slice(key).map(EcPrivateKey::P384)
-            }
-            Some("P-521" | "secp521r1") if key.len() == 66 => {
-              p521::SecretKey::from_slice(key).map(EcPrivateKey::P521)
-            }
-            Some("secp256k1") if key.len() == 32 => {
-              k256::SecretKey::from_slice(key).map(EcPrivateKey::Secp256k1)
-            }
-            _ => {
-              return Err(AsymmetricPrivateKeyError::InvalidRawPrivateKey);
-            }
-          }
-          .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
-          AsymmetricPrivateKey::Ec(key)
-        }
-        "ed25519" => {
-          let bytes: &[u8; 32] = key
-            .try_into()
-            .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
-          AsymmetricPrivateKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(
-            bytes,
-          ))
-        }
-        "x25519" => {
-          let bytes: [u8; 32] = key
-            .try_into()
-            .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
-          AsymmetricPrivateKey::X25519(x25519_dalek::StaticSecret::from(bytes))
-        }
-        "ed448" => {
-          let bytes: [u8; 57] = key
-            .try_into()
-            .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
-          AsymmetricPrivateKey::Ed448(ed448_goldilocks::SigningKey::from(
-            ed448_goldilocks::EdwardsScalarBytes::from(bytes),
-          ))
-        }
-        "x448" => {
-          let bytes: [u8; 56] = key
-            .try_into()
-            .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
-          AsymmetricPrivateKey::X448(bytes)
-        }
-        _ => {
-          return Err(AsymmetricPrivateKeyError::UnsupportedKeyType(
-            typ.to_string(),
-          ));
-        }
-      };
-
-      return Ok(KeyObjectHandle::AsymmetricPrivate(private_key));
-    }
-    if format == "raw-seed" {
-      let algorithm = deno_crypto::pq_interop::Algorithm::from_name(typ)
-        .ok_or_else(|| {
-          AsymmetricPrivateKeyError::UnsupportedKeyType(typ.to_string())
-        })?;
-      ensure_node_pq_algorithm_supported(algorithm)?;
-      let key = deno_crypto::pq_interop::import_private_seed(algorithm, key)
-        .map_err(|_| AsymmetricPrivateKeyError::InvalidPrivateKey)?;
-      return Ok(KeyObjectHandle::AsymmetricPrivate(
-        AsymmetricPrivateKey::PostQuantum(key),
-      ));
+    if let Some(result) =
+      raw::private_key_from_js(key, format, typ, named_curve)
+    {
+      return result;
     }
     let document = match format {
       "pem" => {
@@ -1398,7 +1298,7 @@ impl KeyObjectHandle {
         })
       }
       oid if deno_crypto::pq_interop::Algorithm::from_oid(oid).is_some() => {
-        ensure_node_pq_algorithm_supported(
+        post_quantum::ensure_node_algorithm_supported(
           deno_crypto::pq_interop::Algorithm::from_oid(oid).unwrap(),
         )?;
         let key = deno_crypto::pq_interop::import_private_pkcs8(document_bytes)
@@ -1596,63 +1496,6 @@ impl KeyObjectHandle {
     }
   }
 
-  pub fn new_pq_jwk(
-    jwk: &deno_core::serde_json::Value,
-    is_public: bool,
-  ) -> Result<KeyObjectHandle, PqJwkError> {
-    use base64::prelude::BASE64_URL_SAFE_NO_PAD;
-
-    let object = jwk.as_object().ok_or_else(PqJwkError::invalid)?;
-    if object.get("kty").and_then(|value| value.as_str()) != Some("AKP") {
-      return Err(PqJwkError::invalid());
-    }
-    let algorithm_name = object
-      .get("alg")
-      .and_then(|value| value.as_str())
-      .ok_or_else(PqJwkError::invalid)?;
-    let algorithm =
-      deno_crypto::pq_interop::Algorithm::from_name(algorithm_name)
-        .filter(|algorithm| algorithm.name() == algorithm_name)
-        .ok_or_else(PqJwkError::invalid)?;
-    ensure_node_pq_algorithm_supported(algorithm)?;
-    let public_bytes = object
-      .get("pub")
-      .and_then(|value| value.as_str())
-      .ok_or_else(PqJwkError::invalid)
-      .and_then(|value| {
-        BASE64_URL_SAFE_NO_PAD
-          .decode(value)
-          .map_err(|_| PqJwkError::invalid())
-      })?;
-    let public =
-      deno_crypto::pq_interop::import_public_raw(algorithm, &public_bytes)
-        .map_err(|_| PqJwkError::invalid())?;
-    if is_public {
-      return Ok(KeyObjectHandle::AsymmetricPublic(
-        AsymmetricPublicKey::PostQuantum(public),
-      ));
-    }
-
-    let private_bytes = object
-      .get("priv")
-      .and_then(|value| value.as_str())
-      .ok_or_else(PqJwkError::missing_private)
-      .and_then(|value| {
-        BASE64_URL_SAFE_NO_PAD
-          .decode(value)
-          .map_err(|_| PqJwkError::invalid())
-      })?;
-    let private =
-      deno_crypto::pq_interop::import_private_seed(algorithm, &private_bytes)
-        .map_err(|_| PqJwkError::invalid())?;
-    if private.public_key() != public {
-      return Err(PqJwkError::invalid());
-    }
-    Ok(KeyObjectHandle::AsymmetricPrivate(
-      AsymmetricPrivateKey::PostQuantum(private),
-    ))
-  }
-
   pub fn new_ec_jwk(
     jwk: &JwkEcKey,
     is_public: bool,
@@ -1719,81 +1562,6 @@ impl KeyObjectHandle {
     Ok(handle)
   }
 
-  pub fn new_ed_raw(
-    curve: &str,
-    data: &[u8],
-    is_public: bool,
-  ) -> Result<KeyObjectHandle, EdRawError> {
-    match curve {
-      "Ed25519" => {
-        let data =
-          data.try_into().map_err(|_| EdRawError::InvalidEd25519Key)?;
-        if !is_public {
-          Ok(KeyObjectHandle::AsymmetricPrivate(
-            AsymmetricPrivateKey::Ed25519(
-              ed25519_dalek::SigningKey::from_bytes(data),
-            ),
-          ))
-        } else {
-          Ok(KeyObjectHandle::AsymmetricPublic(
-            AsymmetricPublicKey::Ed25519(
-              ed25519_dalek::VerifyingKey::from_bytes(data)?,
-            ),
-          ))
-        }
-      }
-      "X25519" => {
-        let data: [u8; 32] =
-          data.try_into().map_err(|_| EdRawError::InvalidEd25519Key)?;
-        if !is_public {
-          Ok(KeyObjectHandle::AsymmetricPrivate(
-            AsymmetricPrivateKey::X25519(x25519_dalek::StaticSecret::from(
-              data,
-            )),
-          ))
-        } else {
-          Ok(KeyObjectHandle::AsymmetricPublic(
-            AsymmetricPublicKey::X25519(x25519_dalek::PublicKey::from(data)),
-          ))
-        }
-      }
-      "Ed448" => {
-        if !is_public {
-          let key_bytes: [u8; 57] =
-            data.try_into().map_err(|_| EdRawError::InvalidEd448Key)?;
-          let seed = ed448_goldilocks::EdwardsScalarBytes::from(key_bytes);
-          Ok(KeyObjectHandle::AsymmetricPrivate(
-            AsymmetricPrivateKey::Ed448(ed448_goldilocks::SigningKey::from(
-              seed,
-            )),
-          ))
-        } else {
-          let point_bytes: &[u8; 57] =
-            data.try_into().map_err(|_| EdRawError::InvalidEd448Key)?;
-          let vk = ed448_goldilocks::VerifyingKey::from_bytes(point_bytes)
-            .map_err(|_| EdRawError::InvalidEd448Key)?;
-          Ok(KeyObjectHandle::AsymmetricPublic(
-            AsymmetricPublicKey::Ed448(vk),
-          ))
-        }
-      }
-      "X448" => {
-        let data: [u8; 56] =
-          data.try_into().map_err(|_| EdRawError::InvalidX448Key)?;
-        if !is_public {
-          Ok(KeyObjectHandle::AsymmetricPrivate(
-            AsymmetricPrivateKey::X448(data),
-          ))
-        } else {
-          Ok(KeyObjectHandle::AsymmetricPublic(
-            AsymmetricPublicKey::X448(data),
-          ))
-        }
-      }
-      _ => Err(EdRawError::UnsupportedCurve),
-    }
-  }
-
   pub fn new_asymmetric_public_key_from_js(
     key: &[u8],
     format: &str,
@@ -1801,75 +1569,9 @@ impl KeyObjectHandle {
     passphrase: Option<&[u8]>,
     named_curve: Option<&str>,
   ) -> Result<KeyObjectHandle, AsymmetricPublicKeyError> {
-    if format == "raw-public" {
-      let public_key = if let Some(algorithm) =
-        deno_crypto::pq_interop::Algorithm::from_name(typ)
-      {
-        ensure_node_pq_algorithm_supported(algorithm)?;
-        let key = deno_crypto::pq_interop::import_public_raw(algorithm, key)
-          .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
-        AsymmetricPublicKey::PostQuantum(key)
-      } else {
-        match typ {
-          "ec" => {
-            let key = match named_curve {
-              Some("P-224" | "secp224r1") => {
-                p224::PublicKey::from_sec1_bytes(key).map(EcPublicKey::P224)
-              }
-              Some("P-256" | "prime256v1" | "secp256r1") => {
-                p256::PublicKey::from_sec1_bytes(key).map(EcPublicKey::P256)
-              }
-              Some("P-384" | "secp384r1") => {
-                p384::PublicKey::from_sec1_bytes(key).map(EcPublicKey::P384)
-              }
-              Some("P-521" | "secp521r1") => {
-                p521::PublicKey::from_sec1_bytes(key).map(EcPublicKey::P521)
-              }
-              Some("secp256k1") => k256::PublicKey::from_sec1_bytes(key)
-                .map(EcPublicKey::Secp256k1),
-              _ => {
-                return Err(AsymmetricPublicKeyError::InvalidRawPublicKey);
-              }
-            }
-            .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
-            AsymmetricPublicKey::Ec(key)
-          }
-          "ed25519" => {
-            let bytes: &[u8; 32] = key
-              .try_into()
-              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
-            let key = ed25519_dalek::VerifyingKey::from_bytes(bytes)
-              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
-            AsymmetricPublicKey::Ed25519(key)
-          }
-          "x25519" => {
-            let bytes: [u8; 32] = key
-              .try_into()
-              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
-            AsymmetricPublicKey::X25519(x25519_dalek::PublicKey::from(bytes))
-          }
-          "ed448" => {
-            let bytes: &[u8; 57] = key
-              .try_into()
-              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
-            let key = ed448_goldilocks::VerifyingKey::from_bytes(bytes)
-              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
-            AsymmetricPublicKey::Ed448(key)
-          }
-          "x448" => {
-            let bytes: [u8; 56] = key
-              .try_into()
-              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
-            AsymmetricPublicKey::X448(bytes)
-          }
-          _ => {
-            return Err(AsymmetricPublicKeyError::UnsupportedKeyType(
-              typ.to_string(),
-            ));
-          }
-        }
-      };
-      return Ok(KeyObjectHandle::AsymmetricPublic(public_key));
+    if let Some(result) = raw::public_key_from_js(key, format, typ, named_curve)
+    {
+      return result;
     }
     if format == "raw-private" || format == "raw-seed" {
       let private = KeyObjectHandle::new_asymmetric_private_key_from_js(
@@ -2110,7 +1812,7 @@ impl KeyObjectHandle {
         })
       }
       oid if deno_crypto::pq_interop::Algorithm::from_oid(oid).is_some() => {
-        ensure_node_pq_algorithm_supported(
+        post_quantum::ensure_node_algorithm_supported(
           deno_crypto::pq_interop::Algorithm::from_oid(oid).unwrap(),
         )?;
         let key =
@@ -3012,7 +2714,7 @@ pub fn op_node_create_ed_raw(
   #[buffer] key: &[u8],
   is_public: bool,
 ) -> Result<KeyObjectHandle, EdRawError> {
-  KeyObjectHandle::new_ed_raw(curve, key, is_public)
+  raw::ed_key_from_raw(curve, key, is_public)
 }
 
 #[derive(FromV8)]
@@ -3042,7 +2744,7 @@ pub fn op_node_create_pq_jwk(
   #[serde] jwk: deno_core::serde_json::Value,
   is_public: bool,
 ) -> Result<KeyObjectHandle, PqJwkError> {
-  KeyObjectHandle::new_pq_jwk(&jwk, is_public)
+  post_quantum::new_jwk(&jwk, is_public)
 }
 
 #[op2]
@@ -3750,50 +3452,6 @@ pub async fn op_node_generate_ed25519_key_async() -> KeyObjectHandlePair {
   spawn_blocking(ed25519_generate).await.unwrap()
 }
 
-fn post_quantum_generate(
-  algorithm_name: &str,
-) -> Result<KeyObjectHandlePair, JsErrorBox> {
-  let algorithm = deno_crypto::pq_interop::Algorithm::from_name(algorithm_name)
-    .ok_or_else(|| JsErrorBox::type_error("Invalid post-quantum algorithm"))?;
-  ensure_node_pq_algorithm_supported(algorithm)
-    .map_err(JsErrorBox::from_err)?;
-  let seed_len = match algorithm {
-    deno_crypto::pq_interop::Algorithm::MlDsa44
-    | deno_crypto::pq_interop::Algorithm::MlDsa65
-    | deno_crypto::pq_interop::Algorithm::MlDsa87 => 32,
-    deno_crypto::pq_interop::Algorithm::MlKem768
-    | deno_crypto::pq_interop::Algorithm::MlKem1024 => 64,
-    deno_crypto::pq_interop::Algorithm::MlKem512 => unreachable!(),
-  };
-  let mut seed = vec![0u8; seed_len];
-  thread_rng().fill_bytes(&mut seed);
-  let private = deno_crypto::pq_interop::import_private_seed(algorithm, &seed)
-    .map_err(|error| JsErrorBox::generic(error.to_string()))?;
-  let public = private.public_key();
-  Ok(KeyObjectHandlePair::new(
-    AsymmetricPrivateKey::PostQuantum(private),
-    AsymmetricPublicKey::PostQuantum(public),
-  ))
-}
-
-#[op2]
-#[cppgc]
-pub fn op_node_generate_post_quantum_key(
-  #[string] algorithm_name: &str,
-) -> Result<KeyObjectHandlePair, JsErrorBox> {
-  post_quantum_generate(algorithm_name)
-}
-
-#[op2]
-#[cppgc]
-pub async fn op_node_generate_post_quantum_key_async(
-  #[string] algorithm_name: String,
-) -> Result<KeyObjectHandlePair, JsErrorBox> {
-  spawn_blocking(move || post_quantum_generate(&algorithm_name))
-    .await
-    .unwrap()
-}
-
 fn x448_generate() -> KeyObjectHandlePair {
   let mut seed = [0u8; 56];
   thread_rng().fill_bytes(&mut seed);
@@ -4006,92 +3664,6 @@ pub fn op_node_export_secret_key(
     .as_secret_key()
     .ok_or_else(|| JsErrorBox::type_error("key is not a secret key"))?;
   Ok(key.to_vec().into())
-}
-
-#[op2]
-pub fn op_node_export_public_key_raw(
-  #[cppgc] handle: &KeyObjectHandle,
-  #[string] point_format: Option<String>,
-) -> Result<Uint8Array, JsErrorBox> {
-  let key = handle.as_public_key().ok_or_else(|| {
-    JsErrorBox::type_error("raw-public export requires a public key")
-  })?;
-  match key.as_ref() {
-    AsymmetricPublicKey::Ec(key) => {
-      use elliptic_curve::sec1::ToEncodedPoint;
-      let compressed = point_format.as_deref() == Some("compressed");
-      let bytes = match key {
-        EcPublicKey::P224(key) => {
-          key.to_encoded_point(compressed).as_bytes().to_vec()
-        }
-        EcPublicKey::P256(key) => {
-          key.to_encoded_point(compressed).as_bytes().to_vec()
-        }
-        EcPublicKey::P384(key) => {
-          key.to_encoded_point(compressed).as_bytes().to_vec()
-        }
-        EcPublicKey::P521(key) => {
-          key.to_encoded_point(compressed).as_bytes().to_vec()
-        }
-        EcPublicKey::Secp256k1(key) => {
-          key.to_encoded_point(compressed).as_bytes().to_vec()
-        }
-      };
-      Ok(bytes.into())
-    }
-    AsymmetricPublicKey::X25519(key) => Ok(key.as_bytes().to_vec().into()),
-    AsymmetricPublicKey::Ed25519(key) => Ok(key.to_bytes().to_vec().into()),
-    AsymmetricPublicKey::X448(key) => Ok(key.to_vec().into()),
-    AsymmetricPublicKey::Ed448(key) => Ok(key.to_bytes().to_vec().into()),
-    AsymmetricPublicKey::PostQuantum(key) => Ok(key.raw().to_vec().into()),
-    _ => Err(JsErrorBox::type_error(
-      "raw-public export is not supported for this key type",
-    )),
-  }
-}
-
-#[op2]
-pub fn op_node_export_private_key_raw(
-  #[cppgc] handle: &KeyObjectHandle,
-) -> Result<Uint8Array, JsErrorBox> {
-  let key = handle.as_private_key().ok_or_else(|| {
-    JsErrorBox::type_error("raw-private export requires a private key")
-  })?;
-  let bytes = match key {
-    AsymmetricPrivateKey::Ec(key) => match key {
-      EcPrivateKey::P224(key) => key.to_bytes().to_vec(),
-      EcPrivateKey::P256(key) => key.to_bytes().to_vec(),
-      EcPrivateKey::P384(key) => key.to_bytes().to_vec(),
-      EcPrivateKey::P521(key) => key.to_bytes().to_vec(),
-      EcPrivateKey::Secp256k1(key) => key.to_bytes().to_vec(),
-    },
-    AsymmetricPrivateKey::X25519(key) => key.to_bytes().to_vec(),
-    AsymmetricPrivateKey::Ed25519(key) => key.to_bytes().to_vec(),
-    AsymmetricPrivateKey::X448(key) => key.to_vec(),
-    AsymmetricPrivateKey::Ed448(key) => key.to_bytes().to_vec(),
-    _ => {
-      return Err(JsErrorBox::type_error(
-        "raw-private export is not supported for this key type",
-      ));
-    }
-  };
-  Ok(bytes.into())
-}
-
-#[op2]
-pub fn op_node_export_private_key_seed(
-  #[cppgc] handle: &KeyObjectHandle,
-) -> Result<Uint8Array, JsErrorBox> {
-  match handle.as_private_key() {
-    Some(AsymmetricPrivateKey::PostQuantum(key)) => {
-      key.seed().map(|seed| seed.to_vec().into()).ok_or_else(|| {
-        JsErrorBox::generic("key does not have an available seed")
-      })
-    }
-    _ => Err(JsErrorBox::type_error(
-      "raw-seed export requires a post-quantum private key",
-    )),
-  }
 }
 
 #[op2]
@@ -5361,7 +4933,7 @@ mod tests {
       "alg": "ML-KEM-512",
     });
     assert!(matches!(
-      KeyObjectHandle::new_pq_jwk(&jwk, true),
+      post_quantum::new_jwk(&jwk, true),
       Err(PqJwkError::Unsupported(_))
     ));
   }
