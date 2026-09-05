@@ -117,6 +117,21 @@ pub fn build_algorithm_object<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   dict: &AlgorithmDict,
 ) -> v8::Local<'s, v8::Object> {
+  build_algorithm_object_with_integrity(scope, dict, true)
+}
+
+fn build_public_algorithm_object<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  dict: &AlgorithmDict,
+) -> v8::Local<'s, v8::Object> {
+  build_algorithm_object_with_integrity(scope, dict, false)
+}
+
+fn build_algorithm_object_with_integrity<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  dict: &AlgorithmDict,
+  freeze: bool,
+) -> v8::Local<'s, v8::Object> {
   let obj = v8::Object::new(scope);
   set_string(scope, obj, b"name", &dict.name);
   if let Some(length) = dict.length {
@@ -128,9 +143,11 @@ pub fn build_algorithm_object<'s>(
   if let Some(ref hash_name) = dict.hash_name {
     let hash_obj = v8::Object::new(scope);
     set_string(scope, hash_obj, b"name", hash_name);
-    hash_obj
-      .set_integrity_level(scope, v8::IntegrityLevel::Frozen)
-      .unwrap();
+    if freeze {
+      hash_obj
+        .set_integrity_level(scope, v8::IntegrityLevel::Frozen)
+        .unwrap();
+    }
     let key = one_byte_internalized(scope, b"hash");
     obj.set(scope, key.into(), hash_obj.into());
   }
@@ -151,9 +168,11 @@ pub fn build_algorithm_object<'s>(
     let key = one_byte_internalized(scope, b"publicExponent");
     obj.set(scope, key.into(), u8.into());
   }
-  obj
-    .set_integrity_level(scope, v8::IntegrityLevel::Frozen)
-    .unwrap();
+  if freeze {
+    obj
+      .set_integrity_level(scope, v8::IntegrityLevel::Frozen)
+      .unwrap();
+  }
   obj
 }
 
@@ -161,16 +180,33 @@ pub fn build_usages_array<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   usages: &[&str],
 ) -> v8::Local<'s, v8::Array> {
+  build_usages_array_with_integrity(scope, usages, true)
+}
+
+fn build_public_usages_array<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  usages: &[&str],
+) -> v8::Local<'s, v8::Array> {
+  build_usages_array_with_integrity(scope, usages, false)
+}
+
+fn build_usages_array_with_integrity<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  usages: &[&str],
+  freeze: bool,
+) -> v8::Local<'s, v8::Array> {
   let len = usages.len();
   let arr = v8::Array::new(scope, len as i32);
   for (i, u) in usages.iter().enumerate() {
     let s = v8::String::new(scope, u).unwrap();
     arr.set_index(scope, i as u32, s.into());
   }
-  let obj: v8::Local<v8::Object> = arr.into();
-  obj
-    .set_integrity_level(scope, v8::IntegrityLevel::Frozen)
-    .unwrap();
+  if freeze {
+    let obj: v8::Local<v8::Object> = arr.into();
+    obj
+      .set_integrity_level(scope, v8::IntegrityLevel::Frozen)
+      .unwrap();
+  }
   arr
 }
 
@@ -211,6 +247,8 @@ pub fn make_crypto_key<'s>(
   let handle = build_handle_object(scope, data);
   let algorithm_obj = build_algorithm_object(scope, &alg);
   let usages_arr = build_usages_array(scope, usages);
+  let public_algorithm_obj = build_public_algorithm_object(scope, &alg);
+  let public_usages_arr = build_public_usages_array(scope, usages);
 
   let crypto_key = CryptoKey::from_parts(
     scope,
@@ -218,6 +256,8 @@ pub fn make_crypto_key<'s>(
     extractable,
     usages_arr.into(),
     algorithm_obj.into(),
+    public_usages_arr.into(),
+    public_algorithm_obj.into(),
     handle.into(),
   );
   let obj = make_cppgc_object(scope, crypto_key);

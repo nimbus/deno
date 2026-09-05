@@ -566,7 +566,7 @@ pub fn run(
         return Err(invalid_access("Algorithm mismatch".to_string()));
       }
       if public.algorithm_named_curve != key.algorithm_named_curve {
-        return Err(invalid_access("'namedCurve' mismatch".to_string()));
+        return Err(invalid_access("Named curve mismatch".to_string()));
       }
       let curve_name =
         key.algorithm_named_curve.as_deref().ok_or_else(|| {
@@ -644,10 +644,16 @@ fn truncate_to_length(
     return Ok(bytes);
   };
   if (bytes.len() * 8) < length as usize {
-    return Err(op_error("Invalid length".to_string()));
+    return Err(op_error("derived bit length is too small".to_string()));
   }
   let n = length.div_ceil(8) as usize;
-  Ok(bytes[..n].to_vec())
+  let mut result = bytes[..n].to_vec();
+  let remainder = length % 8;
+  if remainder != 0 {
+    let keep_mask = u8::MAX << (8 - remainder);
+    result[n - 1] &= keep_mask;
+  }
+  Ok(result)
 }
 
 /// Map a `HashAlgorithmIdentifier.name` string onto the digest-registry

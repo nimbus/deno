@@ -225,11 +225,14 @@ fn extract_name_and_obj<'a, 'b>(
       .to_rust_string_lossy(scope);
     return Ok((s, Some(obj)));
   }
-  Err(WebIdlError::new(
-    prefix,
-    context,
-    WebIdlErrorKind::ConvertToConverterType("AlgorithmIdentifier"),
-  ))
+  let name = value.to_string(scope).ok_or_else(|| {
+    WebIdlError::new(
+      prefix,
+      context,
+      WebIdlErrorKind::ConvertToConverterType("AlgorithmIdentifier"),
+    )
+  })?;
+  Ok((name.to_rust_string_lossy(scope), None))
 }
 
 fn parse_xof_dict<'a, 'b>(
@@ -571,8 +574,15 @@ fn run_xof(
     | SubtleDigestXof::Kt256 { output_length, .. }
     | SubtleDigestXof::KangarooTwelve { output_length, .. } => *output_length,
   };
-  if !output_length.is_multiple_of(8) {
-    return Err(CryptoError::InvalidXofParameters);
+  if matches!(
+    algorithm,
+    SubtleDigestXof::CShake128 { .. } | SubtleDigestXof::CShake256 { .. }
+  ) && u64::from(output_length).div_ceil(8) * 8 > u64::from(u32::MAX)
+  {
+    return Err(CryptoError::Other(JsErrorBox::new(
+      "DOMExceptionOperationError",
+      "Invalid CShakeParams outputLength",
+    )));
   }
   let is_turbo = matches!(
     algorithm,
@@ -600,7 +610,42 @@ fn run_xof(
     return Err(CryptoError::InvalidXofParameters);
   }
 
-  let out_len = (output_length / 8) as usize;
+  if let SubtleDigestXof::CShake128 {
+    function_name,
+    customization,
+    ..
+  }
+  | SubtleDigestXof::CShake256 {
+    function_name,
+    customization,
+    ..
+  } = &algorithm
+  {
+    if let Some(function_name) = function_name
+      && !function_name.is_empty()
+      && function_name.as_slice() != b"KMAC"
+      && function_name.as_slice() != b"TupleHash"
+      && function_name.as_slice() != b"ParallelHash"
+    {
+      return Err(CryptoError::Other(JsErrorBox::new(
+        "DOMExceptionNotSupportedError",
+        "Unsupported CShakeParams functionName",
+      )));
+    }
+    if customization
+      .as_ref()
+      .is_some_and(|value| value.len() > 512)
+    {
+      return Err(CryptoError::Other(JsErrorBox::new(
+        "DOMExceptionOperationError",
+        "CShakeParams.customization must be at most 512 bytes",
+      )));
+    }
+  } else if !output_length.is_multiple_of(8) {
+    return Err(CryptoError::InvalidXofParameters);
+  }
+
+  let out_len = output_length.div_ceil(8) as usize;
   let mut out = vec![0u8; out_len];
 
   match algorithm {
@@ -665,6 +710,11 @@ fn run_xof(
     }
   }
 
+  let remainder = output_length % 8;
+  if remainder != 0 {
+    let keep_mask = u8::MAX << (8 - remainder);
+    out[out_len - 1] &= keep_mask;
+  }
   Ok(out)
 }
 

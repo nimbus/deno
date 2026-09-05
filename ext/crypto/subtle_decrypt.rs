@@ -425,10 +425,8 @@ pub fn run(
   key: SubtleKey,
   data: Vec<u8>,
 ) -> Result<Vec<u8>, CryptoError> {
-  // Decrypt step 8: algorithm-name match is an `OperationError`
-  // (`encrypt` uses `InvalidAccessError`; the JS shim modelled both).
   if params.canonical_name() != key.algorithm_name {
-    return Err(op_error(format!(
+    return Err(invalid_access(format!(
       "Decryption algorithm \"{}\" does not match key algorithm",
       params.canonical_name()
     )));

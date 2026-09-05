@@ -17,6 +17,7 @@
 (function () {
 const { core, primordials, internals } = __bootstrap;
 const {
+  op_crypto_error_policy,
   op_crypto_is_seeded,
   op_crypto_random_uuid_batch,
   Crypto,
@@ -26,18 +27,31 @@ const {
 const {
   FunctionPrototypeCall,
   ObjectAssign,
+  ObjectCreate,
   ObjectDefineProperty,
+  ObjectGetOwnPropertyDescriptor,
+  ObjectHasOwn,
   ObjectPrototypeIsPrototypeOf,
   SafeArrayIterator,
+  StringPrototypeIncludes,
   StringPrototypeSlice,
+  StringPrototypeToUpperCase,
+  Symbol,
   SymbolFor,
+  TypeError,
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
 const { createFilteredInspectProxy } = core.loadExtScript(
   "ext:deno_web/01_console.js",
 );
-const { kKeyObject } = internals;
+// WebCrypto can mint keys before node:crypto loads its constants module.
+// Establish the shared private brand here so both modules use one symbol and
+// every key is recognizable by KeyObject.from(), regardless of import order.
+const kKeyObject = internals.kKeyObject === undefined
+  ? Symbol("kKeyObject")
+  : internals.kKeyObject;
+internals.kKeyObject = kKeyObject;
 
 // op2-generated interface constructors expose the macro's internal
 // new-target signal (`_: bool`) as a formal parameter, giving the
@@ -75,9 +89,35 @@ ObjectDefineProperty(
   {
     __proto__: null,
     value: function (inspect, inspectOptions) {
+      const snapshot = CryptoKey.inspectSnapshot(this);
+      const view = ObjectCreate(CryptoKeyPrototype);
+      ObjectDefineProperty(view, "type", {
+        __proto__: null,
+        value: snapshot.type,
+        enumerable: true,
+        configurable: true,
+      });
+      ObjectDefineProperty(view, "extractable", {
+        __proto__: null,
+        value: snapshot.extractable,
+        enumerable: true,
+        configurable: true,
+      });
+      ObjectDefineProperty(view, "algorithm", {
+        __proto__: null,
+        value: snapshot.algorithm,
+        enumerable: true,
+        configurable: true,
+      });
+      ObjectDefineProperty(view, "usages", {
+        __proto__: null,
+        value: snapshot.usages,
+        enumerable: true,
+        configurable: true,
+      });
       return inspect(
         createFilteredInspectProxy({
-          object: this,
+          object: view,
           evaluate: ObjectPrototypeIsPrototypeOf(CryptoKeyPrototype, this),
           keys: [
             "type",
@@ -122,15 +162,223 @@ core.registerCloneableResource(
 // explicitly pass all three args through.
 const SubtleCryptoPrototype = SubtleCrypto.prototype;
 const cppgcDeriveBits = SubtleCryptoPrototype.deriveBits;
+
+const WEB_CRYPTO_ERROR_POLICY_WEB_STANDARD = 0;
+const WEB_CRYPTO_ERROR_POLICY_NODE22 = 1;
+
+function tagNodeErrorCode(error, code) {
+  if (
+    (typeof error === "object" && error !== null) ||
+    typeof error === "function"
+  ) {
+    ObjectDefineProperty(error, "code", {
+      __proto__: null,
+      value: code,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return error;
+}
+
+function rawAlgorithmName(algorithm) {
+  if (typeof algorithm === "string") {
+    return StringPrototypeToUpperCase(algorithm);
+  }
+  if (
+    algorithm !== null &&
+    typeof algorithm === "object" &&
+    typeof algorithm.name === "string"
+  ) {
+    return StringPrototypeToUpperCase(algorithm.name);
+  }
+  return undefined;
+}
+
+function hasRequiredOption(algorithm, name) {
+  return ObjectHasOwn(algorithm, name) && algorithm[name] !== undefined;
+}
+
+function isGenerateKeyMissingRequiredOption(algorithm) {
+  if (algorithm === null || typeof algorithm !== "object") {
+    return false;
+  }
+  switch (rawAlgorithmName(algorithm)) {
+    case "RSASSA-PKCS1-V1_5":
+    case "RSA-PSS":
+    case "RSA-OAEP":
+      return !hasRequiredOption(algorithm, "modulusLength") ||
+        !hasRequiredOption(algorithm, "publicExponent") ||
+        !hasRequiredOption(algorithm, "hash");
+    case "ECDSA":
+    case "ECDH":
+      return !hasRequiredOption(algorithm, "namedCurve");
+    case "AES-CTR":
+    case "AES-CBC":
+    case "AES-GCM":
+    case "AES-OCB":
+    case "AES-KW":
+      return !hasRequiredOption(algorithm, "length");
+    case "HMAC":
+      return !hasRequiredOption(algorithm, "hash");
+    default:
+      return false;
+  }
+}
+
+function isDeriveMissingRequiredOption(algorithm) {
+  if (algorithm === null || typeof algorithm !== "object") {
+    return false;
+  }
+  switch (rawAlgorithmName(algorithm)) {
+    case "ECDH":
+    case "X25519":
+    case "X448":
+      return !ObjectHasOwn(algorithm, "public");
+    case "HKDF":
+      return !ObjectHasOwn(algorithm, "hash") ||
+        !ObjectHasOwn(algorithm, "salt") ||
+        !ObjectHasOwn(algorithm, "info");
+    default:
+      return false;
+  }
+}
+
+function isDeriveInvalidPublicOption(algorithm) {
+  const name = rawAlgorithmName(algorithm);
+  return algorithm !== null &&
+    typeof algorithm === "object" &&
+    (name === "ECDH" || name === "X25519" || name === "X448") &&
+    ObjectHasOwn(algorithm, "public") &&
+    !ObjectPrototypeIsPrototypeOf(CryptoKeyPrototype, algorithm.public);
+}
+
+function nodeOperationErrorMessage(methodName, args, policy) {
+  if (
+    methodName !== "encrypt" && methodName !== "decrypt" &&
+    methodName !== "sign" && methodName !== "verify"
+  ) {
+    return undefined;
+  }
+  if (policy === WEB_CRYPTO_ERROR_POLICY_NODE22) {
+    return methodName === "encrypt" || methodName === "decrypt"
+      ? "The requested operation is not valid for the provided key"
+      : `Unable to use this key to ${methodName}`;
+  }
+
+  const key = args[1];
+  if (ObjectPrototypeIsPrototypeOf(CryptoKeyPrototype, key)) {
+    const requestedName = rawAlgorithmName(args[0]);
+    const keyName = rawAlgorithmName(CryptoKey.inspectSnapshot(key).algorithm);
+    if (requestedName !== undefined && requestedName !== keyName) {
+      return "Key algorithm mismatch";
+    }
+  }
+  return `Unable to use this key to ${methodName}`;
+}
+
+function decorateNodeWebCryptoError(methodName, args, error) {
+  const policy = op_crypto_error_policy();
+  if (policy === WEB_CRYPTO_ERROR_POLICY_WEB_STANDARD) {
+    return error;
+  }
+
+  const algorithm = args[0];
+  if (
+    methodName === "digest" && error?.name === "TypeError" &&
+    StringPrototypeIncludes(error.message, "BufferSource")
+  ) {
+    return tagNodeErrorCode(error, "ERR_INVALID_ARG_TYPE");
+  }
+  if (
+    methodName === "generateKey" &&
+    isGenerateKeyMissingRequiredOption(algorithm)
+  ) {
+    return tagNodeErrorCode(error, "ERR_MISSING_OPTION");
+  }
+  if (
+    (methodName === "deriveBits" || methodName === "deriveKey") &&
+    isDeriveMissingRequiredOption(algorithm)
+  ) {
+    return tagNodeErrorCode(error, "ERR_MISSING_OPTION");
+  }
+  if (
+    (methodName === "deriveBits" || methodName === "deriveKey") &&
+    isDeriveInvalidPublicOption(algorithm)
+  ) {
+    return tagNodeErrorCode(error, "ERR_INVALID_ARG_TYPE");
+  }
+  if (
+    (methodName === "deriveBits" || methodName === "deriveKey") &&
+    error?.name === "InvalidAccessError" &&
+    error.message === "Algorithm mismatch"
+  ) {
+    ObjectDefineProperty(error, "message", {
+      __proto__: null,
+      value: policy === WEB_CRYPTO_ERROR_POLICY_NODE22
+        ? "algorithm.public must be an ECDH key"
+        : "key algorithm mismatch",
+      configurable: true,
+    });
+    return error;
+  }
+  if (
+    (methodName === "deriveBits" || methodName === "deriveKey") &&
+    error?.name === "InvalidAccessError" &&
+    StringPrototypeIncludes(error.message, "usages does not contain")
+  ) {
+    ObjectDefineProperty(error, "message", {
+      __proto__: null,
+      value: `baseKey does not have ${methodName} usage`,
+      configurable: true,
+    });
+    return error;
+  }
+  if (
+    (methodName === "sign" || methodName === "verify") &&
+    error?.name === "NotSupportedError" &&
+    StringPrototypeIncludes(error.message, "Unrecognized hash algorithm")
+  ) {
+    ObjectDefineProperty(error, "message", {
+      __proto__: null,
+      value: "Unrecognized algorithm name",
+      configurable: true,
+    });
+    return error;
+  }
+  if (
+    methodName === "importKey" && rawAlgorithmName(args[2]) === "HMAC" &&
+    args[2] !== null && typeof args[2] === "object" &&
+    !ObjectHasOwn(args[2], "hash")
+  ) {
+    return tagNodeErrorCode(error, "ERR_MISSING_OPTION");
+  }
+  if (error?.name === "InvalidAccessError") {
+    const message = nodeOperationErrorMessage(methodName, args, policy);
+    if (message !== undefined) {
+      ObjectDefineProperty(error, "message", {
+        __proto__: null,
+        value: message,
+        configurable: true,
+      });
+    }
+  }
+  return error;
+}
+
 const deriveBitsForwarder = {
   async deriveBits(algorithm, baseKey, length = undefined) {
-    return await FunctionPrototypeCall(
-      cppgcDeriveBits,
-      this,
-      algorithm,
-      baseKey,
-      length,
-    );
+    webidl.assertBranded(this, SubtleCryptoPrototype, "SubtleCrypto");
+    const args = [algorithm, baseKey, length];
+    try {
+      return await FunctionPrototypeCall(
+        cppgcDeriveBits,
+        this,
+        ...new SafeArrayIterator(args),
+      );
+    } catch (error) {
+      throw decorateNodeWebCryptoError("deriveBits", args, error);
+    }
   },
 }.deriveBits;
 ObjectDefineProperty(SubtleCryptoPrototype, "deriveBits", {
@@ -157,14 +405,19 @@ function makeAsyncForwarder(name, methodName, arity) {
   // would otherwise be `"makeAsyncForwarder"` from the surrounding fn.
   const wrapper = {
     async [methodName](...args) {
+      webidl.assertBranded(this, SubtleCryptoPrototype, "SubtleCrypto");
       // `await` keeps `dlint require-await` happy and is a no-op when the
       // underlying cppgc method returns a non-thenable (the WebCrypto
       // surface guarantees a CryptoKey/array/dict, not a Promise).
-      return await FunctionPrototypeCall(
-        cppgc,
-        this,
-        ...new SafeArrayIterator(args),
-      );
+      try {
+        return await FunctionPrototypeCall(
+          cppgc,
+          this,
+          ...new SafeArrayIterator(args),
+        );
+      } catch (error) {
+        throw decorateNodeWebCryptoError(methodName, args, error);
+      }
     },
   }[methodName];
   // `Function.length` of `(...args) => ...` is 0, but the WebIDL idl-harness
@@ -183,6 +436,31 @@ function makeAsyncForwarder(name, methodName, arity) {
     configurable: true,
   });
 }
+
+const cppgcSupports = SubtleCrypto.supports;
+function supports(operation, algorithm, lengthOrHash = undefined) {
+  if (this !== SubtleCrypto) {
+    const error = new TypeError(
+      'Value of "this" must be of type SubtleCrypto constructor',
+    );
+    error.code = "ERR_INVALID_THIS";
+    throw error;
+  }
+  return FunctionPrototypeCall(
+    cppgcSupports,
+    this,
+    operation,
+    algorithm,
+    lengthOrHash,
+  );
+}
+ObjectDefineProperty(SubtleCrypto, "supports", {
+  __proto__: null,
+  value: supports,
+  writable: true,
+  enumerable: true,
+  configurable: true,
+});
 // Per WebCrypto spec, every SubtleCrypto method returns a Promise. The
 // op2-generated dispatchers invoke `WebIdlConverter`s synchronously before
 // the async body runs, so a converter-level throw (`TypeError: Missing
@@ -248,6 +526,11 @@ function getSubtleSingleton() {
 // in JS; seeded runtimes use the native method to preserve exact RNG call order.
 const CryptoPrototype = Crypto.prototype;
 const cppgcRandomUUID = CryptoPrototype.randomUUID;
+const cppgcGetRandomValues = CryptoPrototype.getRandomValues;
+const cppgcSubtleGetter = ObjectGetOwnPropertyDescriptor(
+  CryptoPrototype,
+  "subtle",
+).get;
 
 const UUID_STRING_BYTES = 36;
 const UUID_BATCH_SIZE = 128;
@@ -255,7 +538,8 @@ let uuidBatchData;
 let uuidBatch = UUID_BATCH_SIZE;
 
 function randomUUID() {
-  if (this !== cryptoSingleton || usesSeededRng) {
+  webidl.assertBranded(this, CryptoPrototype, "Crypto");
+  if (usesSeededRng) {
     return FunctionPrototypeCall(cppgcRandomUUID, this);
   }
   if (uuidBatch === UUID_BATCH_SIZE) {
@@ -270,10 +554,33 @@ function randomUUID() {
   );
 }
 
+function getRandomValues(typedArray) {
+  webidl.assertBranded(this, CryptoPrototype, "Crypto");
+  return FunctionPrototypeCall(cppgcGetRandomValues, this, typedArray);
+}
+
+function subtle() {
+  webidl.assertBranded(this, CryptoPrototype, "Crypto");
+  return FunctionPrototypeCall(cppgcSubtleGetter, this);
+}
+
 ObjectDefineProperty(CryptoPrototype, "randomUUID", {
   __proto__: null,
   value: randomUUID,
   writable: true,
+  enumerable: true,
+  configurable: true,
+});
+ObjectDefineProperty(CryptoPrototype, "getRandomValues", {
+  __proto__: null,
+  value: getRandomValues,
+  writable: true,
+  enumerable: true,
+  configurable: true,
+});
+ObjectDefineProperty(CryptoPrototype, "subtle", {
+  __proto__: null,
+  get: subtle,
   enumerable: true,
   configurable: true,
 });
