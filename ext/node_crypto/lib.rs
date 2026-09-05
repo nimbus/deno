@@ -2058,8 +2058,8 @@ pub fn op_node_sign_ml_dsa(
 #[buffer]
 pub async fn op_node_sign_ml_dsa_async(
   #[cppgc] key: &KeyObjectHandle,
-  #[buffer] data: JsBuffer,
-  #[buffer] context: JsBuffer,
+  #[buffer(copy)] data: Box<[u8]>,
+  #[buffer(copy)] context: Box<[u8]>,
 ) -> Result<Box<[u8]>, SignMlDsaError> {
   let private = key
     .as_private_key()
@@ -2111,9 +2111,9 @@ pub fn op_node_verify_ml_dsa(
 #[op2]
 pub async fn op_node_verify_ml_dsa_async(
   #[cppgc] key: &KeyObjectHandle,
-  #[buffer] data: JsBuffer,
-  #[buffer] signature: JsBuffer,
-  #[buffer] context: JsBuffer,
+  #[buffer(copy)] data: Box<[u8]>,
+  #[buffer(copy)] signature: Box<[u8]>,
+  #[buffer(copy)] context: Box<[u8]>,
 ) -> Result<bool, VerifyMlDsaError> {
   let public = key
     .as_public_key()

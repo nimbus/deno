@@ -11,6 +11,7 @@ const {
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeThen,
+  queueMicrotask,
   ReflectHas,
 } = primordials;
 
@@ -56,6 +57,30 @@ function unsupportedAlgorithm(error: unknown): Error {
     value: "ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM",
   });
   return result;
+}
+
+function dispatchAsyncCallback<T>(
+  operation: () => Promise<T>,
+  onFulfilled: (value: T) => void,
+  onRejected: (error: unknown) => void,
+) {
+  let promise;
+  try {
+    promise = operation();
+  } catch (error) {
+    queueMicrotask(() => onRejected(error));
+    return;
+  }
+  ObjectDefineProperty(promise, "constructor", {
+    __proto__: null,
+    value: undefined,
+    configurable: true,
+  });
+  PromisePrototypeThen(
+    promise,
+    (value) => queueMicrotask(() => onFulfilled(value)),
+    (error) => queueMicrotask(() => onRejected(error)),
+  );
 }
 
 function publicHandle(key: any) {
@@ -118,8 +143,8 @@ function encapsulate(
     return encapsulateSync(key);
   }
   const handle = publicHandle(key);
-  PromisePrototypeThen(
-    op_node_kem_encapsulate_async(handle),
+  dispatchAsyncCallback(
+    () => op_node_kem_encapsulate_async(handle),
     ({ sharedKey, ciphertext }) =>
       callback(null, {
         sharedKey: Buffer.from(sharedKey),
@@ -142,8 +167,8 @@ function decapsulate(
   }
   const handle = privateHandle(key);
   ciphertext = getArrayBufferOrView(ciphertext, "ciphertext");
-  PromisePrototypeThen(
-    op_node_kem_decapsulate_async(handle, ciphertext),
+  dispatchAsyncCallback(
+    () => op_node_kem_decapsulate_async(handle, ciphertext),
     (sharedKey) => callback(null, Buffer.from(sharedKey)),
     () => callback(operationError("Decapsulation failed")),
   );

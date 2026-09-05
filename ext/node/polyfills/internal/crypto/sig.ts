@@ -11,7 +11,6 @@ const {
   ArrayBufferPrototype,
   ArrayBufferPrototypeGetByteLength,
   ArrayPrototypeIncludes,
-  DataViewPrototype,
   DataViewPrototypeGetBuffer,
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
@@ -23,6 +22,7 @@ const {
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   PromisePrototypeThen,
+  queueMicrotask,
   RangeError,
   ReflectHas,
   StringFromCharCode,
@@ -149,17 +149,20 @@ function getContext(options): Uint8Array | undefined {
       context,
     );
   }
-  const bytes = ObjectPrototypeIsPrototypeOf(DataViewPrototype, context)
-    ? new Uint8Array(
+  let bytes;
+  try {
+    bytes = new Uint8Array(
       DataViewPrototypeGetBuffer(context),
       DataViewPrototypeGetByteOffset(context),
       DataViewPrototypeGetByteLength(context),
-    )
-    : new Uint8Array(
+    );
+  } catch {
+    bytes = new Uint8Array(
       TypedArrayPrototypeGetBuffer(context),
       TypedArrayPrototypeGetByteOffset(context),
       TypedArrayPrototypeGetByteLength(context),
     );
+  }
   if (TypedArrayPrototypeGetByteLength(bytes) > 255) {
     const error = new RangeError("context string must be at most 255 bytes");
     ObjectDefineProperty(error, "code", {
@@ -170,6 +173,30 @@ function getContext(options): Uint8Array | undefined {
     throw error;
   }
   return bytes;
+}
+
+function dispatchAsyncCallback<T>(
+  operation: () => Promise<T>,
+  onFulfilled: (value: T) => void,
+  onRejected: (error: unknown) => void,
+) {
+  let promise;
+  try {
+    promise = operation();
+  } catch (error) {
+    queueMicrotask(() => onRejected(error));
+    return;
+  }
+  ObjectDefineProperty(promise, "constructor", {
+    __proto__: null,
+    value: undefined,
+    configurable: true,
+  });
+  PromisePrototypeThen(
+    promise,
+    (value) => queueMicrotask(() => onFulfilled(value)),
+    (error) => queueMicrotask(() => onRejected(error)),
+  );
 }
 
 function unsupportedContext(): Error {
@@ -505,8 +532,8 @@ function signOneShot(
         const asyncData = typeof dataBytes === "string"
           ? Buffer.from(dataBytes)
           : dataBytes;
-        PromisePrototypeThen(
-          op_node_sign_ml_dsa_async(handle, asyncData, contextBytes),
+        dispatchAsyncCallback(
+          () => op_node_sign_ml_dsa_async(handle, asyncData, contextBytes),
           (signature) => callback(null, Buffer.from(signature)),
           (error) => callback(error),
         );
@@ -659,13 +686,14 @@ function verifyOneShot(
         const asyncSignature = typeof signature === "string"
           ? Buffer.from(signature)
           : signature;
-        PromisePrototypeThen(
-          op_node_verify_ml_dsa_async(
-            handle,
-            asyncData,
-            asyncSignature,
-            contextBytes,
-          ),
+        dispatchAsyncCallback(
+          () =>
+            op_node_verify_ml_dsa_async(
+              handle,
+              asyncData,
+              asyncSignature,
+              contextBytes,
+            ),
           (verified) => callback(null, verified),
           (error) => callback(error, false),
         );
