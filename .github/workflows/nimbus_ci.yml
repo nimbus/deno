@@ -63,7 +63,9 @@ jobs:
           cargo clippy --locked
           -p deno_core
           -p serde_v8
+          -p deno_crypto
           -p deno_node
+          -p deno_node_crypto
           -p deno_fetch
           -p deno_websocket
           -p deno_kv
@@ -76,8 +78,14 @@ jobs:
       - name: Test serde_v8
         run: cargo test --locked -p serde_v8 --lib
 
+      - name: Test deno_crypto
+        run: cargo test --locked -p deno_crypto --lib --features deno_core/default
+
       - name: Test deno_node
         run: cargo test --locked -p deno_node --lib --features deno_core/default
+
+      - name: Test deno_node_crypto
+        run: cargo test --locked -p deno_node_crypto --lib --features deno_core/default
 
       - name: Initialize Node test fixtures
         run: git submodule update --init --depth 1 tests/util/std
@@ -85,8 +93,10 @@ jobs:
       - name: Test Node integration
         run: |
           cargo build --locked -p deno -p test_server --bin deno --bin test_server
+          cargo test --locked -p unit_tests --test unit -- webcrypto_test
           cargo test --locked -p unit_node_tests --test unit_node -- module_test
           cargo test --locked -p unit_node_tests --test unit_node -- crypto_cipher_gcm_test
+          cargo test --locked -p unit_node_tests --test unit_node -- crypto_key_test
           cargo test --locked -p unit_node_tests --test unit_node -- http_test
           cargo test --locked -p unit_node_tests --test unit_node -- stream_test
 
