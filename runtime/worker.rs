@@ -634,7 +634,10 @@ impl MainWorker {
         deno_webstorage::deno_webstorage::args(
           options.origin_storage_dir.clone(),
         ),
-        deno_crypto::deno_crypto::args(options.seed),
+        deno_crypto::deno_crypto::args(
+          options.seed,
+          deno_crypto::WebCryptoErrorPolicy::WebStandard,
+        ),
         deno_ffi::deno_ffi::args(services.deno_rt_native_addon_loader.clone()),
         deno_net::deno_net::args(
           services.root_cert_store_provider.clone(),
