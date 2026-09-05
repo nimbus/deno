@@ -1,7 +1,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use deno_core::JsBuffer;
 use deno_core::ToJsBuffer;
 use deno_core::op2;
+use deno_core::unsync::spawn_blocking;
 use rand::RngCore;
 use rsa::BigUint;
 use rsa::hazmat::rsa_decrypt_and_check;
@@ -21,6 +23,9 @@ pub enum KemError {
   EncapsulationFailed,
   #[error("Decapsulation failed")]
   DecapsulationFailed,
+  #[class(inherit)]
+  #[error(transparent)]
+  Join(#[from] tokio::task::JoinError),
 }
 
 #[derive(serde::Serialize)]
@@ -80,23 +85,61 @@ fn rsa_decapsulate(
   left_pad(shared_key, len).map_err(|_| KemError::DecapsulationFailed)
 }
 
+fn encapsulate_key(
+  public: &AsymmetricPublicKey,
+) -> Result<(Vec<u8>, Vec<u8>), KemError> {
+  match public {
+    AsymmetricPublicKey::Rsa(public) => rsa_encapsulate(public),
+    AsymmetricPublicKey::PostQuantum(public) => public
+      .encapsulate()
+      .map_err(|_| KemError::EncapsulationFailed),
+    _ => Err(KemError::UnsupportedKey),
+  }
+}
+
+fn decapsulate_key(
+  private: &AsymmetricPrivateKey,
+  ciphertext: &[u8],
+) -> Result<Vec<u8>, KemError> {
+  match private {
+    AsymmetricPrivateKey::Rsa(private) => rsa_decapsulate(private, ciphertext),
+    AsymmetricPrivateKey::PostQuantum(private) => private
+      .decapsulate(ciphertext)
+      .map_err(|_| KemError::DecapsulationFailed),
+    _ => Err(KemError::UnsupportedKey),
+  }
+}
+
 #[op2]
 #[serde]
 pub fn op_node_kem_encapsulate(
   #[cppgc] handle: &KeyObjectHandle,
 ) -> Result<EncapsulationResult, KemError> {
   let public = handle.as_public_key().ok_or(KemError::UnsupportedKey)?;
-  let (shared_key, ciphertext) = match &*public {
-    AsymmetricPublicKey::Rsa(public) => rsa_encapsulate(public)?,
-    AsymmetricPublicKey::PostQuantum(public) => public
-      .encapsulate()
-      .map_err(|_| KemError::EncapsulationFailed)?,
-    _ => return Err(KemError::UnsupportedKey),
-  };
+  let (shared_key, ciphertext) = encapsulate_key(&public)?;
   Ok(EncapsulationResult {
     shared_key: shared_key.into(),
     ciphertext: ciphertext.into(),
   })
+}
+
+#[op2]
+#[serde]
+pub async fn op_node_kem_encapsulate_async(
+  #[cppgc] handle: &KeyObjectHandle,
+) -> Result<EncapsulationResult, KemError> {
+  let public = handle
+    .as_public_key()
+    .ok_or(KemError::UnsupportedKey)?
+    .into_owned();
+  spawn_blocking(move || {
+    let (shared_key, ciphertext) = encapsulate_key(&public)?;
+    Ok(EncapsulationResult {
+      shared_key: shared_key.into(),
+      ciphertext: ciphertext.into(),
+    })
+  })
+  .await?
 }
 
 #[op2]
@@ -106,14 +149,24 @@ pub fn op_node_kem_decapsulate(
   #[buffer] ciphertext: &[u8],
 ) -> Result<Box<[u8]>, KemError> {
   let private = handle.as_private_key().ok_or(KemError::UnsupportedKey)?;
-  let shared_key = match private {
-    AsymmetricPrivateKey::Rsa(private) => rsa_decapsulate(private, ciphertext)?,
-    AsymmetricPrivateKey::PostQuantum(private) => private
-      .decapsulate(ciphertext)
-      .map_err(|_| KemError::DecapsulationFailed)?,
-    _ => return Err(KemError::UnsupportedKey),
-  };
+  let shared_key = decapsulate_key(private, ciphertext)?;
   Ok(shared_key.into_boxed_slice())
+}
+
+#[op2]
+#[buffer]
+pub async fn op_node_kem_decapsulate_async(
+  #[cppgc] handle: &KeyObjectHandle,
+  #[buffer] ciphertext: JsBuffer,
+) -> Result<Box<[u8]>, KemError> {
+  let private = handle
+    .as_private_key()
+    .ok_or(KemError::UnsupportedKey)?
+    .clone();
+  spawn_blocking(move || {
+    decapsulate_key(&private, &ciphertext).map(Vec::into_boxed_slice)
+  })
+  .await?
 }
 
 #[cfg(test)]

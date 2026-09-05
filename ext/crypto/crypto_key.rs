@@ -16,9 +16,57 @@ use deno_core::cppgc::try_unwrap_cppgc_object;
 use deno_core::op2;
 use deno_core::v8;
 use deno_core::webidl::WebIdlInterfaceConverter;
+use subtle::Choice;
+use subtle::ConstantTimeEq;
 
 use crate::key_store::CryptoKeyHandle;
 use crate::shared::SharedError;
+
+fn bytes_equal(left: &[u8], right: &[u8]) -> Choice {
+  if left.len() != right.len() {
+    return Choice::from(0);
+  }
+  left.ct_eq(right)
+}
+
+fn optional_bytes_equal(left: Option<&[u8]>, right: Option<&[u8]>) -> Choice {
+  match (left, right) {
+    (None, None) => Choice::from(1),
+    (Some(left), Some(right)) => bytes_equal(left, right),
+    _ => Choice::from(0),
+  }
+}
+
+fn key_material_equal(
+  left: &crate::shared::RawKeyData,
+  right: &crate::shared::RawKeyData,
+) -> bool {
+  use crate::shared::RawKeyData;
+
+  let equal = match (left, right) {
+    (RawKeyData::Secret(left), RawKeyData::Secret(right))
+    | (RawKeyData::Private(left), RawKeyData::Private(right))
+    | (RawKeyData::Public(left), RawKeyData::Public(right))
+    | (RawKeyData::Raw(left), RawKeyData::Raw(right)) => {
+      bytes_equal(left, right)
+    }
+    (
+      RawKeyData::SeededPrivate {
+        seed: left_seed,
+        private_key: left_private,
+      },
+      RawKeyData::SeededPrivate {
+        seed: right_seed,
+        private_key: right_private,
+      },
+    ) => {
+      optional_bytes_equal(left_seed.as_deref(), right_seed.as_deref())
+        & bytes_equal(left_private, right_private)
+    }
+    _ => Choice::from(0),
+  };
+  equal.into()
+}
 
 /// `CryptoKey.type` — the lowercase string returned by the `type` getter.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -146,7 +194,7 @@ impl CryptoKey {
     let Some(right_handle) = right.key_handle(scope) else {
       return false;
     };
-    left_handle.data() == right_handle.data()
+    key_material_equal(left_handle.data(), right_handle.data())
   }
 
   /// Internal immutable-slot view used by the custom inspector. Public
@@ -228,6 +276,52 @@ impl CryptoKey {
       extractable,
       usages,
     )
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::shared::RawKeyData;
+
+  #[test]
+  fn key_material_comparison_covers_all_private_shapes() {
+    assert!(key_material_equal(
+      &RawKeyData::Secret(Box::new([1, 2, 3])),
+      &RawKeyData::Secret(Box::new([1, 2, 3])),
+    ));
+    assert!(!key_material_equal(
+      &RawKeyData::Secret(Box::new([1, 2, 3])),
+      &RawKeyData::Secret(Box::new([1, 2, 4])),
+    ));
+    assert!(!key_material_equal(
+      &RawKeyData::Secret(Box::new([1, 2, 3])),
+      &RawKeyData::Secret(Box::new([1, 2])),
+    ));
+    assert!(!key_material_equal(
+      &RawKeyData::Private(Box::new([1, 2, 3])),
+      &RawKeyData::Public(Box::new([1, 2, 3])),
+    ));
+    assert!(key_material_equal(
+      &RawKeyData::SeededPrivate {
+        seed: Some(Box::new([1, 2])),
+        private_key: Box::new([3, 4]),
+      },
+      &RawKeyData::SeededPrivate {
+        seed: Some(Box::new([1, 2])),
+        private_key: Box::new([3, 4]),
+      },
+    ));
+    assert!(!key_material_equal(
+      &RawKeyData::SeededPrivate {
+        seed: None,
+        private_key: Box::new([3, 4]),
+      },
+      &RawKeyData::SeededPrivate {
+        seed: Some(Box::new([1, 2])),
+        private_key: Box::new([3, 4]),
+      },
+    ));
   }
 }
 

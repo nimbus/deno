@@ -98,7 +98,9 @@ deno_core::extension!(
     op_node_hkdf_async,
     op_node_hkdf,
     kem::op_node_kem_decapsulate,
+    kem::op_node_kem_decapsulate_async,
     kem::op_node_kem_encapsulate,
+    kem::op_node_kem_encapsulate_async,
     op_node_pbkdf2_async,
     op_node_pbkdf2,
     op_node_pbkdf2_validate,
@@ -114,10 +116,12 @@ deno_core::extension!(
     op_node_sign_ed25519,
     op_node_sign_ed448,
     op_node_sign_ml_dsa,
+    op_node_sign_ml_dsa_async,
     op_node_verify,
     op_node_verify_ed25519,
     op_node_verify_ed448,
     op_node_verify_ml_dsa,
+    op_node_verify_ml_dsa_async,
     op_node_verify_spkac,
     op_node_cert_export_public_key,
     op_node_cert_export_challenge,
@@ -1933,12 +1937,15 @@ pub enum SignEd448Error {
   ExpectedPrivateKey,
   #[error("Expected Ed448 private key")]
   ExpectedEd448PrivateKey,
+  #[error("Ed448 signing failed")]
+  SigningFailed,
 }
 
 #[op2(fast)]
 pub fn op_node_sign_ed448(
   #[cppgc] key: &KeyObjectHandle,
   #[buffer] data: &[u8],
+  #[buffer] context: &[u8],
   #[buffer] signature: &mut [u8],
 ) -> Result<(), SignEd448Error> {
   let private = key
@@ -1950,7 +1957,13 @@ pub fn op_node_sign_ed448(
     _ => return Err(SignEd448Error::ExpectedEd448PrivateKey),
   };
 
-  let sig = ed448.sign_raw(data);
+  let sig = if context.is_empty() {
+    ed448.sign_raw(data)
+  } else {
+    ed448
+      .sign_ctx(context, data)
+      .map_err(|_| SignEd448Error::SigningFailed)?
+  };
   signature.copy_from_slice(&sig.to_bytes());
 
   Ok(())
@@ -1969,6 +1982,7 @@ pub enum VerifyEd448Error {
 pub fn op_node_verify_ed448(
   #[cppgc] key: &KeyObjectHandle,
   #[buffer] data: &[u8],
+  #[buffer] context: &[u8],
   #[buffer] signature: &[u8],
 ) -> Result<bool, VerifyEd448Error> {
   let public = key
@@ -1985,7 +1999,11 @@ pub fn op_node_verify_ed448(
     Err(_) => return Ok(false),
   };
 
-  Ok(ed448.verify_raw(&sig, data).is_ok())
+  Ok(if context.is_empty() {
+    ed448.verify_raw(&sig, data).is_ok()
+  } else {
+    (*ed448).verify_ctx(&sig, context, data).is_ok()
+  })
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -1997,6 +2015,22 @@ pub enum SignMlDsaError {
   ExpectedMlDsaPrivateKey,
   #[error("ML-DSA signing failed")]
   SigningFailed,
+  #[class(inherit)]
+  #[error(transparent)]
+  Join(#[from] tokio::task::JoinError),
+}
+
+fn sign_ml_dsa(
+  private: &AsymmetricPrivateKey,
+  data: &[u8],
+  context: &[u8],
+) -> Result<Vec<u8>, SignMlDsaError> {
+  let AsymmetricPrivateKey::PostQuantum(private) = private else {
+    return Err(SignMlDsaError::ExpectedMlDsaPrivateKey);
+  };
+  private
+    .sign(data, Some(context))
+    .map_err(|_| SignMlDsaError::SigningFailed)
 }
 
 #[op2]
@@ -2004,17 +2038,29 @@ pub enum SignMlDsaError {
 pub fn op_node_sign_ml_dsa(
   #[cppgc] key: &KeyObjectHandle,
   #[buffer] data: &[u8],
+  #[buffer] context: &[u8],
 ) -> Result<Box<[u8]>, SignMlDsaError> {
   let private = key
     .as_private_key()
     .ok_or(SignMlDsaError::ExpectedPrivateKey)?;
-  let AsymmetricPrivateKey::PostQuantum(private) = private else {
-    return Err(SignMlDsaError::ExpectedMlDsaPrivateKey);
-  };
-  private
-    .sign(data)
-    .map(Vec::into_boxed_slice)
-    .map_err(|_| SignMlDsaError::SigningFailed)
+  sign_ml_dsa(private, data, context).map(Vec::into_boxed_slice)
+}
+
+#[op2]
+#[buffer]
+pub async fn op_node_sign_ml_dsa_async(
+  #[cppgc] key: &KeyObjectHandle,
+  #[buffer] data: JsBuffer,
+  #[buffer] context: JsBuffer,
+) -> Result<Box<[u8]>, SignMlDsaError> {
+  let private = key
+    .as_private_key()
+    .ok_or(SignMlDsaError::ExpectedPrivateKey)?
+    .clone();
+  spawn_blocking(move || {
+    sign_ml_dsa(&private, &data, &context).map(Vec::into_boxed_slice)
+  })
+  .await?
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -2024,6 +2070,21 @@ pub enum VerifyMlDsaError {
   ExpectedPublicKey,
   #[error("Expected ML-DSA public key")]
   ExpectedMlDsaPublicKey,
+  #[class(inherit)]
+  #[error(transparent)]
+  Join(#[from] tokio::task::JoinError),
+}
+
+fn verify_ml_dsa(
+  public: &AsymmetricPublicKey,
+  data: &[u8],
+  signature: &[u8],
+  context: &[u8],
+) -> Result<bool, VerifyMlDsaError> {
+  let AsymmetricPublicKey::PostQuantum(public) = public else {
+    return Err(VerifyMlDsaError::ExpectedMlDsaPublicKey);
+  };
+  Ok(public.verify(data, signature, Some(context)))
 }
 
 #[op2(fast)]
@@ -2031,14 +2092,27 @@ pub fn op_node_verify_ml_dsa(
   #[cppgc] key: &KeyObjectHandle,
   #[buffer] data: &[u8],
   #[buffer] signature: &[u8],
+  #[buffer] context: &[u8],
 ) -> Result<bool, VerifyMlDsaError> {
   let public = key
     .as_public_key()
     .ok_or(VerifyMlDsaError::ExpectedPublicKey)?;
-  let AsymmetricPublicKey::PostQuantum(public) = public.as_ref() else {
-    return Err(VerifyMlDsaError::ExpectedMlDsaPublicKey);
-  };
-  Ok(public.verify(data, signature))
+  verify_ml_dsa(&public, data, signature, context)
+}
+
+#[op2]
+pub async fn op_node_verify_ml_dsa_async(
+  #[cppgc] key: &KeyObjectHandle,
+  #[buffer] data: JsBuffer,
+  #[buffer] signature: JsBuffer,
+  #[buffer] context: JsBuffer,
+) -> Result<bool, VerifyMlDsaError> {
+  let public = key
+    .as_public_key()
+    .ok_or(VerifyMlDsaError::ExpectedPublicKey)?
+    .into_owned();
+  spawn_blocking(move || verify_ml_dsa(&public, &data, &signature, &context))
+    .await?
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]

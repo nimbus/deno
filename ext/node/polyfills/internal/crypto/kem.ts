@@ -10,6 +10,7 @@ const {
   ErrorPrototype,
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
+  PromisePrototypeThen,
   ReflectHas,
 } = primordials;
 
@@ -17,7 +18,9 @@ const {
   op_node_create_private_key,
   op_node_create_public_key,
   op_node_kem_decapsulate,
+  op_node_kem_decapsulate_async,
   op_node_kem_encapsulate,
+  op_node_kem_encapsulate_async,
 } = core.ops;
 
 const { Buffer } = core.loadExtScript(
@@ -55,9 +58,9 @@ function unsupportedAlgorithm(error: unknown): Error {
   return result;
 }
 
-function encapsulateSync(key: any) {
+function publicHandle(key: any) {
   const prepared = prepareAsymmetricKey(key, kConsumePublic);
-  const handle = ReflectHas(prepared, "handle")
+  return ReflectHas(prepared, "handle")
     ? prepared.handle
     : op_node_create_public_key(
       prepared.data,
@@ -66,6 +69,23 @@ function encapsulateSync(key: any) {
       prepared.passphrase,
       prepared.namedCurve,
     );
+}
+
+function privateHandle(key: any) {
+  const prepared = prepareAsymmetricKey(key, kConsumePrivate);
+  return ReflectHas(prepared, "handle")
+    ? prepared.handle
+    : op_node_create_private_key(
+      prepared.data,
+      prepared.format,
+      prepared.type ?? "",
+      prepared.passphrase,
+      prepared.namedCurve,
+    );
+}
+
+function encapsulateSync(key: any) {
+  const handle = publicHandle(key);
   try {
     const { sharedKey, ciphertext } = op_node_kem_encapsulate(handle);
     return {
@@ -78,16 +98,7 @@ function encapsulateSync(key: any) {
 }
 
 function decapsulateSync(key: any, ciphertext: any): Buffer {
-  const prepared = prepareAsymmetricKey(key, kConsumePrivate);
-  const handle = ReflectHas(prepared, "handle")
-    ? prepared.handle
-    : op_node_create_private_key(
-      prepared.data,
-      prepared.format,
-      prepared.type ?? "",
-      prepared.passphrase,
-      prepared.namedCurve,
-    );
+  const handle = privateHandle(key);
   ciphertext = getArrayBufferOrView(ciphertext, "ciphertext");
   try {
     return Buffer.from(op_node_kem_decapsulate(handle, ciphertext));
@@ -103,20 +114,19 @@ function encapsulate(
   if (callback !== undefined) {
     validateFunction(callback, "callback");
   }
-  try {
-    const result = encapsulateSync(key);
-    if (callback) {
-      setTimeout(() => callback(null, result));
-      return;
-    }
-    return result;
-  } catch (error) {
-    if (callback) {
-      setTimeout(() => callback(error as Error));
-      return;
-    }
-    throw error;
+  if (callback === undefined) {
+    return encapsulateSync(key);
   }
+  const handle = publicHandle(key);
+  PromisePrototypeThen(
+    op_node_kem_encapsulate_async(handle),
+    ({ sharedKey, ciphertext }) =>
+      callback(null, {
+        sharedKey: Buffer.from(sharedKey),
+        ciphertext: Buffer.from(ciphertext),
+      }),
+    (error) => callback(unsupportedAlgorithm(error)),
+  );
 }
 
 function decapsulate(
@@ -127,20 +137,16 @@ function decapsulate(
   if (callback !== undefined) {
     validateFunction(callback, "callback");
   }
-  try {
-    const sharedKey = decapsulateSync(key, ciphertext);
-    if (callback) {
-      setTimeout(() => callback(null, sharedKey));
-      return;
-    }
-    return sharedKey;
-  } catch (error) {
-    if (callback) {
-      setTimeout(() => callback(error as Error));
-      return;
-    }
-    throw error;
+  if (callback === undefined) {
+    return decapsulateSync(key, ciphertext);
   }
+  const handle = privateHandle(key);
+  ciphertext = getArrayBufferOrView(ciphertext, "ciphertext");
+  PromisePrototypeThen(
+    op_node_kem_decapsulate_async(handle, ciphertext),
+    (sharedKey) => callback(null, Buffer.from(sharedKey)),
+    () => callback(operationError("Decapsulation failed")),
+  );
 }
 
 return {

@@ -112,9 +112,14 @@ impl PublicKey {
     &self.spki
   }
 
-  pub fn verify(&self, data: &[u8], signature: &[u8]) -> bool {
+  pub fn verify(
+    &self,
+    data: &[u8],
+    signature: &[u8],
+    context: Option<&[u8]>,
+  ) -> bool {
     self.algorithm.mldsa_variant().is_some_and(|variant| {
-      mldsa::mldsa_verify(variant, &self.raw, data, signature, None)
+      mldsa::mldsa_verify(variant, &self.raw, data, signature, context)
     })
   }
 
@@ -162,12 +167,16 @@ impl PrivateKey {
     self.public.clone()
   }
 
-  pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>, ImportError> {
+  pub fn sign(
+    &self,
+    data: &[u8],
+    context: Option<&[u8]>,
+  ) -> Result<Vec<u8>, ImportError> {
     let variant = self
       .algorithm
       .mldsa_variant()
       .ok_or(ImportError::UnsupportedKeyFormat)?;
-    mldsa::mldsa_sign(variant, &self.raw, data, None)
+    mldsa::mldsa_sign(variant, &self.raw, data, context)
       .map_err(|_| ImportError::InvalidKeyData)
   }
 
@@ -348,5 +357,16 @@ mod tests {
       private.decapsulate(&[]),
       Err(ImportError::UnsupportedKeyFormat)
     ));
+  }
+
+  #[test]
+  fn ml_dsa_context_separates_signatures() {
+    let private = import_private_seed(Algorithm::MlDsa44, &[0x42; 32]).unwrap();
+    let public = private.public_key();
+    let signature = private.sign(b"message", Some(b"context-a")).unwrap();
+
+    assert!(public.verify(b"message", &signature, Some(b"context-a")));
+    assert!(!public.verify(b"message", &signature, Some(b"context-b")));
+    assert!(!public.verify(b"message", &signature, None));
   }
 }
