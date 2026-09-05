@@ -30,6 +30,19 @@ Deno.test(async function cryptoKeyInstancesShareIsolatePrototype() {
   assert(Object.getPrototypeOf(internalPrototype) === CryptoKey.prototype);
 });
 
+Deno.test(function cryptoRandomUuidRejectsForgedReceiver() {
+  const forged = Object.create(crypto);
+  assertThrows(() => crypto.randomUUID.call(forged));
+});
+
+Deno.test(function cryptoKeyInspectorHandlesUnbrandedReceivers() {
+  assertEquals(typeof Deno.inspect(CryptoKey.prototype), "string");
+  assertEquals(
+    typeof Deno.inspect(Object.create(CryptoKey.prototype)),
+    "string",
+  );
+});
+
 // https://github.com/denoland/deno/issues/11664
 Deno.test(async function testImportArrayBufferKey() {
   const subtle = globalThis.crypto.subtle;
@@ -2080,21 +2093,19 @@ Deno.test(async function testAesGcmTagLength() {
 
   const iv = crypto.getRandomValues(new Uint8Array(12));
 
-  // encrypt won't fail, it will simply truncate the tag
-  // as expected.
+  const plaintext = new Uint8Array(32);
   const encrypted = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv, tagLength: 96 },
     key,
-    new Uint8Array(32),
+    plaintext,
   );
 
-  await assertRejects(async () => {
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv, tagLength: 96 },
-      key,
-      encrypted,
-    );
-  });
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv, tagLength: 96 },
+    key,
+    encrypted,
+  );
+  assertEquals(new Uint8Array(decrypted), plaintext);
 });
 
 Deno.test(async function ecPrivateKeyMaterialExportSpki() {
@@ -4424,13 +4435,7 @@ Deno.test(function subtleCryptoSupportsThrowsOnMissingArgs() {
   assertThrows(() => s("sign"), TypeError);
 });
 
-// ML-DSA `context` (FIPS 204 §5.2 application context byte string) is
-// currently unsupported by the aws-lc-rs PqdsaKeyPair / UnparsedPublicKey
-// surface: sign must reject a non-empty context with OperationError, and
-// verify must return false (signature treated as invalid) for a non-empty
-// context. Regression-pin the behavior so a silent acceptance later (e.g.
-// after an aws-lc-rs API change) reads as a vuln, not an enhancement.
-Deno.test(async function subtleMlDsaNonEmptyContextRejected() {
+Deno.test(async function subtleMlDsaNonEmptyContextRoundTrip() {
   const { publicKey, privateKey } = await crypto.subtle.generateKey(
     { name: "ML-DSA-65" },
     false,
@@ -4438,30 +4443,29 @@ Deno.test(async function subtleMlDsaNonEmptyContextRejected() {
   ) as CryptoKeyPair;
   const data = new TextEncoder().encode("hello");
   const ctx = new TextEncoder().encode("ctx");
-  // sign with non-empty context -> OperationError.
-  await assertRejects(
-    () =>
-      crypto.subtle.sign(
-        // deno-lint-ignore no-explicit-any
-        { name: "ML-DSA-65", context: ctx } as any,
-        privateKey,
-        data,
-      ),
-    DOMException,
-  );
-  // verify with non-empty context against a valid (empty-context)
-  // signature must return false, not throw and not silently accept.
-  const validSig = await crypto.subtle.sign(
-    { name: "ML-DSA-65" },
+  const signature = await crypto.subtle.sign(
+    // deno-lint-ignore no-explicit-any
+    { name: "ML-DSA-65", context: ctx } as any,
     privateKey,
     data,
   );
-  const verified = await crypto.subtle.verify(
-    // deno-lint-ignore no-explicit-any
-    { name: "ML-DSA-65", context: ctx } as any,
-    publicKey,
-    validSig,
-    data,
+  assert(
+    await crypto.subtle.verify(
+      // deno-lint-ignore no-explicit-any
+      { name: "ML-DSA-65", context: ctx } as any,
+      publicKey,
+      signature,
+      data,
+    ),
   );
-  assertEquals(verified, false);
+  assertEquals(
+    await crypto.subtle.verify(
+      // deno-lint-ignore no-explicit-any
+      { name: "ML-DSA-65", context: new Uint8Array([1]) } as any,
+      publicKey,
+      signature,
+      data,
+    ),
+    false,
+  );
 });

@@ -98,6 +98,21 @@ ObjectDefineProperty(
   {
     __proto__: null,
     value: function (inspect, inspectOptions) {
+      if (!CryptoKey.isKey(this)) {
+        return inspect(
+          createFilteredInspectProxy({
+            object: this,
+            evaluate: false,
+            keys: [
+              "type",
+              "extractable",
+              "algorithm",
+              "usages",
+            ],
+          }),
+          inspectOptions,
+        );
+      }
       const snapshot = CryptoKey.inspectSnapshot(this);
       const view = ObjectCreate(CryptoKeyPrototype);
       ObjectDefineProperty(view, "type", {
@@ -451,6 +466,27 @@ function nodeRsaPssSaltLengthError(methodName, args) {
 function decorateNodeWebCryptoError(methodName, args, error, argumentCount) {
   const policy = op_crypto_error_policy();
   if (policy === WEB_CRYPTO_ERROR_POLICY_WEB_STANDARD) {
+    if (
+      methodName === "importKey" &&
+      error?.name === "DataError" &&
+      error.message === "Invalid key type"
+    ) {
+      ObjectDefineProperty(error, "message", {
+        __proto__: null,
+        value: "unsupported algorithm",
+        configurable: true,
+      });
+    } else if (
+      methodName === "deriveBits" &&
+      error?.name === "OperationError" &&
+      error.message === "derived bit length is too small"
+    ) {
+      ObjectDefineProperty(error, "message", {
+        __proto__: null,
+        value: "Invalid length",
+        configurable: true,
+      });
+    }
     return error;
   }
   if (error?.code === "ERR_INVALID_THIS") {
@@ -912,6 +948,12 @@ function validateNodeWebCryptoCall(methodName, args) {
     return;
   }
   const algorithm = args[0];
+  if (
+    rawAlgorithmName(algorithm) !== "HKDF" ||
+    algorithm === null || typeof algorithm !== "object"
+  ) {
+    return;
+  }
   const info = algorithm?.info;
   let infoLength;
   if (isAnyArrayBuffer(info)) {
@@ -922,8 +964,6 @@ function validateNodeWebCryptoCall(methodName, args) {
     infoLength = DataViewPrototypeGetByteLength(info);
   }
   if (
-    rawAlgorithmName(algorithm) === "HKDF" &&
-    algorithm !== null && typeof algorithm === "object" &&
     infoLength > 1024
   ) {
     throw new DOMException(
@@ -1059,6 +1099,12 @@ function supports(operation, algorithm, lengthOrHash = undefined) {
     tagNodeErrorCode(error, "ERR_INVALID_THIS");
     throw error;
   }
+  if (arguments.length === 0) {
+    return FunctionPrototypeCall(cppgcSupports, this);
+  }
+  if (arguments.length === 1) {
+    return FunctionPrototypeCall(cppgcSupports, this, operation);
+  }
   return FunctionPrototypeCall(
     cppgcSupports,
     this,
@@ -1151,8 +1197,7 @@ let uuidBatchData;
 let uuidBatch = UUID_BATCH_SIZE;
 
 function randomUUID() {
-  webidl.assertBranded(this, CryptoPrototype, "Crypto");
-  if (usesSeededRng) {
+  if (this !== cryptoSingleton || usesSeededRng) {
     return FunctionPrototypeCall(cppgcRandomUUID, this);
   }
   if (uuidBatch === UUID_BATCH_SIZE) {

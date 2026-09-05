@@ -114,22 +114,35 @@ for (const [name, pubLen, _privLen, sigLen] of variants) {
     assert(ok);
   });
 
-  Deno.test(`webcrypto ${name} non-empty context unsupported`, async () => {
-    const { privateKey } = await crypto.subtle.generateKey(
+  Deno.test(`webcrypto ${name} non-empty context`, async () => {
+    const { publicKey, privateKey } = await crypto.subtle.generateKey(
       { name } as AnyAlg,
       true,
       ["sign", "verify"],
     ) as CryptoKeyPair;
     const data = new TextEncoder().encode("payload");
-    await assertRejects(
-      async () => {
-        await crypto.subtle.sign(
-          { name, context: new Uint8Array([1, 2, 3]) } as AnyAlg,
-          privateKey,
-          data,
-        );
-      },
-      DOMException,
+    const context = new Uint8Array([1, 2, 3]);
+    const signature = await crypto.subtle.sign(
+      { name, context } as AnyAlg,
+      privateKey,
+      data,
+    );
+    assert(
+      await crypto.subtle.verify(
+        { name, context } as AnyAlg,
+        publicKey,
+        signature,
+        data,
+      ),
+    );
+    assertEquals(
+      await crypto.subtle.verify(
+        { name, context: new Uint8Array([3, 2, 1]) } as AnyAlg,
+        publicKey,
+        signature,
+        data,
+      ),
+      false,
     );
   });
 
