@@ -1128,15 +1128,11 @@ class PrivateKeyObject extends AsymmetricKeyObject {
       options &&
       (options.format === "raw-private" || options.format === "raw-seed")
     ) {
-      if (options.cipher !== undefined || options.passphrase !== undefined) {
+      if (options.passphrase !== undefined) {
         throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
           "raw format",
           "does not support encryption",
         );
-      }
-      const rawType = options.type;
-      if (rawType !== undefined) {
-        throw new ERR_INVALID_ARG_VALUE("options.type", rawType);
       }
       const keyType = this.asymmetricKeyType;
       if (options.format === "raw-private") {

@@ -509,6 +509,12 @@ declare module "crypto" {
     interface JwkKeyExportOptions {
         format: "jwk";
     }
+    interface RawPublicKeyExportOptions {
+        format: "raw-public";
+    }
+    interface RawPrivateKeyExportOptions {
+        format: "raw-private" | "raw-seed";
+    }
     interface JsonWebKey {
         crv?: string | undefined;
         d?: string | undefined;
@@ -649,6 +655,7 @@ declare module "crypto" {
         export(options: KeyExportOptions<"pem">): string | Buffer;
         export(options?: KeyExportOptions<"der">): Buffer;
         export(options?: JwkKeyExportOptions): JsonWebKey;
+        export(options: RawPublicKeyExportOptions | RawPrivateKeyExportOptions): Buffer;
         /**
          * Returns `true` or `false` depending on whether the keys have exactly the same
          * type, value, and parameters. This method is not [constant time](https://en.wikipedia.org/wiki/Timing_attack).
@@ -1223,6 +1230,18 @@ declare module "crypto" {
         type?: "pkcs1" | "spki" | undefined;
         encoding?: string | undefined;
     }
+    interface RawPrivateKeyInput {
+        key: ArrayBuffer | NodeJS.ArrayBufferView;
+        format: "raw-private" | "raw-seed";
+        asymmetricKeyType: string;
+        namedCurve?: string | undefined;
+    }
+    interface RawPublicKeyInput {
+        key: ArrayBuffer | NodeJS.ArrayBufferView;
+        format: "raw-public";
+        asymmetricKeyType: string;
+        namedCurve?: string | undefined;
+    }
     /**
      * Asynchronously generates a new random secret key of the given `length`. The `type` will determine which validations will be performed on the `length`.
      *
@@ -1284,7 +1303,9 @@ declare module "crypto" {
      * of the passphrase is limited to 1024 bytes.
      * @since v11.6.0
      */
-    function createPrivateKey(key: PrivateKeyInput | string | Buffer | JsonWebKeyInput): KeyObject;
+    function createPrivateKey(
+        key: PrivateKeyInput | RawPrivateKeyInput | string | Buffer | JsonWebKeyInput,
+    ): KeyObject;
     /**
      * Creates and returns a new key object containing a public key. If `key` is a
      * string or `Buffer`, `format` is assumed to be `'pem'`; if `key` is a `KeyObject` with type `'private'`, the public key is derived from the given private key;
@@ -1299,7 +1320,9 @@ declare module "crypto" {
      * and it will be impossible to extract the private key from the returned object.
      * @since v11.6.0
      */
-    function createPublicKey(key: PublicKeyInput | string | Buffer | KeyObject | JsonWebKeyInput): KeyObject;
+    function createPublicKey(
+        key: PublicKeyInput | RawPublicKeyInput | string | Buffer | KeyObject | JsonWebKeyInput,
+    ): KeyObject;
     /**
      * Creates and returns a new key object containing a secret key for symmetric
      * encryption or `Hmac`.
@@ -3349,6 +3372,30 @@ declare module "crypto" {
         key: KeyLike | VerifyKeyObjectInput | VerifyPublicKeyInput | VerifyJsonWebKeyInput,
         signature: NodeJS.ArrayBufferView,
         callback: (error: Error | null, result: boolean) => void,
+    ): void;
+    /**
+     * Decapsulates a shared key with a KEM private key.
+     * @since v24.7.0
+     */
+    function decapsulate(
+        key: KeyLike | PrivateKeyInput | RawPrivateKeyInput | JsonWebKeyInput,
+        ciphertext: ArrayBuffer | NodeJS.ArrayBufferView,
+    ): Buffer;
+    function decapsulate(
+        key: KeyLike | PrivateKeyInput | RawPrivateKeyInput | JsonWebKeyInput,
+        ciphertext: ArrayBuffer | NodeJS.ArrayBufferView,
+        callback: (error: Error | null, sharedKey: Buffer) => void,
+    ): void;
+    /**
+     * Encapsulates a shared key with a KEM public key.
+     * @since v24.7.0
+     */
+    function encapsulate(
+        key: KeyLike | PublicKeyInput | RawPublicKeyInput | JsonWebKeyInput,
+    ): { sharedKey: Buffer; ciphertext: Buffer };
+    function encapsulate(
+        key: KeyLike | PublicKeyInput | RawPublicKeyInput | JsonWebKeyInput,
+        callback: (error: Error | null, result: { sharedKey: Buffer; ciphertext: Buffer }) => void,
     ): void;
     /**
      * Computes the Diffie-Hellman secret based on a `privateKey` and a `publicKey`.

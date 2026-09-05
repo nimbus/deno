@@ -9,7 +9,9 @@ import {
   createSecretKey,
   createSign,
   createVerify,
+  decapsulate,
   diffieHellman,
+  encapsulate,
   generateKeyPair,
   generateKeyPairSync,
   KeyObject,
@@ -44,15 +46,37 @@ const generateKeyPairAsync = promisify(
 
 const testDir = new URL(".", import.meta.url);
 
-Deno.test("raw private exports reject a type option", () => {
+Deno.test("raw private exports ignore encoding options without passphrase", () => {
   const { privateKey } = generateKeyPairSync("ed25519");
+  const expected = privateKey.export({ format: "raw-private" });
+  assertEquals(
+    privateKey.export({ format: "raw-private", type: "pkcs8" } as any),
+    expected,
+  );
+  assertEquals(
+    privateKey.export({
+      format: "raw-private",
+      cipher: "aes-256-cbc",
+    } as any),
+    expected,
+  );
   const error = assertThrows(() =>
     privateKey.export({
       format: "raw-private",
-      type: "pkcs8",
+      passphrase: "secret",
     } as any)
   ) as NodeJS.ErrnoException;
-  assertEquals(error.code, "ERR_INVALID_ARG_VALUE");
+  assertEquals(error.code, "ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS");
+});
+
+Deno.test("KEM functions are exposed through node crypto ESM", () => {
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 1024,
+  });
+  const { sharedKey, ciphertext } = encapsulate(publicKey);
+  assertEquals(sharedKey.length, 128);
+  assertEquals(ciphertext.length, 128);
+  assertEquals(decapsulate(privateKey, ciphertext), sharedKey);
 });
 
 function x448PrivateKey(raw: Buffer): KeyObject {
