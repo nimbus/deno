@@ -345,6 +345,11 @@ pub fn run(
       if key.key_type != CryptoKeyType::Public {
         return Err(invalid_access("Key type not supported".to_string()));
       }
+      if context.as_ref().is_some_and(|context| context.len() > 255) {
+        return Err(op_error(
+          "ContextParams.context must be at most 255 bytes".to_string(),
+        ));
+      }
       Ok(mldsa_verify(
         variant,
         key.raw.bytes(),

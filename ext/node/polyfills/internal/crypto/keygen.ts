@@ -57,6 +57,8 @@ const {
   op_node_generate_ed25519_key_async,
   op_node_generate_ed448_key,
   op_node_generate_ed448_key_async,
+  op_node_generate_post_quantum_key,
+  op_node_generate_post_quantum_key_async,
   op_node_generate_rsa_key,
   op_node_generate_rsa_key_async,
   op_node_generate_rsa_pss_key,
@@ -222,6 +224,12 @@ function parseKeyFormat(
     return "der";
   } else if (formatStr === "jwk") {
     return "jwk";
+  } else if (formatStr === "raw-public") {
+    return "raw-public";
+  } else if (formatStr === "raw-private") {
+    return "raw-private";
+  } else if (formatStr === "raw-seed") {
+    return "raw-seed";
   }
   throw new ERR_INVALID_ARG_VALUE(optionName, formatStr);
 }
@@ -288,6 +296,29 @@ function parseKeyFormatAndType(
     option("format", objName),
   );
 
+  if (format === "raw-public") {
+    if (isPublic === false) {
+      throw new ERR_INVALID_ARG_VALUE(option("format", objName), format);
+    }
+    if (
+      typeStr !== undefined && typeStr !== "compressed" &&
+      typeStr !== "uncompressed"
+    ) {
+      throw new ERR_INVALID_ARG_VALUE(option("type", objName), typeStr);
+    }
+    return { format, type: typeStr ?? "uncompressed" };
+  }
+
+  if (format === "raw-private" || format === "raw-seed") {
+    if (isPublic === true) {
+      throw new ERR_INVALID_ARG_VALUE(option("format", objName), format);
+    }
+    if (typeStr !== undefined) {
+      throw new ERR_INVALID_ARG_VALUE(option("type", objName), typeStr);
+    }
+    return { format, type: undefined };
+  }
+
   const isRequired = (!isInput || format === "der") && format !== "jwk";
   const type = parseKeyType(
     typeStr,
@@ -326,6 +357,16 @@ function parsePrivateKeyEncoding(
   const { format, type } = parseKeyFormatAndType(enc, keyType, false, objName);
 
   const { cipher, passphrase } = enc;
+
+  if (
+    (format === "raw-private" || format === "raw-seed") &&
+    (cipher != null || passphrase !== undefined)
+  ) {
+    throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
+      "raw format",
+      "does not support encryption",
+    );
+  }
 
   if (cipher != null) {
     if (typeof cipher !== "string") {
@@ -559,6 +600,16 @@ function createJob(mode, type, options) {
         return op_node_generate_x448_key();
       }
       return op_node_generate_x448_key_async();
+    }
+    case "ml-dsa-44":
+    case "ml-dsa-65":
+    case "ml-dsa-87":
+    case "ml-kem-768":
+    case "ml-kem-1024": {
+      if (mode === kSync) {
+        return op_node_generate_post_quantum_key(type);
+      }
+      return op_node_generate_post_quantum_key_async(type);
     }
     case "dh": {
       validateObject(options, "options");

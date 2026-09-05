@@ -145,6 +145,7 @@ fn generate_key_hmac(
   hash: ShaHash,
   length: Option<usize>,
 ) -> Result<Vec<u8>, GenerateKeyError> {
+  let requested_length = length;
   // Default key length (in bytes) is the hash's block size.
   // SHA-3 is not supported by aws-lc-rs for HMAC, so the block sizes are
   // hard-coded here per FIPS 202.
@@ -168,16 +169,11 @@ fn generate_key_hmac(
   };
 
   let length = if let Some(length) = length {
-    if length % 8 != 0 {
+    let byte_length = length.div_ceil(8);
+    if byte_length > aws_lc_rs::digest::MAX_BLOCK_LEN {
       return Err(GenerateKeyError::InvalidHMACKeyLength);
     }
-
-    let length = length / 8;
-    if length > aws_lc_rs::digest::MAX_BLOCK_LEN {
-      return Err(GenerateKeyError::InvalidHMACKeyLength);
-    }
-
-    length
+    byte_length
   } else {
     default_block_len
   };
@@ -187,6 +183,15 @@ fn generate_key_hmac(
   rng
     .fill(&mut key)
     .map_err(|_| GenerateKeyError::FailedKeyGeneration)?;
+  if let Some(length_bits) = requested_length
+    && !length_bits.is_multiple_of(8)
+  {
+    let keep = length_bits % 8;
+    let mask = u8::MAX << (8 - keep);
+    if let Some(last) = key.last_mut() {
+      *last &= mask;
+    }
+  }
 
   Ok(key)
 }

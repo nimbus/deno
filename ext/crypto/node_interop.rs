@@ -335,16 +335,27 @@ fn read_string_member<'s>(
   obj: v8::Local<'s, v8::Object>,
   field: &[u8],
 ) -> Option<String> {
+  let v = get_own_member(scope, obj, field)?;
+  if v.is_undefined() || v.is_null() {
+    return None;
+  }
+  Some(v.to_rust_string_lossy(scope))
+}
+
+fn get_own_member<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  obj: v8::Local<'s, v8::Object>,
+  field: &[u8],
+) -> Option<v8::Local<'s, v8::Value>> {
   let key = v8::String::new_from_one_byte(
     scope,
     field,
     v8::NewStringType::Internalized,
   )?;
-  let v = obj.get(scope, key.into())?;
-  if v.is_undefined() || v.is_null() {
+  if !obj.has_own_property(scope, key.into())? {
     return None;
   }
-  Some(v.to_rust_string_lossy(scope))
+  obj.get(scope, key.into())
 }
 
 fn read_bool_member<'s>(
@@ -352,12 +363,7 @@ fn read_bool_member<'s>(
   obj: v8::Local<'s, v8::Object>,
   field: &[u8],
 ) -> Option<bool> {
-  let key = v8::String::new_from_one_byte(
-    scope,
-    field,
-    v8::NewStringType::Internalized,
-  )?;
-  let v = obj.get(scope, key.into())?;
+  let v = get_own_member(scope, obj, field)?;
   if v.is_undefined() || v.is_null() {
     return None;
   }
@@ -369,12 +375,7 @@ fn read_string_array<'s>(
   obj: v8::Local<'s, v8::Object>,
   field: &[u8],
 ) -> Option<Vec<String>> {
-  let key = v8::String::new_from_one_byte(
-    scope,
-    field,
-    v8::NewStringType::Internalized,
-  )?;
-  let v = obj.get(scope, key.into())?;
+  let v = get_own_member(scope, obj, field)?;
   let arr = v8::Local::<v8::Array>::try_from(v).ok()?;
   let len = arr.length();
   let mut out = Vec::with_capacity(len as usize);
@@ -390,12 +391,7 @@ fn read_algorithm_name<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   obj: v8::Local<'s, v8::Object>,
 ) -> Option<String> {
-  let k = v8::String::new_from_one_byte(
-    scope,
-    b"algorithm",
-    v8::NewStringType::Internalized,
-  )?;
-  let v = obj.get(scope, k.into())?;
+  let v = get_own_member(scope, obj, b"algorithm")?;
   let alg = v8::Local::<v8::Object>::try_from(v).ok()?;
   read_string_member(scope, alg, b"name")
 }
@@ -406,12 +402,10 @@ fn build_algorithm_dict_from_v8<'s>(
   name: &str,
 ) -> AlgorithmDict {
   let mut dict = AlgorithmDict::new(name);
-  let alg_key = v8::String::new(scope, "algorithm").unwrap();
-  if let Some(alg_val) = obj.get(scope, alg_key.into())
+  if let Some(alg_val) = get_own_member(scope, obj, b"algorithm")
     && let Ok(alg_obj) = v8::Local::<v8::Object>::try_from(alg_val)
   {
-    let length_key = v8::String::new(scope, "length").unwrap();
-    if let Some(l) = alg_obj.get(scope, length_key.into()).and_then(|v| {
+    if let Some(l) = get_own_member(scope, alg_obj, b"length").and_then(|v| {
       if v.is_undefined() {
         None
       } else {
@@ -420,18 +414,18 @@ fn build_algorithm_dict_from_v8<'s>(
     }) {
       dict.length = Some(l);
     }
-    let curve_key = v8::String::new(scope, "namedCurve").unwrap();
-    if let Some(s) = alg_obj.get(scope, curve_key.into()).and_then(|v| {
-      if v.is_undefined() {
-        None
-      } else {
-        Some(v.to_rust_string_lossy(scope))
-      }
-    }) {
+    if let Some(s) =
+      get_own_member(scope, alg_obj, b"namedCurve").and_then(|v| {
+        if v.is_undefined() {
+          None
+        } else {
+          Some(v.to_rust_string_lossy(scope))
+        }
+      })
+    {
       dict.named_curve = Some(s);
     }
-    let hash_key = v8::String::new(scope, "hash").unwrap();
-    if let Some(h) = alg_obj.get(scope, hash_key.into())
+    if let Some(h) = get_own_member(scope, alg_obj, b"hash")
       && !h.is_undefined()
       && !h.is_null()
     {
@@ -439,25 +433,24 @@ fn build_algorithm_dict_from_v8<'s>(
         Some(h.to_rust_string_lossy(scope))
       } else {
         v8::Local::<v8::Object>::try_from(h).ok().and_then(|ho| {
-          let nk = v8::String::new(scope, "name").unwrap();
-          ho.get(scope, nk.into())
+          get_own_member(scope, ho, b"name")
             .map(|nv| nv.to_rust_string_lossy(scope))
         })
       };
       dict.hash_name = h_name;
     }
-    let ml_key = v8::String::new(scope, "modulusLength").unwrap();
-    if let Some(ml) = alg_obj.get(scope, ml_key.into()).and_then(|v| {
-      if v.is_undefined() {
-        None
-      } else {
-        v.uint32_value(scope)
-      }
-    }) {
+    if let Some(ml) =
+      get_own_member(scope, alg_obj, b"modulusLength").and_then(|v| {
+        if v.is_undefined() {
+          None
+        } else {
+          v.uint32_value(scope)
+        }
+      })
+    {
       dict.modulus_length = Some(ml);
     }
-    let pe_key = v8::String::new(scope, "publicExponent").unwrap();
-    if let Some(pe) = alg_obj.get(scope, pe_key.into())
+    if let Some(pe) = get_own_member(scope, alg_obj, b"publicExponent")
       && let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(pe)
     {
       let mut out = vec![0u8; view.byte_length()];
@@ -473,9 +466,7 @@ fn read_key_data_from_v8<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   obj: v8::Local<'s, v8::Object>,
 ) -> Result<RawKeyData, CryptoError> {
-  let k = v8::String::new(scope, "keyData").unwrap();
-  let v = obj
-    .get(scope, k.into())
+  let v = get_own_member(scope, obj, b"keyData")
     .ok_or_else(|| type_error("Missing keyData".to_string()))?;
   // Match the shape produced by `key_data_to_jsval` in `make_key.rs`:
   // either `{ type, data }`, `{ seed, privateKey }`, or a bare
@@ -514,12 +505,7 @@ fn read_uint8array_member<'s>(
   obj: v8::Local<'s, v8::Object>,
   field: &[u8],
 ) -> Option<Vec<u8>> {
-  let k = v8::String::new_from_one_byte(
-    scope,
-    field,
-    v8::NewStringType::Internalized,
-  )?;
-  let v = obj.get(scope, k.into())?;
+  let v = get_own_member(scope, obj, field)?;
   if v.is_undefined() || v.is_null() {
     return None;
   }

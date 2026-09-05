@@ -563,12 +563,6 @@ pub fn run(
           return Err(op_error(format!("Invalid tag length: {t}")));
         }
       };
-      let iv_len = iv.len();
-      if iv_len != 12 && iv_len != 16 {
-        return Err(not_supported(
-          "Initialization vector length not supported".to_string(),
-        ));
-      }
       let key_length = key.algorithm_length.ok_or_else(|| {
         op_error("AES-GCM key is missing 'length'".to_string())
       })?;
@@ -664,10 +658,6 @@ fn invalid_access(msg: String) -> CryptoError {
 
 fn op_error(msg: String) -> CryptoError {
   CryptoError::Other(JsErrorBox::new("DOMExceptionOperationError", msg))
-}
-
-fn not_supported(msg: String) -> CryptoError {
-  CryptoError::Other(JsErrorBox::new("DOMExceptionNotSupportedError", msg))
 }
 
 fn encrypt_error_to_crypto(e: encrypt::EncryptError) -> CryptoError {

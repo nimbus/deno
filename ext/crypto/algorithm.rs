@@ -415,7 +415,7 @@ pub fn compute_key_length(
     "ChaCha20-Poly1305" => Ok(Some(256)),
     "KMAC128" | "KMAC256" => {
       let l = length.unwrap_or(if name == "KMAC128" { 128 } else { 256 });
-      if l == 0 || !l.is_multiple_of(8) {
+      if !l.is_multiple_of(8) {
         return Err(GetKeyLengthError::KmacInvalidLength(l));
       }
       Ok(Some(l))

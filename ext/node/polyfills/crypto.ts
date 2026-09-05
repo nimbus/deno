@@ -56,6 +56,9 @@ const {
   createSecretKey,
   KeyObject,
 } = core.loadExtScript("ext:deno_node/internal/crypto/keys.ts");
+const { decapsulate, encapsulate } = core.loadExtScript(
+  "ext:deno_node/internal/crypto/kem.ts",
+);
 const {
   DiffieHellman,
   diffieHellman,
@@ -402,11 +405,13 @@ const defaultExport = {
   createSecretKey,
   createSign,
   createVerify,
+  decapsulate,
   Decipheriv,
   DiffieHellman,
   diffieHellman,
   DiffieHellmanGroup,
   ECDH,
+  encapsulate,
   getRandomValues,
   generateKey,
   generateKeyPair,
@@ -509,11 +514,13 @@ return {
   createSecretKey,
   createSign,
   createVerify,
+  decapsulate,
   Decipheriv,
   DiffieHellman,
   diffieHellman,
   DiffieHellmanGroup,
   ECDH,
+  encapsulate,
   generateKey,
   generateKeyPair,
   generateKeyPairSync,

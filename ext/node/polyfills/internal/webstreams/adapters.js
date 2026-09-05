@@ -515,18 +515,20 @@ function newReadableStreamFromStreamReadable(
   }
 
   if (isDestroyed(streamReadable) || !isReadable(streamReadable)) {
-    const propagateError = op_node_webstreams_closed_readable_propagates_error();
+    const propagateError =
+      op_node_webstreams_closed_readable_propagates_error();
     if (propagateError) {
       attachErrorSentinel(streamReadable);
     }
     const streamError = streamReadable.errored;
     const readableEnded = streamReadable.readableEnded === true ||
       isReadableEnded(streamReadable) === true;
-    const error = propagateError && streamError && typeof streamError !== "boolean"
-      ? streamError
-      : propagateError && isDestroyed(streamReadable) && !readableEnded
-      ? new AbortError()
-      : undefined;
+    const error =
+      propagateError && streamError && typeof streamError !== "boolean"
+        ? streamError
+        : propagateError && isDestroyed(streamReadable) && !readableEnded
+        ? new AbortError()
+        : undefined;
     return new ReadableStream({
       type: options.type,
       start(controller) {

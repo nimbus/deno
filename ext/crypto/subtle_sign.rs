@@ -518,6 +518,11 @@ pub fn run(
       if key.key_type != CryptoKeyType::Private {
         return Err(invalid_access("Key type not supported".to_string()));
       }
+      if context.as_ref().is_some_and(|context| context.len() > 255) {
+        return Err(op_error(
+          "ContextParams.context must be at most 255 bytes".to_string(),
+        ));
+      }
       mldsa_sign(
         variant,
         key.raw.expanded_private_key(),
@@ -553,23 +558,65 @@ pub(crate) fn run_kmac(
   if key.key_type != CryptoKeyType::Secret {
     return Err(invalid_access("Key type not supported".to_string()));
   }
-  if output_length_bits == 0 || !output_length_bits.is_multiple_of(8) {
-    return Err(op_error("Invalid KMAC outputLength".to_string()));
-  }
   let customization = customization.unwrap_or_default();
-  let mut mac = match key.algorithm_name.as_str() {
-    "KMAC128" => tiny_keccak::Kmac::v128(key.raw.bytes(), &customization),
-    "KMAC256" => tiny_keccak::Kmac::v256(key.raw.bytes(), &customization),
+  let (mut mac, rate) = match key.algorithm_name.as_str() {
+    "KMAC128" => (tiny_keccak::CShake::v128(b"KMAC", &customization), 168usize),
+    "KMAC256" => (tiny_keccak::CShake::v256(b"KMAC", &customization), 136usize),
     _ => {
       return Err(invalid_access(
         "KMAC operation does not match key algorithm".to_string(),
       ));
     }
   };
+  let encoded_rate = left_encode_kmac(rate);
+  let key_length_bits = key
+    .algorithm_length
+    .unwrap_or((key.raw.bytes().len() * 8) as u32)
+    as usize;
+  let encoded_key_bits = left_encode_kmac(key_length_bits);
+  tiny_keccak::Hasher::update(&mut mac, &encoded_rate);
+  tiny_keccak::Hasher::update(&mut mac, &encoded_key_bits);
+  tiny_keccak::Hasher::update(&mut mac, key.raw.bytes());
+  let encoded_key_len =
+    encoded_rate.len() + encoded_key_bits.len() + key.raw.bytes().len();
+  let padding_len = (rate - encoded_key_len % rate) % rate;
+  let padding = vec![0u8; padding_len];
+  tiny_keccak::Hasher::update(&mut mac, &padding);
   tiny_keccak::Hasher::update(&mut mac, data);
-  let mut out = vec![0u8; (output_length_bits / 8) as usize];
+  tiny_keccak::Hasher::update(
+    &mut mac,
+    &right_encode_kmac(output_length_bits as usize),
+  );
+  let mut out = vec![0u8; output_length_bits.div_ceil(8) as usize];
   tiny_keccak::Hasher::finalize(mac, &mut out);
+  if !output_length_bits.is_multiple_of(8) {
+    let keep = output_length_bits % 8;
+    let mask = u8::MAX << (8 - keep);
+    if let Some(last) = out.last_mut() {
+      *last &= mask;
+    }
+  }
   Ok(out)
+}
+
+fn left_encode_kmac(value: usize) -> Vec<u8> {
+  let bytes = value.to_be_bytes();
+  let first = bytes
+    .iter()
+    .position(|byte| *byte != 0)
+    .unwrap_or(bytes.len() - 1);
+  let payload = &bytes[first..];
+  let mut encoded = Vec::with_capacity(payload.len() + 1);
+  encoded.push(payload.len() as u8);
+  encoded.extend_from_slice(payload);
+  encoded
+}
+
+fn right_encode_kmac(value: usize) -> Vec<u8> {
+  let mut encoded = left_encode_kmac(value);
+  let width = encoded.remove(0);
+  encoded.push(width);
+  encoded
 }
 
 fn sha_to_crypto_hash(h: ShaHash) -> CryptoHash {

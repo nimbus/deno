@@ -5,6 +5,7 @@
 const { core, primordials } = __bootstrap;
 const {
   ArrayPrototypeSlice,
+  BigInt,
   MapPrototypeGet,
   MapPrototypeSet,
   SafeArrayIterator,
@@ -438,6 +439,33 @@ const validateByteSource = hideStackFrames((val, name) => {
   );
 });
 
+function bigIntArrayToUnsignedInt(
+  input: ArrayLike<number>,
+): number | undefined {
+  let result = 0;
+
+  for (let index = 0; index < input.length; ++index) {
+    const reversedIndex = input.length - index - 1;
+    if (reversedIndex >= 4 && input[index]) {
+      return undefined;
+    }
+    result |= input[index] << 8 * reversedIndex;
+  }
+
+  return result >>> 0;
+}
+
+function bigIntArrayToUnsignedBigInt(input: ArrayLike<number>): bigint {
+  let result = 0n;
+
+  for (let index = 0; index < input.length; ++index) {
+    const reversedIndex = input.length - index - 1;
+    result |= BigInt(input[index]) << 8n * BigInt(reversedIndex);
+  }
+
+  return result;
+}
+
 // Mirrors the (canonical) curve names exposed by Node.js's `getCurves()`.
 // Notably this drops `secp256r1` because it is just another name for
 // `prime256v1` and exposing both confuses callers that probe for an
@@ -522,6 +550,8 @@ const _defaultExport = {
   kKeyObject,
   kAesKeyLengths,
   kSupportedAlgorithms,
+  bigIntArrayToUnsignedBigInt,
+  bigIntArrayToUnsignedInt,
 };
 
 return {
@@ -541,6 +571,8 @@ return {
   kSupportedAlgorithms,
   kHandle,
   kKeyObject,
+  bigIntArrayToUnsignedBigInt,
+  bigIntArrayToUnsignedInt,
   default: _defaultExport,
 };
 })();

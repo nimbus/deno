@@ -340,6 +340,9 @@ pub async fn run(
           "Unrecognized hash algorithm: {hash}"
         )));
       }
+      if modulus_length < 512 {
+        return Err(op_error("RSA modulus length is too small".into()));
+      }
       check_usages(&usages, &usages_for_rsa(&name))?;
       let key_data =
         spawn_blocking(move || generate_rsa(modulus_length, &public_exponent))
@@ -435,7 +438,7 @@ pub async fn run(
       let hash_name = sha_name(sha);
       let bytes = generate_hmac(sha, length.map(|l| l as usize))
         .map_err(|e| CryptoError::Other(JsErrorBox::from_err(e)))?;
-      let length_bits = (bytes.len() * 8) as u32;
+      let length_bits = length.unwrap_or((bytes.len() * 8) as u32);
       Ok(GenerateKeyOutput::Symmetric {
         algorithm_name: "HMAC".to_string(),
         length: Some(length_bits),
@@ -448,11 +451,14 @@ pub async fn run(
     GenerateKeyAlgorithm::Kmac { name, length } => {
       check_usages(&usages, &["sign", "verify"])?;
       let length = length.unwrap_or(if name == "KMAC128" { 128 } else { 256 });
-      if length == 0 || !length.is_multiple_of(8) {
-        return Err(op_error("Invalid length".into()));
-      }
-      let mut bytes = vec![0u8; (length / 8) as usize];
+      let mut bytes = vec![0u8; length.div_ceil(8) as usize];
       crate::rand::thread_rng().fill(&mut bytes[..]);
+      if !length.is_multiple_of(8) {
+        let keep = length % 8;
+        if let Some(last) = bytes.last_mut() {
+          *last &= u8::MAX << (8 - keep);
+        }
+      }
       Ok(GenerateKeyOutput::Symmetric {
         algorithm_name: name,
         length: Some(length),
@@ -786,7 +792,7 @@ fn read_string_member<'s>(
     v8::NewStringType::Internalized,
   )?;
   let v = obj.get(scope, key.into())?;
-  if v.is_undefined() || v.is_null() {
+  if v.is_undefined() {
     return None;
   }
   Some(v.to_rust_string_lossy(scope))
@@ -803,7 +809,7 @@ fn read_u32_member<'s>(
     v8::NewStringType::Internalized,
   )?;
   let v = obj.get(scope, key.into())?;
-  if v.is_undefined() || v.is_null() {
+  if v.is_undefined() {
     return None;
   }
   v.uint32_value(scope)
@@ -855,20 +861,24 @@ fn read_hash_name<'s>(
     v8::NewStringType::Internalized,
   )?;
   let v = obj.get(scope, key.into())?;
-  if v.is_undefined() || v.is_null() {
+  if v.is_undefined() {
     return None;
   }
   if v.is_string() {
     return Some(v.to_rust_string_lossy(scope));
   }
-  let hash_obj = v8::Local::<v8::Object>::try_from(v).ok()?;
-  let name_key = v8::String::new_from_one_byte(
-    scope,
-    b"name",
-    v8::NewStringType::Internalized,
-  )?;
-  let name_val = hash_obj.get(scope, name_key.into())?;
-  Some(name_val.to_string(scope)?.to_rust_string_lossy(scope))
+  if !v.is_null()
+    && let Ok(hash_obj) = v8::Local::<v8::Object>::try_from(v)
+  {
+    let name_key = v8::String::new_from_one_byte(
+      scope,
+      b"name",
+      v8::NewStringType::Internalized,
+    )?;
+    let name_val = hash_obj.get(scope, name_key.into())?;
+    return Some(name_val.to_string(scope)?.to_rust_string_lossy(scope));
+  }
+  Some(v.to_string(scope)?.to_rust_string_lossy(scope))
 }
 
 fn public_exponent_from_pkcs1(pkcs1_der: &[u8]) -> Vec<u8> {

@@ -4,6 +4,7 @@ use base64::Engine;
 use deno_core::JsBuffer;
 use deno_core::ToV8;
 use deno_core::convert::Uint8Array;
+use elliptic_curve::pkcs8::DecodePrivateKey;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
 use p256::pkcs8::EncodePrivateKey;
 use rsa::pkcs1::UintRef;
@@ -785,6 +786,21 @@ fn import_key_ec(
         return Err(ImportKeyError::CurveMismatch);
       }
 
+      match named_curve {
+        EcNamedCurve::P256 => {
+          p256::SecretKey::from_pkcs8_der(&data)
+            .map_err(|_| ImportKeyError::InvalidKeyData)?;
+        }
+        EcNamedCurve::P384 => {
+          p384::SecretKey::from_pkcs8_der(&data)
+            .map_err(|_| ImportKeyError::InvalidKeyData)?;
+        }
+        EcNamedCurve::P521 => {
+          p521::SecretKey::from_pkcs8_der(&data)
+            .map_err(|_| ImportKeyError::InvalidKeyData)?;
+        }
+      }
+
       Ok(ImportKeyResult::Ec {
         raw_data: RustRawKeyData::Private(data.to_vec().into()),
       })
@@ -825,6 +841,10 @@ fn import_key_ec(
       let encoded_key;
 
       if let Some(pk_named_curve) = pk_named_curve {
+        if named_curve != pk_named_curve {
+          return Err(ImportKeyError::CurveMismatch);
+        }
+
         let pk = pk_info.subject_public_key;
 
         encoded_key = pk.raw_bytes().to_vec();
@@ -863,11 +883,6 @@ fn import_key_ec(
 
         if bytes_consumed != pk_info.subject_public_key.raw_bytes().len() {
           return Err(ImportKeyError::PublicKeyTooLong);
-        }
-
-        // 11.
-        if named_curve != pk_named_curve {
-          return Err(ImportKeyError::CurveMismatch);
         }
       } else {
         return Err(ImportKeyError::UnsupportedNamedCurve);

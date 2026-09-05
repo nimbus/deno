@@ -455,7 +455,9 @@ pub fn run(
     }
     SubtleDecryptParams::AesCbc { iv } => {
       if iv.len() != 16 {
-        return Err(op_error("Counter must be 16 bytes".to_string()));
+        return Err(op_error(
+          "Initialization vector must be 16 bytes".to_string(),
+        ));
       }
       let length = key.algorithm_length.ok_or_else(|| {
         op_error("AES-CBC key is missing 'length'".to_string())
@@ -498,12 +500,6 @@ pub fn run(
       };
       if data.len() < (tag_length / 8) as usize {
         return Err(op_error("The provided data is too small".to_string()));
-      }
-      let iv_len = iv.len();
-      if iv_len != 12 && iv_len != 16 {
-        return Err(not_supported(
-          "Initialization vector length not supported".to_string(),
-        ));
       }
       let key_length = key.algorithm_length.ok_or_else(|| {
         op_error("AES-GCM key is missing 'length'".to_string())
@@ -595,10 +591,6 @@ fn invalid_access(msg: String) -> CryptoError {
 
 fn op_error(msg: String) -> CryptoError {
   CryptoError::Other(JsErrorBox::new("DOMExceptionOperationError", msg))
-}
-
-fn not_supported(msg: String) -> CryptoError {
-  CryptoError::Other(JsErrorBox::new("DOMExceptionNotSupportedError", msg))
 }
 
 fn decrypt_error_to_crypto(e: decrypt::DecryptError) -> CryptoError {

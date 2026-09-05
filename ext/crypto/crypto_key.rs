@@ -6,7 +6,7 @@
 //! state -- `type`, `extractable`, `algorithm`, `usages`, and the internal
 //! handle pointing at the key material in [`crate::key_store`] -- all live
 //! on this Rust struct. The JS shim only attaches the inspector hook and
-//! the structured-clone `hostObjectBrand` to the prototype/instance.
+//! supplies the public prototype used by the native instance prototype.
 
 use std::ffi::CStr;
 
@@ -107,6 +107,46 @@ impl CryptoKey {
     scope: &mut v8::PinScope<'s, '_>,
   ) -> v8::Local<'s, v8::Value> {
     v8::Local::new(scope, &self.public_algorithm)
+  }
+
+  /// Internal, unforgeable `CryptoKey.isKey(value)` brand check for Node's
+  /// `util.types.isCryptoKey()` and `KeyObject.from()` bridges.
+  #[fast]
+  #[rename("isKey")]
+  #[required(1)]
+  #[static_method]
+  fn is_key(
+    scope: &mut v8::PinScope<'_, '_>,
+    value: v8::Local<v8::Value>,
+  ) -> bool {
+    try_unwrap_cppgc_object::<CryptoKey>(scope, value).is_some()
+  }
+
+  /// Compare the native key material without exposing a JavaScript-visible
+  /// symbol or accessor. Node's deep-equality implementation combines this
+  /// result with the immutable metadata snapshot below.
+  #[fast]
+  #[rename("materialEquals")]
+  #[required(2)]
+  #[static_method]
+  fn material_equals(
+    scope: &mut v8::PinScope<'_, '_>,
+    left: v8::Local<v8::Value>,
+    right: v8::Local<v8::Value>,
+  ) -> bool {
+    let Some(left) = try_unwrap_cppgc_object::<CryptoKey>(scope, left) else {
+      return false;
+    };
+    let Some(right) = try_unwrap_cppgc_object::<CryptoKey>(scope, right) else {
+      return false;
+    };
+    let Some(left_handle) = left.key_handle(scope) else {
+      return false;
+    };
+    let Some(right_handle) = right.key_handle(scope) else {
+      return false;
+    };
+    left_handle.data() == right_handle.data()
   }
 
   /// Internal immutable-slot view used by the custom inspector. Public
@@ -297,6 +337,10 @@ impl CryptoKey {
 impl CryptoKey {
   /// Construct a `CryptoKey` from its slot values. Used by the Rust-side
   /// `make_crypto_key` helper that replaces the legacy JS `constructKey`.
+  #[allow(
+    clippy::too_many_arguments,
+    reason = "constructor mirrors the eight immutable and public CryptoKey slots"
+  )]
   pub fn from_parts(
     scope: &mut v8::PinScope<'_, '_>,
     key_type: CryptoKeyType,

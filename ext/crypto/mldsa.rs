@@ -11,6 +11,9 @@ use aws_lc_rs::unstable::signature::ML_DSA_87_SIGNING;
 use aws_lc_rs::unstable::signature::PqdsaKeyPair;
 use aws_lc_rs::unstable::signature::PqdsaSigningAlgorithm;
 use aws_lc_rs::unstable::signature::PqdsaVerificationAlgorithm;
+use fips204::traits::SerDes as _;
+use fips204::traits::Signer as _;
+use fips204::traits::Verifier as _;
 use spki::der::Encode;
 use spki::der::asn1::BitString;
 
@@ -25,9 +28,6 @@ pub enum MlDsaError {
   #[class("DOMExceptionOperationError")]
   #[error("Signing failed")]
   SigningFailed,
-  #[class("DOMExceptionNotSupportedError")]
-  #[error("Non-empty context is not supported")]
-  ContextNotSupported,
   #[class("DOMExceptionNotSupportedError")]
   #[error("unsupported ML-DSA PKCS#8 private key format")]
   UnsupportedPkcs8Format,
@@ -357,8 +357,9 @@ pub(crate) fn mldsa_sign(
   context: Option<&[u8]>,
 ) -> Result<Vec<u8>, MlDsaError> {
   let p = params(variant)?;
-  if context.is_some_and(|c| !c.is_empty()) {
-    return Err(MlDsaError::ContextNotSupported);
+  let context = context.unwrap_or_default();
+  if !context.is_empty() {
+    return mldsa_sign_with_context(variant, private_key_bytes, data, context);
   }
   let key_pair =
     PqdsaKeyPair::from_raw_private_key(p.signing, private_key_bytes)
@@ -383,12 +384,81 @@ pub(crate) fn mldsa_verify(
   let Ok(p) = params(variant) else {
     return false;
   };
-  if context.is_some_and(|c| !c.is_empty()) {
-    return false;
+  let context = context.unwrap_or_default();
+  if !context.is_empty() {
+    return mldsa_verify_with_context(
+      variant,
+      public_key_bytes,
+      data,
+      signature,
+      context,
+    );
   }
   UnparsedPublicKey::new(p.verifying, public_key_bytes)
     .verify(data, signature)
     .is_ok()
+}
+
+fn mldsa_sign_with_context(
+  variant: u8,
+  private_key_bytes: &[u8],
+  data: &[u8],
+  context: &[u8],
+) -> Result<Vec<u8>, MlDsaError> {
+  macro_rules! sign {
+    ($module:ident) => {{
+      let bytes: [u8; fips204::$module::SK_LEN] = private_key_bytes
+        .try_into()
+        .map_err(|_| MlDsaError::InvalidKeyData)?;
+      let key = fips204::$module::PrivateKey::try_from_bytes(bytes)
+        .map_err(|_| MlDsaError::InvalidKeyData)?;
+      key
+        .try_sign(data, context)
+        .map(|signature| signature.to_vec())
+        .map_err(|_| MlDsaError::SigningFailed)
+    }};
+  }
+
+  match variant {
+    0 => sign!(ml_dsa_44),
+    1 => sign!(ml_dsa_65),
+    2 => sign!(ml_dsa_87),
+    _ => Err(MlDsaError::UnknownVariant),
+  }
+}
+
+fn mldsa_verify_with_context(
+  variant: u8,
+  public_key_bytes: &[u8],
+  data: &[u8],
+  signature: &[u8],
+  context: &[u8],
+) -> bool {
+  macro_rules! verify {
+    ($module:ident) => {{
+      let Ok(bytes): Result<[u8; fips204::$module::PK_LEN], _> =
+        public_key_bytes.try_into()
+      else {
+        return false;
+      };
+      let Ok(signature): Result<[u8; fips204::$module::SIG_LEN], _> =
+        signature.try_into()
+      else {
+        return false;
+      };
+      let Ok(key) = fips204::$module::PublicKey::try_from_bytes(bytes) else {
+        return false;
+      };
+      key.verify(data, &signature, context)
+    }};
+  }
+
+  match variant {
+    0 => verify!(ml_dsa_44),
+    1 => verify!(ml_dsa_65),
+    2 => verify!(ml_dsa_87),
+    _ => false,
+  }
 }
 
 trait AsRawBytesVec {

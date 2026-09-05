@@ -102,6 +102,11 @@ const {
 // from `opts` -- never mutate -- so a shared frozen object is safe.
 const EMPTY_OPTS = ObjectFreeze({ __proto__: null });
 
+function optionEnabled(opts, name) {
+  return opts !== null && opts !== undefined && ObjectHasOwn(opts, name) &&
+    opts[name];
+}
+
 function makeException(ErrorType, message, prefix, context, code = undefined) {
   const err = new ErrorType(
     `${prefix ? prefix + ": " : ""}${context ? context : "Value"} ${message}`,
@@ -217,7 +222,7 @@ function createIntegerConversion(bitLength, typeOpts) {
     let x = toNumber(V);
     x = censorNegativeZero(x);
 
-    if (opts && opts.enforceRange) {
+    if (optionEnabled(opts, "enforceRange")) {
       if (!NumberIsFinite(x)) {
         throw makeException(
           TypeError,
@@ -241,7 +246,7 @@ function createIntegerConversion(bitLength, typeOpts) {
       return x;
     }
 
-    if (!NumberIsNaN(x) && opts && opts.clamp) {
+    if (!NumberIsNaN(x) && optionEnabled(opts, "clamp")) {
       x = MathMin(MathMax(x, lowerBound), upperBound);
       x = evenRound(x);
       return x;
@@ -276,7 +281,7 @@ function createLongLongConversion(bitLength, { unsigned }) {
     let x = toNumber(V);
     x = censorNegativeZero(x);
 
-    if (opts && opts.enforceRange) {
+    if (optionEnabled(opts, "enforceRange")) {
       if (!NumberIsFinite(x)) {
         throw makeException(
           TypeError,
@@ -300,7 +305,7 @@ function createLongLongConversion(bitLength, { unsigned }) {
       return x;
     }
 
-    if (!NumberIsNaN(x) && opts && opts.clamp) {
+    if (!NumberIsNaN(x) && optionEnabled(opts, "clamp")) {
       x = MathMin(MathMax(x, lowerBound), upperBound);
       x = evenRound(x);
       return x;
@@ -420,7 +425,7 @@ converters["unrestricted double?"] = createNullableConverter(
 converters.DOMString = function (V, _prefix, _context, opts) {
   if (typeof V === "string") {
     return V;
-  } else if (V === null && opts && opts.treatNullAsEmptyString) {
+  } else if (V === null && optionEnabled(opts, "treatNullAsEmptyString")) {
     return "";
   } else if (typeof V === "symbol") {
     // V8's `String(sym)` returns the symbol description rather than throwing,
@@ -497,7 +502,7 @@ converters.ArrayBuffer = (
   opts = EMPTY_OPTS,
 ) => {
   if (!isArrayBuffer(V)) {
-    if (opts.allowShared && !isSharedArrayBuffer(V)) {
+    if (optionEnabled(opts, "allowShared") && !isSharedArrayBuffer(V)) {
       throw makeException(
         TypeError,
         "is not an ArrayBuffer or SharedArrayBuffer",
@@ -532,7 +537,7 @@ converters.DataView = (
   }
 
   if (
-    !opts.allowShared &&
+    !optionEnabled(opts, "allowShared") &&
     isSharedArrayBuffer(DataViewPrototypeGetBuffer(V))
   ) {
     throw makeException(
@@ -580,7 +585,7 @@ ArrayPrototypeForEach(
         );
       }
       if (
-        !opts.allowShared &&
+        !optionEnabled(opts, "allowShared") &&
         isSharedArrayBuffer(TypedArrayPrototypeGetBuffer(V))
       ) {
         throw makeException(
@@ -619,7 +624,7 @@ converters.ArrayBufferView = (
   } else {
     buffer = DataViewPrototypeGetBuffer(V);
   }
-  if (!opts.allowShared && isSharedArrayBuffer(buffer)) {
+  if (!optionEnabled(opts, "allowShared") && isSharedArrayBuffer(buffer)) {
     throw makeException(
       TypeError,
       "is a view on a SharedArrayBuffer, which is not allowed",
@@ -644,7 +649,9 @@ converters.BufferSource = (
     } else {
       buffer = DataViewPrototypeGetBuffer(V);
     }
-    if (!opts.allowShared && isSharedArrayBuffer(buffer)) {
+    if (
+      !optionEnabled(opts, "allowShared") && isSharedArrayBuffer(buffer)
+    ) {
       throw makeException(
         TypeError,
         "is a view on a SharedArrayBuffer, which is not allowed",
@@ -656,7 +663,7 @@ converters.BufferSource = (
     return V;
   }
 
-  if (!opts.allowShared && !isArrayBuffer(V)) {
+  if (!optionEnabled(opts, "allowShared") && !isArrayBuffer(V)) {
     throw makeException(
       TypeError,
       "is not an ArrayBuffer or a view on one",
@@ -666,7 +673,7 @@ converters.BufferSource = (
     );
   }
   if (
-    opts.allowShared &&
+    optionEnabled(opts, "allowShared") &&
     !isSharedArrayBuffer(V) &&
     !isArrayBuffer(V)
   ) {

@@ -117,7 +117,7 @@ pub enum RustRawKeyData {
 /// `{ seed, private_key }` material used by the FIPS 203/204 algorithms
 /// (ML-KEM decapsulation keys and ML-DSA signing keys), where `private_key`
 /// is the expanded key bytes and `seed` is the short seed used to derive them.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RawKeyData {
   Secret(Box<[u8]>),
   Private(Box<[u8]>),

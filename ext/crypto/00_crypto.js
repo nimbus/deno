@@ -15,7 +15,7 @@
 // forwarder that gives the spec-mandated `Function.length === 2`.
 
 (function () {
-const { core, primordials, internals } = __bootstrap;
+const { core, primordials } = __bootstrap;
 const {
   op_crypto_error_policy,
   op_crypto_is_seeded,
@@ -25,34 +25,41 @@ const {
   SubtleCrypto,
 } = core.ops;
 const {
+  ArrayBufferIsView,
+  ArrayBufferPrototypeGetByteLength,
+  ArrayIsArray,
+  ArrayPrototypeIncludes,
+  DataViewPrototypeGetByteLength,
+  Error,
   FunctionPrototypeCall,
+  NumberIsFinite,
+  NumberIsInteger,
   ObjectAssign,
   ObjectCreate,
   ObjectDefineProperty,
   ObjectGetOwnPropertyDescriptor,
   ObjectHasOwn,
   ObjectPrototypeIsPrototypeOf,
+  Promise,
+  PromisePrototypeCatch,
   SafeArrayIterator,
   StringPrototypeIncludes,
   StringPrototypeSlice,
   StringPrototypeToUpperCase,
-  Symbol,
   SymbolFor,
+  TypedArrayPrototypeGetSymbolToStringTag,
+  TypedArrayPrototypeGetByteLength,
   TypeError,
 } = primordials;
+const { isAnyArrayBuffer, isTypedArray } = core;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
 const { createFilteredInspectProxy } = core.loadExtScript(
   "ext:deno_web/01_console.js",
 );
-// WebCrypto can mint keys before node:crypto loads its constants module.
-// Establish the shared private brand here so both modules use one symbol and
-// every key is recognizable by KeyObject.from(), regardless of import order.
-const kKeyObject = internals.kKeyObject === undefined
-  ? Symbol("kKeyObject")
-  : internals.kKeyObject;
-internals.kKeyObject = kKeyObject;
-
+const { DOMException } = core.loadExtScript(
+  "ext:deno_web/01_dom_exception.js",
+);
 // op2-generated interface constructors expose the macro's internal
 // new-target signal (`_: bool`) as a formal parameter, giving the
 // constructor's `.length` a value of 1. Per Web IDL, the interface
@@ -137,8 +144,8 @@ ObjectDefineProperty(
 webidl.configureInterface(CryptoKey);
 applyWebIdlInterfaceShape(CryptoKey);
 
-// Structured-clone resurrection. The host-object brand stamped onto every
-// CryptoKey by `make_crypto_key` (`ext/crypto/make_key.rs`) returns a
+// Structured-clone resurrection. The inherited host-object hook installed by
+// `make_crypto_key` (`ext/crypto/make_key.rs`) returns a
 // snapshot with shape `{ type: "CryptoKey", keyType, extractable, usages,
 // algorithm, keyData }`; the static method `CryptoKey.fromCloneData(data)`
 // (`ext/crypto/node_interop.rs::from_clone_data`) parses the snapshot back
@@ -165,6 +172,7 @@ const cppgcDeriveBits = SubtleCryptoPrototype.deriveBits;
 
 const WEB_CRYPTO_ERROR_POLICY_WEB_STANDARD = 0;
 const WEB_CRYPTO_ERROR_POLICY_NODE22 = 1;
+const WEB_CRYPTO_ERROR_POLICY_NODE24 = 2;
 
 function tagNodeErrorCode(error, code) {
   if (
@@ -197,6 +205,56 @@ function rawAlgorithmName(algorithm) {
 
 function hasRequiredOption(algorithm, name) {
   return ObjectHasOwn(algorithm, name) && algorithm[name] !== undefined;
+}
+
+function isSupportedKeyFormat(format) {
+  return typeof format === "string" && ArrayPrototypeIncludes(
+    [
+      "jwk",
+      "pkcs8",
+      "raw",
+      "raw-private",
+      "raw-public",
+      "raw-secret",
+      "raw-seed",
+      "spki",
+    ],
+    format,
+  );
+}
+
+function isSecretKeyAlgorithm(algorithm) {
+  return ArrayPrototypeIncludes(
+    [
+      "AES-CBC",
+      "AES-CTR",
+      "AES-GCM",
+      "AES-KW",
+      "AES-OCB",
+      "CHACHA20-POLY1305",
+      "HKDF",
+      "HMAC",
+      "KMAC128",
+      "KMAC256",
+      "PBKDF2",
+    ],
+    rawAlgorithmName(algorithm),
+  );
+}
+
+function rsaPublicExponentValue(input) {
+  let firstNonZero = 0;
+  while (firstNonZero < input.length && input[firstNonZero] === 0) {
+    firstNonZero++;
+  }
+  if (input.length - firstNonZero > 4) {
+    return undefined;
+  }
+  let result = 0;
+  for (let index = firstNonZero; index < input.length; index++) {
+    result = result * 256 + input[index];
+  }
+  return result;
 }
 
 function isGenerateKeyMissingRequiredOption(algorithm) {
@@ -256,7 +314,8 @@ function isDeriveInvalidPublicOption(algorithm) {
 function nodeOperationErrorMessage(methodName, args, policy) {
   if (
     methodName !== "encrypt" && methodName !== "decrypt" &&
-    methodName !== "sign" && methodName !== "verify"
+    methodName !== "sign" && methodName !== "verify" &&
+    methodName !== "wrapKey" && methodName !== "unwrapKey"
   ) {
     return undefined;
   }
@@ -266,9 +325,15 @@ function nodeOperationErrorMessage(methodName, args, policy) {
       : `Unable to use this key to ${methodName}`;
   }
 
-  const key = args[1];
+  const key = methodName === "wrapKey" || methodName === "unwrapKey"
+    ? args[2]
+    : args[1];
   if (ObjectPrototypeIsPrototypeOf(CryptoKeyPrototype, key)) {
-    const requestedName = rawAlgorithmName(args[0]);
+    const requestedName = rawAlgorithmName(
+      methodName === "wrapKey" || methodName === "unwrapKey"
+        ? args[3]
+        : args[0],
+    );
     const keyName = rawAlgorithmName(CryptoKey.inspectSnapshot(key).algorithm);
     if (requestedName !== undefined && requestedName !== keyName) {
       return "Key algorithm mismatch";
@@ -277,16 +342,145 @@ function nodeOperationErrorMessage(methodName, args, policy) {
   return `Unable to use this key to ${methodName}`;
 }
 
-function decorateNodeWebCryptoError(methodName, args, error) {
+function rsaPssHashLengthBytes(name) {
+  switch (rawAlgorithmName(name)) {
+    case "SHA-1":
+      return 20;
+    case "SHA-256":
+    case "SHA3-256":
+      return 32;
+    case "SHA-384":
+    case "SHA3-384":
+      return 48;
+    case "SHA-512":
+    case "SHA3-512":
+      return 64;
+    default:
+      return undefined;
+  }
+}
+
+function nodeRsaPssSaltLengthError(methodName, args) {
+  if (
+    (methodName !== "sign" && methodName !== "verify") ||
+    rawAlgorithmName(args[0]) !== "RSA-PSS" ||
+    !CryptoKey.isKey(args[1])
+  ) {
+    return undefined;
+  }
+  const snapshot = CryptoKey.inspectSnapshot(args[1]);
+  const modulusLength = snapshot.algorithm.modulusLength;
+  const hashLength = rsaPssHashLengthBytes(snapshot.algorithm.hash);
+  const saltLength = args[0]?.saltLength;
+  if (
+    typeof modulusLength !== "number" ||
+    hashLength === undefined ||
+    typeof saltLength !== "number"
+  ) {
+    return undefined;
+  }
+  const max = modulusLength / 8 - hashLength - 2;
+  if (saltLength <= max) {
+    return undefined;
+  }
+  const message =
+    `The value of "algorithm.saltLength" is out of range. It must be >= 0 && <= ${max}. Received ${saltLength}`;
+  const cause = new Error(message);
+  tagNodeErrorCode(cause, "ERR_OUT_OF_RANGE");
+  const operationError = new DOMException(message, "OperationError");
+  ObjectDefineProperty(operationError, "cause", {
+    __proto__: null,
+    value: cause,
+    configurable: true,
+  });
+  return operationError;
+}
+
+function decorateNodeWebCryptoError(methodName, args, error, argumentCount) {
   const policy = op_crypto_error_policy();
   if (policy === WEB_CRYPTO_ERROR_POLICY_WEB_STANDARD) {
     return error;
   }
+  if (error?.code === "ERR_INVALID_THIS") {
+    return error;
+  }
 
   const algorithm = args[0];
+  const rsaPssSaltLengthError = nodeRsaPssSaltLengthError(methodName, args);
+  if (rsaPssSaltLengthError !== undefined) {
+    return rsaPssSaltLengthError;
+  }
+  if (methodName === "importKey" && args.length < 5) {
+    return tagNodeErrorCode(error, "ERR_MISSING_ARGS");
+  }
   if (
-    methodName === "digest" && error?.name === "TypeError" &&
-    StringPrototypeIncludes(error.message, "BufferSource")
+    methodName === "deriveBits" && error?.name === "TypeError" &&
+    typeof args[2] === "number" &&
+    (!NumberIsFinite(args[2]) || args[2] < 0 || args[2] > 0xffff_ffff)
+  ) {
+    return tagNodeErrorCode(error, "ERR_OUT_OF_RANGE");
+  }
+  if (methodName === "importKey" && !isSupportedKeyFormat(args[0])) {
+    return tagNodeErrorCode(error, "ERR_INVALID_ARG_VALUE");
+  }
+  if (methodName === "deriveBits" && error?.name === "OperationError") {
+    let message;
+    if (args[2] === null || argumentCount < 3) {
+      message = "length cannot be null";
+    } else if (
+      StringPrototypeIncludes(
+        error.message,
+        "length provided for HKDF is too large",
+      )
+    ) {
+      message = "length exceeds the maximum derived bit length";
+    } else if (
+      typeof args[2] === "number" &&
+      !NumberIsInteger(args[2] / 8)
+    ) {
+      message = "length must be a multiple of 8";
+    }
+    if (message !== undefined) {
+      ObjectDefineProperty(error, "message", {
+        __proto__: null,
+        value: message,
+        configurable: true,
+      });
+      return error;
+    }
+  }
+  if (
+    methodName === "importKey" && args[0] === "jwk" &&
+    error?.name === "TypeError" &&
+    (args[1] === null || typeof args[1] !== "object")
+  ) {
+    return new DOMException("Invalid keyData", "DataError");
+  }
+  if (
+    methodName === "generateKey" && algorithm !== null &&
+    typeof algorithm === "object" &&
+    ArrayPrototypeIncludes(
+      ["RSA-OAEP", "RSA-PSS", "RSASSA-PKCS1-V1_5"],
+      rawAlgorithmName(algorithm),
+    ) &&
+    ((ObjectHasOwn(algorithm, "modulusLength") &&
+      typeof algorithm.modulusLength !== "number") ||
+      (ObjectHasOwn(algorithm, "publicExponent") &&
+        TypedArrayPrototypeGetSymbolToStringTag(algorithm.publicExponent) !==
+          "Uint8Array"))
+  ) {
+    return tagNodeErrorCode(error, "ERR_INVALID_ARG_TYPE");
+  }
+  if (methodName === "generateKey" && !ArrayIsArray(args[2])) {
+    return tagNodeErrorCode(error, "ERR_INVALID_ARG_TYPE");
+  }
+  if (
+    error?.name === "TypeError" &&
+    (methodName === "importKey" ||
+      (methodName === "generateKey" &&
+        !isGenerateKeyMissingRequiredOption(algorithm)) ||
+      (methodName === "digest" &&
+        StringPrototypeIncludes(error.message, "BufferSource")))
   ) {
     return tagNodeErrorCode(error, "ERR_INVALID_ARG_TYPE");
   }
@@ -295,6 +489,43 @@ function decorateNodeWebCryptoError(methodName, args, error) {
     isGenerateKeyMissingRequiredOption(algorithm)
   ) {
     return tagNodeErrorCode(error, "ERR_MISSING_OPTION");
+  }
+  if (
+    methodName === "generateKey" && error?.name === "OperationError" &&
+    algorithm !== null && typeof algorithm === "object" &&
+    ArrayPrototypeIncludes(
+      ["RSA-OAEP", "RSA-PSS", "RSASSA-PKCS1-V1_5"],
+      rawAlgorithmName(algorithm),
+    )
+  ) {
+    let message;
+    if (
+      typeof algorithm.modulusLength === "number" &&
+      algorithm.modulusLength < 512
+    ) {
+      message = "algorithm.modulusLength must be at least 512";
+    } else if (
+      TypedArrayPrototypeGetSymbolToStringTag(algorithm.publicExponent) ===
+        "Uint8Array"
+    ) {
+      const publicExponent = rsaPublicExponentValue(algorithm.publicExponent);
+      if (publicExponent === undefined) {
+        message =
+          "algorithm.publicExponent must fit in an unsigned 32-bit integer";
+      } else if (publicExponent < 3) {
+        message = "algorithm.publicExponent must be at least 3";
+      } else if (publicExponent % 2 === 0) {
+        message = "algorithm.publicExponent must be odd";
+      }
+    }
+    if (message !== undefined) {
+      ObjectDefineProperty(error, "message", {
+        __proto__: null,
+        value: message,
+        configurable: true,
+      });
+      return error;
+    }
   }
   if (
     (methodName === "deriveBits" || methodName === "deriveKey") &&
@@ -309,13 +540,22 @@ function decorateNodeWebCryptoError(methodName, args, error) {
     return tagNodeErrorCode(error, "ERR_INVALID_ARG_TYPE");
   }
   if (
+    error?.name === "TypeError" &&
+    StringPrototypeIncludes(error.message, "CryptoKey")
+  ) {
+    return tagNodeErrorCode(error, "ERR_INVALID_THIS");
+  }
+  if (
     (methodName === "deriveBits" || methodName === "deriveKey") &&
     error?.name === "InvalidAccessError" &&
-    error.message === "Algorithm mismatch"
+    (error.message === "Algorithm mismatch" ||
+      StringPrototypeIncludes(error.message, "Invalid algorithm name"))
   ) {
     ObjectDefineProperty(error, "message", {
       __proto__: null,
-      value: policy === WEB_CRYPTO_ERROR_POLICY_NODE22
+      value: StringPrototypeIncludes(error.message, "Invalid algorithm name")
+        ? "Key algorithm mismatch"
+        : policy === WEB_CRYPTO_ERROR_POLICY_NODE22
         ? "algorithm.public must be an ECDH key"
         : "key algorithm mismatch",
       configurable: true,
@@ -347,11 +587,235 @@ function decorateNodeWebCryptoError(methodName, args, error) {
     return error;
   }
   if (
+    error?.name === "SyntaxError" &&
+    (error.message === "Invalid key usage" ||
+      error.message === "Key usage must be empty")
+  ) {
+    const importAlgorithmName = methodName === "importKey"
+      ? rawAlgorithmName(args[2])
+      : undefined;
+    const message = methodName === "importKey" &&
+        (args[0] === "pkcs8" || args[0] === "raw-private" ||
+          args[0] === "raw-seed" ||
+          (args[0] === "jwk" && args[1] !== null &&
+            typeof args[1] === "object" &&
+            (ObjectHasOwn(args[1], "d") || ObjectHasOwn(args[1], "priv")))) &&
+        args[4]?.length === 0
+      ? "Usages cannot be empty when importing a private key."
+      : methodName === "importKey" && args[4]?.length === 0 &&
+          (args[0] === "raw-secret" || isSecretKeyAlgorithm(args[2]))
+      ? "Usages cannot be empty when importing a secret key."
+      : importAlgorithmName === "HMAC"
+      ? "Unsupported key usage for HMAC key"
+      : importAlgorithmName === "HKDF"
+      ? "Unsupported key usage for a HKDF key"
+      : importAlgorithmName === "AES-CTR" ||
+          importAlgorithmName === "AES-CBC" ||
+          importAlgorithmName === "AES-GCM" ||
+          importAlgorithmName === "AES-KW" ||
+          importAlgorithmName === "AES-OCB"
+      ? `Unsupported key usage for ${importAlgorithmName} key`
+      : "Unsupported key usage";
+    ObjectDefineProperty(error, "message", {
+      __proto__: null,
+      value: message,
+      configurable: true,
+    });
+    return error;
+  }
+  if (
     methodName === "importKey" && rawAlgorithmName(args[2]) === "HMAC" &&
     args[2] !== null && typeof args[2] === "object" &&
     !ObjectHasOwn(args[2], "hash")
   ) {
     return tagNodeErrorCode(error, "ERR_MISSING_OPTION");
+  }
+  if (
+    methodName === "importKey" && rawAlgorithmName(args[2]) === "HMAC" &&
+    error?.name === "DataError" && error.message === "Key length is invalid"
+  ) {
+    ObjectDefineProperty(error, "message", {
+      __proto__: null,
+      value: args[2]?.length === 0
+        ? "HmacImportParams.length cannot be 0"
+        : "Invalid key length",
+      configurable: true,
+    });
+    return error;
+  }
+  if (
+    methodName === "importKey" && error?.name === "DataError" &&
+    (error.message === "invalid key data" ||
+      error.message === "Invalid key data")
+  ) {
+    ObjectDefineProperty(error, "message", {
+      __proto__: null,
+      value: "Invalid keyData",
+      configurable: true,
+    });
+    return error;
+  }
+  if (
+    methodName === "importKey" &&
+    args[0] === "jwk"
+  ) {
+    const keyData = args[1];
+    let message;
+    if (StringPrototypeIncludes(error.message, "not a JsonWebKey")) {
+      message = "Invalid keyData";
+    } else if (
+      StringPrototypeIncludes(
+        error.message,
+        "property of JsonWebKey is required",
+      ) ||
+      StringPrototypeIncludes(error.message, "'k' property") ||
+      StringPrototypeIncludes(error.message, "'x' property") ||
+      StringPrototypeIncludes(error.message, "'y' property")
+    ) {
+      message = "Invalid keyData";
+    } else if (error.message === "Invalid algorithm") {
+      message = keyData?.alg === undefined
+        ? "Invalid keyData"
+        : 'JWK "alg" Parameter and algorithm name mismatch';
+    } else if (
+      StringPrototypeIncludes(error.message, "'kty' property") ||
+      error.message === "Invalid key type"
+    ) {
+      message = keyData !== null && typeof keyData === "object" &&
+          ObjectHasOwn(keyData, "kty")
+        ? 'Invalid JWK "kty" Parameter'
+        : "Invalid keyData";
+    } else if (
+      StringPrototypeIncludes(error.message, "'use' property") ||
+      error.message === "Invalid key use" ||
+      error.message === "Invalid key usage"
+    ) {
+      message = 'Invalid JWK "use" Parameter';
+    } else if (
+      StringPrototypeIncludes(error.message, "'ext' property") ||
+      error.message === "Invalid key extractability"
+    ) {
+      message = 'JWK "ext" Parameter and extractable mismatch';
+    } else if (
+      StringPrototypeIncludes(error.message, "'alg' property") ||
+      StringPrototypeIncludes(error.message, "Invalid algorithm:") ||
+      error.message === "Invalid JWK alg" ||
+      error.message === "Mismatched curve algorithm" ||
+      error.message === "Curve algorithm not supported"
+    ) {
+      message = 'JWK "alg" does not match the requested algorithm';
+    } else if (error.message === "Invalid curve") {
+      message = keyData?.crv === undefined
+        ? "Invalid keyData"
+        : rawAlgorithmName(args[2]) === "ECDSA" ||
+            rawAlgorithmName(args[2]) === "ECDH"
+        ? 'JWK "crv" does not match the requested algorithm'
+        : 'JWK "crv" Parameter and algorithm name mismatch';
+    } else if (StringPrototypeIncludes(error.message, "'key_ops'")) {
+      message = "Key operations and usage mismatch";
+    } else if (
+      error.message === "Invalid public key data" ||
+      error.message === "Invalid private key data" ||
+      error.message === "Invalid key data"
+    ) {
+      message = "Invalid keyData";
+    }
+    if (message !== undefined) {
+      ObjectDefineProperty(error, "message", {
+        __proto__: null,
+        value: message,
+        configurable: true,
+      });
+      return error;
+    }
+  }
+  if (
+    methodName === "exportKey" &&
+    error?.name === "InvalidAccessError" &&
+    error.message === "Key is not extractable"
+  ) {
+    ObjectDefineProperty(error, "message", {
+      __proto__: null,
+      value: "key is not extractable",
+      configurable: true,
+    });
+    return error;
+  }
+  if (
+    (methodName === "exportKey" || methodName === "wrapKey") &&
+    error?.name === "InvalidAccessError" &&
+    (error.message === "Key is not a public key" ||
+      error.message === "Key is not a private key") &&
+    CryptoKey.isKey(args[1])
+  ) {
+    const snapshot = CryptoKey.inspectSnapshot(args[1]);
+    return new DOMException(
+      `Unable to export ${
+        rawAlgorithmName(snapshot.algorithm)
+      } ${snapshot.type} key using ${args[0]} format`,
+      "NotSupportedError",
+    );
+  }
+  if (
+    (methodName === "encrypt" || methodName === "decrypt") &&
+    error?.name === "OperationError"
+  ) {
+    let message;
+    if (
+      rawAlgorithmName(algorithm) === "CHACHA20-POLY1305" &&
+      StringPrototypeIncludes(error.message, "tagLength")
+    ) {
+      message =
+        `${algorithm.tagLength} is not a valid ChaCha20-Poly1305 tag length`;
+    } else if (
+      rawAlgorithmName(algorithm) === "AES-CBC" &&
+      error.message === "Initialization vector must be 16 bytes"
+    ) {
+      message = "algorithm.iv must contain exactly 16 bytes";
+    } else if (
+      (rawAlgorithmName(algorithm) === "AES-GCM" ||
+        rawAlgorithmName(algorithm) === "AES-OCB") &&
+      (StringPrototypeIncludes(error.message, "tagLength") ||
+        StringPrototypeIncludes(error.message, "tag length"))
+    ) {
+      message = `${algorithm.tagLength} is not a valid ${
+        rawAlgorithmName(algorithm)
+      } tag length`;
+    }
+    if (message !== undefined) {
+      ObjectDefineProperty(error, "message", {
+        __proto__: null,
+        value: message,
+        configurable: true,
+      });
+      return error;
+    }
+  }
+  if (
+    (methodName === "sign" || methodName === "verify") &&
+    error?.name === "OperationError" &&
+    error.message === "ContextParams.context must be at most 255 bytes"
+  ) {
+    const cause = new Error("context string must be at most 255 bytes");
+    tagNodeErrorCode(cause, "ERR_OUT_OF_RANGE");
+    ObjectDefineProperty(error, "cause", {
+      __proto__: null,
+      value: cause,
+      configurable: true,
+    });
+    return error;
+  }
+  if (
+    (methodName === "wrapKey" || methodName === "unwrapKey") &&
+    error?.name === "InvalidAccessError" &&
+    StringPrototypeIncludes(error.message, "algorithm does not match")
+  ) {
+    ObjectDefineProperty(error, "message", {
+      __proto__: null,
+      value: "Key algorithm mismatch",
+      configurable: true,
+    });
+    return error;
   }
   if (error?.name === "InvalidAccessError") {
     const message = nodeOperationErrorMessage(methodName, args, policy);
@@ -366,19 +830,92 @@ function decorateNodeWebCryptoError(methodName, args, error) {
   return error;
 }
 
-const deriveBitsForwarder = {
-  async deriveBits(algorithm, baseKey, length = undefined) {
-    webidl.assertBranded(this, SubtleCryptoPrototype, "SubtleCrypto");
-    const args = [algorithm, baseKey, length];
+function validateNodeWebCryptoCall(methodName, args) {
+  if (op_crypto_error_policy() !== WEB_CRYPTO_ERROR_POLICY_NODE24) {
+    return;
+  }
+  const rsaPssSaltLengthError = nodeRsaPssSaltLengthError(methodName, args);
+  if (rsaPssSaltLengthError !== undefined) {
+    throw rsaPssSaltLengthError;
+  }
+  if (methodName !== "deriveBits" && methodName !== "deriveKey") {
+    return;
+  }
+  const algorithm = args[0];
+  const info = algorithm?.info;
+  let infoLength;
+  if (isAnyArrayBuffer(info)) {
+    infoLength = ArrayBufferPrototypeGetByteLength(info);
+  } else if (isTypedArray(info)) {
+    infoLength = TypedArrayPrototypeGetByteLength(info);
+  } else if (ArrayBufferIsView(info)) {
+    infoLength = DataViewPrototypeGetByteLength(info);
+  }
+  if (
+    rawAlgorithmName(algorithm) === "HKDF" &&
+    algorithm !== null && typeof algorithm === "object" &&
+    infoLength > 1024
+  ) {
+    throw new DOMException(
+      "algorithm.info must be at most 1024 bytes",
+      "OperationError",
+    );
+  }
+}
+
+function callSubtleAsPromise(
+  receiver,
+  cppgc,
+  methodName,
+  args,
+  argumentCount = args.length,
+  errorArgs = args,
+) {
+  const promise = new Promise((resolve, reject) => {
     try {
-      return await FunctionPrototypeCall(
-        cppgcDeriveBits,
-        this,
-        ...new SafeArrayIterator(args),
+      webidl.assertBranded(
+        receiver,
+        SubtleCryptoPrototype,
+        "SubtleCrypto",
       );
     } catch (error) {
-      throw decorateNodeWebCryptoError("deriveBits", args, error);
+      reject(tagNodeErrorCode(error, "ERR_INVALID_THIS"));
+      return;
     }
+    try {
+      validateNodeWebCryptoCall(methodName, errorArgs);
+      resolve(FunctionPrototypeCall(
+        cppgc,
+        receiver,
+        ...new SafeArrayIterator(args),
+      ));
+    } catch (error) {
+      reject(error);
+    }
+  });
+  return PromisePrototypeCatch(promise, (error) => {
+    throw decorateNodeWebCryptoError(
+      methodName,
+      errorArgs,
+      error,
+      argumentCount,
+    );
+  });
+}
+
+const deriveBitsForwarder = {
+  deriveBits(algorithm, baseKey, length = undefined) {
+    const argumentCount = arguments.length;
+    const errorArgs = [algorithm, baseKey, length];
+    const args = [algorithm, baseKey, length === null ? undefined : length];
+    return callSubtleAsPromise(
+      this,
+      cppgcDeriveBits,
+      "deriveBits",
+      args,
+      argumentCount,
+      errorArgs,
+    );
   },
 }.deriveBits;
 ObjectDefineProperty(SubtleCryptoPrototype, "deriveBits", {
@@ -389,35 +926,15 @@ ObjectDefineProperty(SubtleCryptoPrototype, "deriveBits", {
   configurable: true,
 });
 
-// The WebCrypto spec declares `importKey`, `getPublicKey`, `unwrapKey`,
-// `encapsulateKey`, and `decapsulateKey` as returning Promises. The cppgc
-// impls (`subtle_crypto.rs`) run their bodies synchronously because the
-// per-algorithm work is bounded (no IO, no large key derivation off-CPU),
-// but a sync error path would propagate to JS as a synchronous `throw`.
-// That breaks `assertRejects` callers in the test suite and any
-// `.catch()`-only consumer. The async wrappers below coerce both the
-// success and error paths through a Promise, matching the legacy JS
-// async-fn shape.
+// WebCrypto methods are ordinary functions that return Promises, not
+// AsyncFunction instances. The cppgc implementations run their bodies
+// synchronously, so the wrappers below put both return values and throws
+// through an explicit Promise without changing the observable function kind.
 function makeAsyncForwarder(name, methodName, arity) {
   const cppgc = SubtleCryptoPrototype[methodName];
-  // The `name` parameter is captured in the wrapper's `Function.name`
-  // slot via a property assignment because async-arrow `function.name`
-  // would otherwise be `"makeAsyncForwarder"` from the surrounding fn.
   const wrapper = {
-    async [methodName](...args) {
-      webidl.assertBranded(this, SubtleCryptoPrototype, "SubtleCrypto");
-      // `await` keeps `dlint require-await` happy and is a no-op when the
-      // underlying cppgc method returns a non-thenable (the WebCrypto
-      // surface guarantees a CryptoKey/array/dict, not a Promise).
-      try {
-        return await FunctionPrototypeCall(
-          cppgc,
-          this,
-          ...new SafeArrayIterator(args),
-        );
-      } catch (error) {
-        throw decorateNodeWebCryptoError(methodName, args, error);
-      }
+    [methodName](...args) {
+      return callSubtleAsPromise(this, cppgc, methodName, args);
     },
   }[methodName];
   // `Function.length` of `(...args) => ...` is 0, but the WebIDL idl-harness
@@ -469,7 +986,7 @@ ObjectDefineProperty(SubtleCrypto, "supports", {
 // in `fn.call(undefined)`, which then surfaces the throw as
 // `TypeError: Failed to execute 'call' on 'SubtleCrypto': ...` -- a wrong
 // shape compared to the spec's "rejected promise". Forward every method
-// through `async` so the throw becomes a Promise rejection.
+// through an explicit Promise so the throw becomes a Promise rejection.
 // The third argument is the required-arg count from the WebCrypto IDL,
 // applied to the wrapper's `Function.length` for idlharness compliance.
 makeAsyncForwarder("digest", "digest", 2);
@@ -508,12 +1025,12 @@ applyWebIdlInterfaceShape(SubtleCrypto);
 // runtime read of `crypto.subtle` calls `getSubtleSingleton`, which also
 // stamps the `webidl.brand` symbol onto the instance so the
 // `assertBranded` checks at the top of every method body pass. The same
-// call hands `webidl.brand` and `kKeyObject` to Rust so freshly-minted
-// `CryptoKey`s carry both brands.
+// call hands the WebIDL brand and public CryptoKey prototype to Rust so native
+// instances get the correct prototype chain without visible own properties.
 let subtleSingleton;
 function getSubtleSingleton() {
   if (subtleSingleton === undefined) {
-    Crypto.registerSymbols(webidl.brand, kKeyObject);
+    Crypto.registerSymbols(webidl.brand, CryptoKeyPrototype);
     subtleSingleton = SubtleCrypto.create();
     subtleSingleton[webidl.brand] = webidl.brand;
   }

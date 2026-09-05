@@ -225,7 +225,7 @@ impl SubtleCrypto {
     &self,
     #[webidl] algorithm: SubtleDeriveBitsParams,
     #[webidl] base_key: SubtleKey,
-    length: Option<f64>,
+    #[webidl(options(enforce_range = true))] length: Option<u32>,
   ) -> Result<Vec<u8>, CryptoError> {
     if !base_key.has_usage("deriveBits") {
       return Err(CryptoError::Other(deno_error::JsErrorBox::new(
@@ -233,7 +233,10 @@ impl SubtleCrypto {
         "'baseKey' usages does not contain 'deriveBits'",
       )));
     }
-    spawn_blocking(move || run_derive_bits(algorithm, base_key, length)).await?
+    spawn_blocking(move || {
+      run_derive_bits(algorithm, base_key, length.map(f64::from))
+    })
+    .await?
   }
 
   /// `SubtleCrypto.deriveKey(algorithm, baseKey, derivedKeyType,
@@ -760,7 +763,7 @@ fn supports_params_valid<'s>(
       }
       "KMAC128" | "KMAC256" => {
         if let Some(l) = read_u32_member(scope, obj, b"length")
-          && (l == 0 || !l.is_multiple_of(8))
+          && !l.is_multiple_of(8)
         {
           return false;
         }

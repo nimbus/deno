@@ -486,7 +486,9 @@ impl KeyObjectHandle {
       AsymmetricPrivateKey::X25519(_) | AsymmetricPrivateKey::X448(_) => {
         Err(KeyObjectHandlePrehashedSignAndVerifyError::X25519KeyCannotBeUsedForSigning)
       }
-      AsymmetricPrivateKey::Ed25519(_) | AsymmetricPrivateKey::Ed448(_) => Err(KeyObjectHandlePrehashedSignAndVerifyError::Ed25519KeyCannotBeUsedForPrehashedSigning),
+      AsymmetricPrivateKey::Ed25519(_)
+      | AsymmetricPrivateKey::Ed448(_)
+      | AsymmetricPrivateKey::PostQuantum(_) => Err(KeyObjectHandlePrehashedSignAndVerifyError::Ed25519KeyCannotBeUsedForPrehashedSigning),
       AsymmetricPrivateKey::Dh(_) => {
         Err(KeyObjectHandlePrehashedSignAndVerifyError::DhKeyCannotBeUsedForSigning)
       }
@@ -675,7 +677,9 @@ impl KeyObjectHandle {
       AsymmetricPublicKey::X25519(_) | AsymmetricPublicKey::X448(_) => {
         Err(KeyObjectHandlePrehashedSignAndVerifyError::X25519KeyCannotBeUsedForVerification)
       }
-      AsymmetricPublicKey::Ed25519(_) | AsymmetricPublicKey::Ed448(_) => Err(KeyObjectHandlePrehashedSignAndVerifyError::Ed25519KeyCannotBeUsedForPrehashedVerification),
+      AsymmetricPublicKey::Ed25519(_)
+      | AsymmetricPublicKey::Ed448(_)
+      | AsymmetricPublicKey::PostQuantum(_) => Err(KeyObjectHandlePrehashedSignAndVerifyError::Ed25519KeyCannotBeUsedForPrehashedVerification),
       AsymmetricPublicKey::Dh(_) => {
         Err(KeyObjectHandlePrehashedSignAndVerifyError::DhKeyCannotBeUsedForVerification)
       }
