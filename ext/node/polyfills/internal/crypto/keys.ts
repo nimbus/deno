@@ -29,6 +29,7 @@ const {
 const {
   op_node_create_ec_jwk,
   op_node_create_ed_raw,
+  op_node_create_pq_jwk,
   op_node_create_private_key,
   op_node_create_public_key,
   op_node_create_rsa_jwk,
@@ -37,9 +38,12 @@ const {
   op_node_export_private_key_der,
   op_node_export_private_key_jwk,
   op_node_export_private_key_pem,
+  op_node_export_private_key_raw,
+  op_node_export_private_key_seed,
   op_node_export_public_key_der,
   op_node_export_public_key_jwk,
   op_node_export_public_key_pem,
+  op_node_export_public_key_raw,
   op_node_export_secret_key,
   op_node_export_secret_key_b64url,
   op_node_get_asymmetric_key_details,
@@ -61,6 +65,18 @@ const { kHandle } = core.loadExtScript(
 // Lazy import of cipher.ts to break circular dependency
 const lazyCipher = () =>
   core.loadExtScript("ext:deno_node/internal/crypto/cipher.ts");
+const lazyProcess = core.createLazyLoader("node:process");
+
+let dep0203Warned = false;
+function emitDep0203() {
+  if (dep0203Warned) return;
+  dep0203Warned = true;
+  lazyProcess().default.emitWarning(
+    "Passing a CryptoKey to node:crypto functions is deprecated.",
+    "DeprecationWarning",
+    "DEP0203",
+  );
+}
 
 const {
   ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS,
@@ -178,13 +194,20 @@ class KeyObject {
       const handle = op_node_create_secret_key(data);
       return new SecretKeyObject(handle);
     } else if (type === "public") {
-      const handle = op_node_create_public_key(data, "der", "spki");
+      const handle = op_node_create_public_key(
+        data,
+        "der",
+        "spki",
+        undefined,
+        undefined,
+      );
       return new PublicKeyObject(handle);
     } else {
       const handle = op_node_create_private_key(
         data,
         "der",
         "pkcs8",
+        undefined,
         undefined,
       );
       return new PrivateKeyObject(handle);
@@ -241,31 +264,46 @@ function getKeyObjectHandle(key: KeyObject, ctx: number) {
   return key[kHandle];
 }
 
+function getCryptoKeyHandle(key: CryptoKey) {
+  if (!isCryptoKey(key)) {
+    throw new ERR_INVALID_ARG_TYPE("key", "CryptoKey", key);
+  }
+  return {
+    export() {
+      return cryptoKeyExportNodeKeyMaterial(key).data;
+    },
+  };
+}
+
 function getKeyObjectHandleFromJwk(key, ctx) {
   validateObject(key, "key");
   validateOneOf(
     key.kty,
     "key.kty",
-    ["RSA", "EC", "OKP"],
+    ["RSA", "EC", "OKP", "AKP"],
   );
   const isPublic = ctx === kConsumePublic || ctx === kCreatePublic;
 
-  if (key.kty === "OKP") {
-    validateString(key.crv, "key.crv");
-    validateOneOf(
-      key.crv,
-      "key.crv",
-      ["Ed25519", "Ed448", "X25519", "X448"],
-    );
-    validateString(key.x, "key.x");
+  if (key.kty === "AKP") {
+    return op_node_create_pq_jwk(key, isPublic);
+  }
 
-    if (!isPublic) {
-      validateString(key.d, "key.d");
+  if (key.kty === "OKP") {
+    if (
+      typeof key.crv !== "string" ||
+      !ArrayPrototypeIncludes(
+        ["Ed25519", "Ed448", "X25519", "X448"],
+        key.crv,
+      ) || typeof key.x !== "string" ||
+      (!isPublic && typeof key.d !== "string")
+    ) {
+      throw new ERR_CRYPTO_INVALID_JWK();
     }
 
+    const publicKeyData = Buffer.from(key.x, "base64");
     let keyData;
     if (isPublic) {
-      keyData = Buffer.from(key.x, "base64");
+      keyData = publicKeyData;
     } else {
       keyData = Buffer.from(key.d, "base64");
     }
@@ -289,16 +327,26 @@ function getKeyObjectHandleFromJwk(key, ctx) {
         break;
     }
 
-    return op_node_create_ed_raw(key.crv, keyData, isPublic);
+    const handle = op_node_create_ed_raw(key.crv, keyData, isPublic);
+    if (!isPublic) {
+      const derived = op_node_derive_public_key_from_private_key(handle);
+      const actualPublic = Buffer.from(
+        op_node_export_public_key_raw(derived, undefined),
+      );
+      if (!actualPublic.equals(publicKeyData)) {
+        throw new ERR_CRYPTO_INVALID_JWK();
+      }
+    }
+    return handle;
   }
 
   if (key.kty === "EC") {
-    validateString(key.crv, "key.crv");
-    validateString(key.x, "key.x");
-    validateString(key.y, "key.y");
-
-    if (!isPublic) {
-      validateString(key.d, "key.d");
+    if (
+      typeof key.crv !== "string" || typeof key.x !== "string" ||
+      typeof key.y !== "string" ||
+      (!isPublic && typeof key.d !== "string")
+    ) {
+      throw new ERR_CRYPTO_INVALID_JWK();
     }
 
     return op_node_create_ec_jwk(key, isPublic);
@@ -315,12 +363,13 @@ function getKeyObjectHandleFromJwk(key, ctx) {
   };
 
   if (!isPublic) {
-    validateString(key.d, "key.d");
-    validateString(key.p, "key.p");
-    validateString(key.q, "key.q");
-    validateString(key.dp, "key.dp");
-    validateString(key.dq, "key.dq");
-    validateString(key.qi, "key.qi");
+    if (
+      typeof key.d !== "string" || typeof key.p !== "string" ||
+      typeof key.q !== "string" || typeof key.dp !== "string" ||
+      typeof key.dq !== "string" || typeof key.qi !== "string"
+    ) {
+      throw new ERR_CRYPTO_INVALID_JWK();
+    }
     jwk.d = key.d;
     jwk.p = key.p;
     jwk.q = key.q;
@@ -339,6 +388,80 @@ function isStringOrBuffer(val: unknown): boolean {
     Buffer.isBuffer(val);
 }
 
+const rawStandardPrivateKeyTypes = [
+  "ec",
+  "ed25519",
+  "ed448",
+  "x25519",
+  "x448",
+];
+const rawSeedKeyTypes = [
+  "ml-dsa-44",
+  "ml-dsa-65",
+  "ml-dsa-87",
+  "ml-kem-768",
+  "ml-kem-1024",
+];
+const rawUnsupportedKeyTypes = ["rsa", "rsa-pss", "dsa", "dh"];
+const rawEcCurveNames = [
+  "P-224",
+  "secp224r1",
+  "P-256",
+  "prime256v1",
+  "secp256r1",
+  "P-384",
+  "secp384r1",
+  "P-521",
+  "secp521r1",
+  "secp256k1",
+];
+
+function invalidEcCurve(): TypeError {
+  const error = new TypeError("Invalid EC curve name");
+  ObjectDefineProperties(error, {
+    code: {
+      __proto__: null,
+      value: "ERR_CRYPTO_INVALID_CURVE",
+      configurable: true,
+    },
+  });
+  return error;
+}
+
+function validateRawKeyImportType(format: string, keyType: string): void {
+  if (ArrayPrototypeIncludes(rawUnsupportedKeyTypes, keyType)) {
+    throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
+      format,
+      "is not supported for this key type",
+    );
+  }
+
+  const supportsStandardPrivate = ArrayPrototypeIncludes(
+    rawStandardPrivateKeyTypes,
+    keyType,
+  );
+  const supportsSeed = ArrayPrototypeIncludes(rawSeedKeyTypes, keyType);
+  const supported = format === "raw-public"
+    ? supportsStandardPrivate || supportsSeed
+    : format === "raw-private"
+    ? supportsStandardPrivate
+    : supportsSeed;
+
+  if (!supported) {
+    if (supportsStandardPrivate || supportsSeed) {
+      throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
+        format,
+        "is not supported for this key type",
+      );
+    }
+    throw new ERR_INVALID_ARG_VALUE(
+      "key.asymmetricKeyType",
+      keyType,
+      "has an Invalid asymmetricKeyType",
+    );
+  }
+}
+
 function prepareAsymmetricKey(
   key: any,
   ctx: number,
@@ -350,6 +473,7 @@ function prepareAsymmetricKey(
       handle: getKeyObjectHandle(key, ctx),
     };
   } else if (isCryptoKey(key)) {
+    emitDep0203();
     return {
       // @ts-ignore __proto__ is magic
       __proto__: null,
@@ -371,6 +495,7 @@ function prepareAsymmetricKey(
         handle: getKeyObjectHandle(data, ctx),
       };
     } else if (isCryptoKey(data)) {
+      emitDep0203();
       return {
         // @ts-ignore __proto__ is magic
         __proto__: null,
@@ -385,6 +510,39 @@ function prepareAsymmetricKey(
         __proto__: null,
         handle: getKeyObjectHandleFromJwk(data, ctx),
         format,
+      };
+    } else if (
+      format === "raw-public" || format === "raw-private" ||
+      format === "raw-seed"
+    ) {
+      if (
+        (ctx === kConsumePrivate || ctx === kCreatePrivate) &&
+        format === "raw-public"
+      ) {
+        throw new ERR_INVALID_ARG_VALUE("key.format", format);
+      }
+      if (!isArrayBufferView(data) && !isAnyArrayBuffer(data)) {
+        throw new ERR_INVALID_ARG_TYPE(
+          "key.key",
+          ["ArrayBuffer", "Buffer", "TypedArray", "DataView"],
+          data,
+        );
+      }
+      validateString(key.asymmetricKeyType, "key.asymmetricKeyType");
+      validateRawKeyImportType(format, key.asymmetricKeyType);
+      if (key.asymmetricKeyType === "ec") {
+        validateString(key.namedCurve, "key.namedCurve");
+        if (!ArrayPrototypeIncludes(rawEcCurveNames, key.namedCurve)) {
+          throw invalidEcCurve();
+        }
+      }
+      return {
+        // @ts-ignore __proto__ is magic
+        __proto__: null,
+        data: getArrayBufferOrView(data, "key.key"),
+        format,
+        type: key.asymmetricKeyType,
+        namedCurve: key.namedCurve,
       };
     }
     if (!lazyCipher().isStringOrBuffer(data)) {
@@ -401,10 +559,10 @@ function prepareAsymmetricKey(
     return {
       data: getArrayBufferOrView(
         data,
-        "key",
+        "key.key",
         key.encoding,
       ),
-      ...parseKeyEncoding(key, undefined, isPublic),
+      ...parseKeyEncoding(key, undefined, isPublic, "key"),
     };
   }
   throw new ERR_INVALID_ARG_TYPE(
@@ -450,7 +608,11 @@ function parseKeyEncoding(
           );
         }
       } else if (passphrase !== undefined) {
-        throw new ERR_INVALID_ARG_VALUE(option("cipher", objName), cipher);
+        throw new ERR_INVALID_ARG_VALUE(
+          option("cipher", objName),
+          cipher,
+          "is required when a passphrase is specified",
+        );
       }
     }
 
@@ -490,13 +652,11 @@ function parseKeyEncoding(
 }
 
 function option(name: string, objName?: string) {
-  return objName === undefined
-    ? `options.${name}`
-    : `options.${objName}.${name}`;
+  return objName === undefined ? `options.${name}` : `${objName}.${name}`;
 }
 
 function parseKeyFormatAndType(
-  enc: { format?: string; type?: string },
+  enc: { format?: string; type?: string; asymmetricKeyType?: string },
   keyType: string | undefined,
   isPublic: boolean | undefined,
   objName?: string,
@@ -509,6 +669,34 @@ function parseKeyFormatAndType(
     isInput ? "pem" : undefined,
     option("format", objName),
   );
+
+  if (format === "raw-public") {
+    if (isPublic === false) {
+      throw new ERR_INVALID_ARG_VALUE(option("format", objName), format);
+    }
+    if (
+      typeStr !== undefined && typeStr !== "compressed" &&
+      typeStr !== "uncompressed"
+    ) {
+      throw new ERR_INVALID_ARG_VALUE(option("type", objName), typeStr);
+    }
+    return {
+      // @ts-ignore __proto__ is magic
+      __proto__: null,
+      format,
+      type: typeStr ?? "uncompressed",
+    };
+  }
+
+  if (format === "raw-private" || format === "raw-seed") {
+    if (isPublic === true) {
+      throw new ERR_INVALID_ARG_VALUE(option("format", objName), format);
+    }
+    if (typeStr !== undefined) {
+      throw new ERR_INVALID_ARG_VALUE(option("type", objName), typeStr);
+    }
+    return { format, type: undefined };
+  }
 
   const type = parseKeyType(
     typeStr,
@@ -537,6 +725,12 @@ function parseKeyFormat(
     return "pem";
   } else if (formatStr === "der") {
     return "der";
+  } else if (formatStr === "raw-public") {
+    return "raw-public";
+  } else if (formatStr === "raw-private") {
+    return "raw-private";
+  } else if (formatStr === "raw-seed") {
+    return "raw-seed";
   }
   throw new ERR_INVALID_ARG_VALUE(optionName, formatStr);
 }
@@ -623,6 +817,7 @@ function createPrivateKey(
         res.format,
         res.type ?? "",
         res.passphrase,
+        res.namedCurve,
       );
     } catch (err) {
       throw decorateOsslDecoderError(err);
@@ -656,6 +851,7 @@ function createPublicKey(
         res.format,
         res.type ?? "",
         res.passphrase,
+        res.namedCurve,
       );
     } catch (err) {
       throw decorateOsslDecoderError(err);
@@ -694,8 +890,10 @@ function prepareSecretKey(
       }
       return key[kHandle];
     } else if (isCryptoKey(key)) {
-      if (key.type !== "secret") {
-        throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(key.type, "secret");
+      emitDep0203();
+      const { type } = cryptoKeyExportNodeKeyMaterial(key);
+      if (type !== "secret") {
+        throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(type, "secret");
       }
       return KeyObject.from(key)[kHandle];
     }
@@ -926,6 +1124,35 @@ class PrivateKeyObject extends AsymmetricKeyObject {
   }
 
   export(options: any) {
+    if (
+      options &&
+      (options.format === "raw-private" || options.format === "raw-seed")
+    ) {
+      if (options.cipher !== undefined || options.passphrase !== undefined) {
+        throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
+          "raw format",
+          "does not support encryption",
+        );
+      }
+      const keyType = this.asymmetricKeyType;
+      if (options.format === "raw-private") {
+        if (
+          keyType === "ec" || keyType === "ed25519" ||
+          keyType === "ed448" || keyType === "x25519" || keyType === "x448"
+        ) {
+          return Buffer.from(op_node_export_private_key_raw(this[kHandle]));
+        }
+      } else if (
+        StringPrototypeStartsWith(keyType, "ml-dsa-") ||
+        StringPrototypeStartsWith(keyType, "ml-kem-")
+      ) {
+        return Buffer.from(op_node_export_private_key_seed(this[kHandle]));
+      }
+      throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
+        options.format,
+        "is not supported for this key type",
+      );
+    }
     if (options && options.format === "jwk") {
       if (
         (options as { cipher?: unknown }).cipher !== undefined ||
@@ -1007,6 +1234,36 @@ class PublicKeyObject extends AsymmetricKeyObject {
   }
 
   export(options: any) {
+    if (options && options.format === "raw-public") {
+      const keyType = this.asymmetricKeyType;
+      if (keyType === "ec") {
+        validateOneOf(
+          options.type,
+          "options.type",
+          [undefined, "compressed", "uncompressed"],
+        );
+        return Buffer.from(
+          op_node_export_public_key_raw(
+            this[kHandle],
+            options.type ?? "uncompressed",
+          ),
+        );
+      }
+      if (
+        keyType === "ed25519" || keyType === "ed448" ||
+        keyType === "x25519" || keyType === "x448" ||
+        StringPrototypeStartsWith(keyType, "ml-dsa-") ||
+        StringPrototypeStartsWith(keyType, "ml-kem-")
+      ) {
+        return Buffer.from(
+          op_node_export_public_key_raw(this[kHandle], undefined),
+        );
+      }
+      throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
+        "raw-public",
+        "is not supported for this key type",
+      );
+    }
     if (options && options.format === "jwk") {
       return { ...op_node_export_public_key_jwk(this[kHandle]) };
     }
@@ -1070,8 +1327,9 @@ function createSecretKey(
   encoding?: string,
 ): KeyObject {
   if (isCryptoKey(key)) {
-    if (key.type !== "secret") {
-      throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(key.type, "secret");
+    const { type } = cryptoKeyExportNodeKeyMaterial(key);
+    if (type !== "secret") {
+      throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(type, "secret");
     }
     return KeyObject.from(key);
   }
@@ -1104,6 +1362,7 @@ function deserializeNodeCryptoKeyObject(data) {
         "der",
         "spki",
         undefined,
+        undefined,
       );
       return new PublicKeyObject(handle);
     }
@@ -1112,6 +1371,7 @@ function deserializeNodeCryptoKeyObject(data) {
         data.keyData,
         "der",
         "pkcs8",
+        undefined,
         undefined,
       );
       return new PrivateKeyObject(handle);
@@ -1125,6 +1385,7 @@ function deserializeNodeCryptoKeyObject(data) {
 
 return {
   getArrayBufferOrView,
+  getCryptoKeyHandle,
   deserializeNodeCryptoKeyObject,
   KeyObject,
   kConsumePublic,
@@ -1144,6 +1405,7 @@ return {
     createPrivateKey,
     createPublicKey,
     createSecretKey,
+    getCryptoKeyHandle,
     KeyObject,
     prepareSecretKey,
     SecretKeyObject,

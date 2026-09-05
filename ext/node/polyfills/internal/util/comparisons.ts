@@ -33,9 +33,7 @@ const {
   isWeakMap,
   isWeakSet,
 } = core.loadExtScript("ext:deno_node/internal/util/types.ts");
-const { kKeyObject } = core.loadExtScript(
-  "ext:deno_node/internal/crypto/constants.ts",
-);
+const { CryptoKey } = core.ops;
 const { isError } = core.loadExtScript("ext:deno_node/internal/util.mjs");
 const lazyUrl = () => core.loadExtScript("ext:deno_node/internal/url.ts");
 
@@ -468,12 +466,16 @@ function objectComparisonStart(
       return false;
     }
   } else if (isCryptoKey(val1)) {
+    if (!isCryptoKey(val2)) {
+      return false;
+    }
+    const slots1 = CryptoKey.inspectSnapshot(val1);
+    const slots2 = CryptoKey.inspectSnapshot(val2);
     if (
-      !isCryptoKey(val2) ||
-      val1.extractable !== val2.extractable ||
-      !innerDeepEqual(val1.algorithm, val2.algorithm, mode, memos) ||
-      !innerDeepEqual(val1.usages, val2.usages, mode, memos) ||
-      !innerDeepEqual(val1[kKeyObject], val2[kKeyObject], mode, memos)
+      slots1.extractable !== slots2.extractable ||
+      !innerDeepEqual(slots1.algorithm, slots2.algorithm, mode, memos) ||
+      !innerDeepEqual(slots1.usages, slots2.usages, mode, memos) ||
+      !CryptoKey.materialEquals(val1, val2)
     ) {
       return false;
     }

@@ -6,9 +6,7 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const { Symbol } = primordials;
-const { kKeyObject } = core.loadExtScript(
-  "ext:deno_node/internal/crypto/constants.ts",
-);
+const { CryptoKey } = core.ops;
 
 const kKeyType = Symbol("kKeyType");
 
@@ -19,9 +17,7 @@ function isKeyObject(obj) {
 }
 
 function isCryptoKey(obj) {
-  return (
-    obj != null && obj[kKeyObject] !== undefined
-  );
+  return CryptoKey.isKey(obj);
 }
 
 return { kKeyType, isKeyObject, isCryptoKey };

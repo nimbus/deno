@@ -15,6 +15,7 @@ const {
   FunctionPrototypeApply,
   FunctionPrototypeCall,
   MathMin,
+  ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   ReflectHas,
@@ -39,9 +40,11 @@ const {
   op_node_sign,
   op_node_sign_ed25519,
   op_node_sign_ed448,
+  op_node_sign_ml_dsa,
   op_node_verify,
   op_node_verify_ed25519,
   op_node_verify_ed448,
+  op_node_verify_ml_dsa,
 } = core.ops;
 
 const {
@@ -49,6 +52,9 @@ const {
   validateString,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
+const { isAnyArrayBuffer } = core.loadExtScript(
+  "ext:deno_node/internal/util/types.ts",
+);
 
 const lazyWritable = core.createLazyLoader("node:_stream_writable");
 
@@ -70,6 +76,25 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 
 const FastBuffer = Buffer[SymbolSpecies];
+
+function isMlDsaKeyType(keyType: string): boolean {
+  return ArrayPrototypeIncludes(
+    ["ml-dsa-44", "ml-dsa-65", "ml-dsa-87"],
+    keyType,
+  );
+}
+
+function unsupportedMlDsaDigest(): Error {
+  const error = new Error(
+    "error:03000094:digital envelope routines::COMMAND_NOT_SUPPORTED",
+  );
+  ObjectDefineProperty(error, "code", {
+    __proto__: null,
+    value: "ERR_OSSL_EVP_COMMAND_NOT_SUPPORTED",
+    configurable: true,
+  });
+  return error;
+}
 
 function getPadding(options) {
   return getIntOption("padding", options);
@@ -189,6 +214,7 @@ class SignImpl {
           res.format,
           res.type ?? "",
           res.passphrase,
+          res.namedCurve,
         );
       } catch (err) {
         // Trigger any prototype setter for `library` (Node.js compatibility)
@@ -287,11 +313,12 @@ class VerifyImpl {
   ): boolean {
     if (
       typeof signature !== "string" &&
-      !ArrayBufferIsView(signature)
+      !ArrayBufferIsView(signature) &&
+      !isAnyArrayBuffer(signature)
     ) {
       throw new ERR_INVALID_ARG_TYPE(
         "signature",
-        ["Buffer", "TypedArray", "DataView"],
+        ["string", "ArrayBuffer", "Buffer", "TypedArray", "DataView"],
         signature,
       );
     }
@@ -318,6 +345,7 @@ class VerifyImpl {
         res.format,
         res.type ?? "",
         res.passphrase,
+        res.namedCurve,
       );
       handle = op_node_derive_public_key_from_private_key(privateHandle);
     } else {
@@ -326,6 +354,7 @@ class VerifyImpl {
         res.format,
         res.type ?? "",
         res.passphrase,
+        res.namedCurve,
       );
     }
     return op_node_verify(
@@ -401,29 +430,33 @@ function signOneShot(
         res.format,
         res.type ?? "",
         res.passphrase,
+        res.namedCurve,
       );
     }
 
     let result: Buffer;
     const keyType = op_node_get_asymmetric_key_type(handle);
-    if (keyType === "ed25519") {
+    const context = typeof key === "object" && key !== null
+      ? (key as Record<string, unknown>).context
+      : undefined;
+    if (
+      !isMlDsaKeyType(keyType) && context !== undefined &&
+      TypedArrayPrototypeGetByteLength(context) > 0
+    ) {
+      throw new TypeError("Context parameter is unsupported");
+    }
+    if (isMlDsaKeyType(keyType)) {
+      if (algorithm != null) {
+        throw unsupportedMlDsaDigest();
+      }
+      result = Buffer.from(op_node_sign_ml_dsa(handle, dataBytes));
+    } else if (keyType === "ed25519") {
       if (algorithm != null && algorithm !== "sha512") {
         throw new TypeError("Only 'sha512' is supported for Ed25519 keys");
       }
       result = new FastBuffer(64);
       op_node_sign_ed25519(handle, dataBytes, result);
     } else if (keyType === "ed448") {
-      const keyOpts = typeof key === "object" && key !== null &&
-          !(ObjectPrototypeIsPrototypeOf(KeyObject.prototype, key))
-        ? key as Record<string, unknown>
-        : null;
-      const ctx = keyOpts?.context;
-      if (
-        ObjectPrototypeIsPrototypeOf(Uint8ArrayPrototype, ctx) &&
-        ctx.length > 0
-      ) {
-        throw new TypeError("Context parameter is unsupported");
-      }
       result = new FastBuffer(114);
       op_node_sign_ed448(handle, dataBytes, result);
     } else {
@@ -458,7 +491,7 @@ function signOneShot(
     }
   } catch (err) {
     if (callback) {
-      setTimeout(() => callback(err, Buffer.alloc(0)));
+      setTimeout(() => callback(err));
     } else {
       throw err;
     }
@@ -488,10 +521,13 @@ function verifyOneShot(
     );
   }
 
-  if (!ArrayBufferIsView(signature) && typeof signature !== "string") {
+  if (
+    !ArrayBufferIsView(signature) && !isAnyArrayBuffer(signature) &&
+    typeof signature !== "string"
+  ) {
     throw new ERR_INVALID_ARG_TYPE(
       "signature",
-      ["Buffer", "TypedArray", "DataView"],
+      ["string", "ArrayBuffer", "Buffer", "TypedArray", "DataView"],
       signature,
     );
   }
@@ -524,6 +560,7 @@ function verifyOneShot(
         res.format,
         res.type ?? "",
         res.passphrase,
+        res.namedCurve,
       );
       handle = op_node_derive_public_key_from_private_key(privateHandle);
     } else {
@@ -532,28 +569,32 @@ function verifyOneShot(
         res.format,
         res.type ?? "",
         res.passphrase,
+        res.namedCurve,
       );
     }
 
     let result: boolean;
     const keyType = op_node_get_asymmetric_key_type(handle);
-    if (keyType === "ed25519") {
+    const context = typeof key === "object" && key !== null
+      ? (key as Record<string, unknown>).context
+      : undefined;
+    if (
+      !isMlDsaKeyType(keyType) && context !== undefined &&
+      TypedArrayPrototypeGetByteLength(context) > 0
+    ) {
+      throw new TypeError("Context parameter is unsupported");
+    }
+    if (isMlDsaKeyType(keyType)) {
+      if (algorithm != null) {
+        throw unsupportedMlDsaDigest();
+      }
+      result = op_node_verify_ml_dsa(handle, dataBytes, signature);
+    } else if (keyType === "ed25519") {
       if (algorithm != null && algorithm !== "sha512") {
         throw new TypeError("Only 'sha512' is supported for Ed25519 keys");
       }
       result = op_node_verify_ed25519(handle, dataBytes, signature);
     } else if (keyType === "ed448") {
-      const keyOpts = typeof key === "object" && key !== null &&
-          !(ObjectPrototypeIsPrototypeOf(KeyObject.prototype, key))
-        ? key as Record<string, unknown>
-        : null;
-      const ctx = keyOpts?.context;
-      if (
-        ObjectPrototypeIsPrototypeOf(Uint8ArrayPrototype, ctx) &&
-        ctx.length > 0
-      ) {
-        throw new TypeError("Context parameter is unsupported");
-      }
       result = op_node_verify_ed448(handle, dataBytes, signature);
     } else if (
       keyType === "x25519" || keyType === "x448" || keyType === "dh"
@@ -591,7 +632,7 @@ function verifyOneShot(
     }
   } catch (err) {
     if (callback) {
-      setTimeout(() => callback(err, false));
+      setTimeout(() => callback(err));
     } else {
       throw err;
     }

@@ -595,8 +595,17 @@ fn run_xof(
       | SubtleDigestXof::Kt256 { .. }
       | SubtleDigestXof::KangarooTwelve { .. }
   );
-  if (is_turbo || is_kangaroo) && output_length == 0 {
-    return Err(CryptoError::InvalidXofParameters);
+  if is_turbo && (output_length == 0 || !output_length.is_multiple_of(8)) {
+    return Err(CryptoError::Other(JsErrorBox::new(
+      "DOMExceptionOperationError",
+      "Invalid TurboShakeParams outputLength",
+    )));
+  }
+  if is_kangaroo && (output_length == 0 || !output_length.is_multiple_of(8)) {
+    return Err(CryptoError::Other(JsErrorBox::new(
+      "DOMExceptionOperationError",
+      "Invalid KangarooTwelveParams outputLength",
+    )));
   }
   if let SubtleDigestXof::TurboShake128 {
     domain_separation, ..
@@ -639,6 +648,22 @@ fn run_xof(
       return Err(CryptoError::Other(JsErrorBox::new(
         "DOMExceptionOperationError",
         "CShakeParams.customization must be at most 512 bytes",
+      )));
+    }
+  } else if is_kangaroo {
+    let customization = match &algorithm {
+      SubtleDigestXof::Kt128 { customization, .. }
+      | SubtleDigestXof::Kt256 { customization, .. }
+      | SubtleDigestXof::KangarooTwelve { customization, .. } => customization,
+      _ => unreachable!(),
+    };
+    if customization
+      .as_ref()
+      .is_some_and(|value| value.len() > 512)
+    {
+      return Err(CryptoError::Other(JsErrorBox::new(
+        "DOMExceptionOperationError",
+        "KangarooTwelveParams.customization must be at most 512 bytes",
       )));
     }
   } else if !output_length.is_multiple_of(8) {

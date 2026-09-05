@@ -93,6 +93,7 @@ pub enum AsymmetricPrivateKey {
   X448([u8; 56]),
   Ed448(ed448_goldilocks::SigningKey),
   Dh(DhPrivateKey),
+  PostQuantum(deno_crypto::pq_interop::PrivateKey),
 }
 
 #[derive(Clone)]
@@ -169,6 +170,7 @@ pub enum AsymmetricPublicKey {
   X448([u8; 56]),
   Ed448(ed448_goldilocks::VerifyingKey),
   Dh(DhPublicKey),
+  PostQuantum(deno_crypto::pq_interop::PublicKey),
 }
 
 #[derive(Clone)]
@@ -265,6 +267,9 @@ impl AsymmetricPrivateKey {
           key: public_key,
           params: dh_key.params.clone(),
         })
+      }
+      AsymmetricPrivateKey::PostQuantum(key) => {
+        AsymmetricPublicKey::PostQuantum(key.public_key())
       }
     }
   }
@@ -389,6 +394,7 @@ impl PartialEq for AsymmetricPublicKey {
       (Self::X448(a), Self::X448(b)) => a == b,
       (Self::Ed448(a), Self::Ed448(b)) => a == b,
       (Self::Dh(a), Self::Dh(b)) => a == b,
+      (Self::PostQuantum(a), Self::PostQuantum(b)) => a == b,
       _ => false,
     }
   }
@@ -409,6 +415,7 @@ impl PartialEq for AsymmetricPrivateKey {
       (Self::X448(a), Self::X448(b)) => a == b,
       (Self::Ed448(a), Self::Ed448(b)) => a == b,
       (Self::Dh(a), Self::Dh(b)) => a == b,
+      (Self::PostQuantum(a), Self::PostQuantum(b)) => a == b,
       _ => false,
     }
   }
@@ -581,26 +588,55 @@ pub enum X509PublicKeyError {
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
+#[class(generic)]
+#[property("code" = "ERR_CRYPTO_INVALID_JWK")]
 pub enum RsaJwkError {
-  #[class(generic)]
   #[error(transparent)]
   Base64(#[from] base64::DecodeError),
-  #[class(generic)]
   #[error(transparent)]
   Rsa(#[from] rsa::Error),
-  #[class(type)]
   #[error("missing RSA private component")]
   MissingRsaPrivateComponent,
+  #[error("invalid RSA private component")]
+  InvalidRsaPrivateComponent,
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum EcJwkError {
   #[class(generic)]
+  #[property("code" = "ERR_CRYPTO_INVALID_JWK")]
   #[error(transparent)]
   Ec(#[from] elliptic_curve::Error),
   #[class(type)]
+  #[property("code" = "ERR_CRYPTO_INVALID_CURVE")]
   #[error("unsupported curve: {0}")]
   UnsupportedCurve(String),
+  #[class(generic)]
+  #[property("code" = "ERR_CRYPTO_INVALID_JWK")]
+  #[error("EC public key does not match private key")]
+  PublicPrivateMismatch,
+}
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+#[class(generic)]
+#[property("code" = "ERR_CRYPTO_INVALID_JWK")]
+#[error("{message}")]
+pub struct PqJwkError {
+  message: &'static str,
+}
+
+impl PqJwkError {
+  fn invalid() -> Self {
+    Self {
+      message: "Invalid JWK",
+    }
+  }
+
+  fn missing_private() -> Self {
+    Self {
+      message: "JWK does not contain private key material",
+    }
+  }
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -627,6 +663,12 @@ pub enum EdRawError {
 #[error("unsupported")]
 #[property("code" = "ERR_OSSL_UNSUPPORTED")]
 pub struct UnsupportedPrivateKeyOidError;
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+#[class(generic)]
+#[error("unsupported post-quantum algorithm")]
+#[property("code" = "ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM")]
+pub struct UnsupportedPostQuantumAlgorithmError;
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[class(type)]
@@ -677,6 +719,9 @@ pub enum AsymmetricPrivateKeyError {
   UnsupportedEcNamedCurve,
   #[error("invalid private key")]
   InvalidPrivateKey,
+  #[property("code" = "ERR_INVALID_ARG_VALUE")]
+  #[error("invalid raw private key")]
+  InvalidRawPrivateKey,
   #[error("invalid DSA private key")]
   InvalidDsaPrivateKey,
   #[error("malformed or missing named curve in ec parameters")]
@@ -705,6 +750,13 @@ pub enum AsymmetricPrivateKeyError {
     #[from]
     #[inherit]
     UnsupportedPrivateKeyOidError,
+  ),
+  #[class(inherit)]
+  #[error(transparent)]
+  UnsupportedPostQuantumAlgorithm(
+    #[from]
+    #[inherit]
+    UnsupportedPostQuantumAlgorithmError,
   ),
 }
 
@@ -746,11 +798,22 @@ pub enum AsymmetricPublicKeyError {
   #[error("invalid SPKI public key")]
   InvalidSpkiPublicKey,
   #[class(type)]
+  #[property("code" = "ERR_INVALID_ARG_VALUE")]
+  #[error("invalid raw public key")]
+  InvalidRawPublicKey,
+  #[class(type)]
   #[error("unsupported key type: {0}")]
   UnsupportedKeyType(String),
   #[class(type)]
   #[error("unsupported key format: {0}")]
   UnsupportedKeyFormat(String),
+  #[class(inherit)]
+  #[error(transparent)]
+  UnsupportedPostQuantumAlgorithm(
+    #[from]
+    #[inherit]
+    UnsupportedPostQuantumAlgorithmError,
+  ),
   #[class(generic)]
   #[error(transparent)]
   Spki(#[from] spki::Error),
@@ -985,13 +1048,99 @@ fn normalize_pem_line_width(pem: &str) -> Cow<'_, str> {
   Cow::Owned(result)
 }
 
+fn ensure_node_pq_algorithm_supported(
+  algorithm: deno_crypto::pq_interop::Algorithm,
+) -> Result<(), UnsupportedPostQuantumAlgorithmError> {
+  if algorithm == deno_crypto::pq_interop::Algorithm::MlKem512 {
+    Err(UnsupportedPostQuantumAlgorithmError)
+  } else {
+    Ok(())
+  }
+}
+
 impl KeyObjectHandle {
   pub fn new_asymmetric_private_key_from_js(
     key: &[u8],
     format: &str,
     typ: &str,
     passphrase: Option<&[u8]>,
+    named_curve: Option<&str>,
   ) -> Result<KeyObjectHandle, AsymmetricPrivateKeyError> {
+    if format == "raw-private" {
+      let private_key = match typ {
+        "ec" => {
+          let key = match named_curve {
+            Some("P-224" | "secp224r1") if key.len() == 28 => {
+              p224::SecretKey::from_slice(key).map(EcPrivateKey::P224)
+            }
+            Some("P-256" | "prime256v1" | "secp256r1") if key.len() == 32 => {
+              p256::SecretKey::from_slice(key).map(EcPrivateKey::P256)
+            }
+            Some("P-384" | "secp384r1") if key.len() == 48 => {
+              p384::SecretKey::from_slice(key).map(EcPrivateKey::P384)
+            }
+            Some("P-521" | "secp521r1") if key.len() == 66 => {
+              p521::SecretKey::from_slice(key).map(EcPrivateKey::P521)
+            }
+            Some("secp256k1") if key.len() == 32 => {
+              k256::SecretKey::from_slice(key).map(EcPrivateKey::Secp256k1)
+            }
+            _ => {
+              return Err(AsymmetricPrivateKeyError::InvalidRawPrivateKey);
+            }
+          }
+          .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
+          AsymmetricPrivateKey::Ec(key)
+        }
+        "ed25519" => {
+          let bytes: &[u8; 32] = key
+            .try_into()
+            .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
+          AsymmetricPrivateKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(
+            bytes,
+          ))
+        }
+        "x25519" => {
+          let bytes: [u8; 32] = key
+            .try_into()
+            .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
+          AsymmetricPrivateKey::X25519(x25519_dalek::StaticSecret::from(bytes))
+        }
+        "ed448" => {
+          let bytes: [u8; 57] = key
+            .try_into()
+            .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
+          AsymmetricPrivateKey::Ed448(ed448_goldilocks::SigningKey::from(
+            ed448_goldilocks::EdwardsScalarBytes::from(bytes),
+          ))
+        }
+        "x448" => {
+          let bytes: [u8; 56] = key
+            .try_into()
+            .map_err(|_| AsymmetricPrivateKeyError::InvalidRawPrivateKey)?;
+          AsymmetricPrivateKey::X448(bytes)
+        }
+        _ => {
+          return Err(AsymmetricPrivateKeyError::UnsupportedKeyType(
+            typ.to_string(),
+          ));
+        }
+      };
+
+      return Ok(KeyObjectHandle::AsymmetricPrivate(private_key));
+    }
+    if format == "raw-seed" {
+      let algorithm = deno_crypto::pq_interop::Algorithm::from_name(typ)
+        .ok_or_else(|| {
+          AsymmetricPrivateKeyError::UnsupportedKeyType(typ.to_string())
+        })?;
+      ensure_node_pq_algorithm_supported(algorithm)?;
+      let key = deno_crypto::pq_interop::import_private_seed(algorithm, key)
+        .map_err(|_| AsymmetricPrivateKeyError::InvalidPrivateKey)?;
+      return Ok(KeyObjectHandle::AsymmetricPrivate(
+        AsymmetricPrivateKey::PostQuantum(key),
+      ));
+    }
     let document = match format {
       "pem" => {
         let pem = std::str::from_utf8(key).map_err(|err| {
@@ -1028,34 +1177,29 @@ impl KeyObjectHandle {
           // Try standard PKCS#8 encrypted PEM. Distinguish wrong passphrase
           // (correct format, decryption fails) from PEM that isn't actually
           // encrypted PKCS#8 — Node ignores the passphrase in the latter.
-          match SecretDocument::from_pkcs8_encrypted_pem(pem, passphrase) {
-            Ok(doc) => doc,
-            Err(pkcs8::Error::EncryptedPrivateKey(_)) => {
-              return Err(
-                AsymmetricPrivateKeyError::EncryptedPrivateKeyBadDecrypt,
-              );
-            }
-            Err(_) => {
-              let normalized = normalize_pem_line_width(pem);
-              let (label, doc) = SecretDocument::from_pem(&normalized)
-                .map_err(|_| AsymmetricPrivateKeyError::InvalidPemPrivateKey)?;
-              match label {
-                PrivateKeyInfo::PEM_LABEL => doc,
-                rsa::pkcs1::RsaPrivateKey::PEM_LABEL => {
-                  SecretDocument::from_pkcs1_der(doc.as_bytes()).map_err(
-                    |_| AsymmetricPrivateKeyError::InvalidPkcs1PrivateKey,
-                  )?
-                }
-                sec1::EcPrivateKey::PEM_LABEL => {
-                  SecretDocument::from_sec1_der(doc.as_bytes()).map_err(
-                    |_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey,
-                  )?
-                }
-                _ => {
-                  return Err(
-                    AsymmetricPrivateKeyError::InvalidEncryptedPemPrivateKey,
-                  );
-                }
+          if pem.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----") {
+            SecretDocument::from_pkcs8_encrypted_pem(pem, passphrase)
+              .map_err(|_| AsymmetricPrivateKeyError::BadDecrypt)?
+          } else {
+            let normalized = normalize_pem_line_width(pem);
+            let (label, doc) = SecretDocument::from_pem(&normalized)
+              .map_err(|_| AsymmetricPrivateKeyError::InvalidPemPrivateKey)?;
+            match label {
+              PrivateKeyInfo::PEM_LABEL => doc,
+              rsa::pkcs1::RsaPrivateKey::PEM_LABEL => {
+                SecretDocument::from_pkcs1_der(doc.as_bytes()).map_err(
+                  |_| AsymmetricPrivateKeyError::InvalidPkcs1PrivateKey,
+                )?
+              }
+              sec1::EcPrivateKey::PEM_LABEL => {
+                SecretDocument::from_sec1_der(doc.as_bytes()).map_err(|_| {
+                  AsymmetricPrivateKeyError::InvalidSec1PrivateKey
+                })?
+              }
+              _ => {
+                return Err(
+                  AsymmetricPrivateKeyError::InvalidEncryptedPemPrivateKey,
+                );
               }
             }
           }
@@ -1110,9 +1254,7 @@ impl KeyObjectHandle {
           if let Some(passphrase) = passphrase {
             if EncryptedPrivateKeyInfo::try_from(key).is_ok() {
               SecretDocument::from_pkcs8_encrypted_der(key, passphrase)
-                .map_err(|_| {
-                  AsymmetricPrivateKeyError::InvalidEncryptedPkcs8PrivateKey
-                })?
+                .map_err(|_| AsymmetricPrivateKeyError::BadDecrypt)?
             } else {
               // Node ignores the passphrase when the key isn't actually
               // encrypted.
@@ -1251,6 +1393,14 @@ impl KeyObjectHandle {
           key: dh::PrivateKey::from_bytes(private_key_int.value()),
           params,
         })
+      }
+      oid if deno_crypto::pq_interop::Algorithm::from_oid(oid).is_some() => {
+        ensure_node_pq_algorithm_supported(
+          deno_crypto::pq_interop::Algorithm::from_oid(oid).unwrap(),
+        )?;
+        let key = deno_crypto::pq_interop::import_private_pkcs8(document_bytes)
+          .map_err(|_| AsymmetricPrivateKeyError::InvalidPkcs8PrivateKey)?;
+        AsymmetricPrivateKey::PostQuantum(key)
       }
       _ => return Err(UnsupportedPrivateKeyOidError.into()),
     };
@@ -1399,6 +1549,24 @@ impl KeyObjectHandle {
           .ok_or(RsaJwkError::MissingRsaPrivateComponent)?
           .as_bytes(),
       )?;
+      let dp = BASE64_URL_SAFE_NO_PAD.decode(
+        jwk
+          .dp
+          .ok_or(RsaJwkError::MissingRsaPrivateComponent)?
+          .as_bytes(),
+      )?;
+      let dq = BASE64_URL_SAFE_NO_PAD.decode(
+        jwk
+          .dq
+          .ok_or(RsaJwkError::MissingRsaPrivateComponent)?
+          .as_bytes(),
+      )?;
+      let qi = BASE64_URL_SAFE_NO_PAD.decode(
+        jwk
+          .qi
+          .ok_or(RsaJwkError::MissingRsaPrivateComponent)?
+          .as_bytes(),
+      )?;
 
       let mut private_key = RsaPrivateKey::from_components(
         rsa::BigUint::from_bytes_be(&n),
@@ -1410,11 +1578,75 @@ impl KeyObjectHandle {
         ],
       )?;
       private_key.precompute()?; // precompute CRT params
+      let expected_qi =
+        num_bigint_dig::BigInt::from_bytes_be(num_bigint_dig::Sign::Plus, &qi);
+      if private_key.dp() != Some(&rsa::BigUint::from_bytes_be(&dp))
+        || private_key.dq() != Some(&rsa::BigUint::from_bytes_be(&dq))
+        || private_key.qinv() != Some(&expected_qi)
+      {
+        return Err(RsaJwkError::InvalidRsaPrivateComponent);
+      }
 
       Ok(KeyObjectHandle::AsymmetricPrivate(
         AsymmetricPrivateKey::Rsa(private_key),
       ))
     }
+  }
+
+  pub fn new_pq_jwk(
+    jwk: &deno_core::serde_json::Value,
+    is_public: bool,
+  ) -> Result<KeyObjectHandle, PqJwkError> {
+    use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+
+    let object = jwk.as_object().ok_or_else(PqJwkError::invalid)?;
+    if object.get("kty").and_then(|value| value.as_str()) != Some("AKP") {
+      return Err(PqJwkError::invalid());
+    }
+    let algorithm_name = object
+      .get("alg")
+      .and_then(|value| value.as_str())
+      .ok_or_else(PqJwkError::invalid)?;
+    let algorithm =
+      deno_crypto::pq_interop::Algorithm::from_name(algorithm_name)
+        .filter(|algorithm| algorithm.name() == algorithm_name)
+        .ok_or_else(PqJwkError::invalid)?;
+    let public_bytes = object
+      .get("pub")
+      .and_then(|value| value.as_str())
+      .ok_or_else(PqJwkError::invalid)
+      .and_then(|value| {
+        BASE64_URL_SAFE_NO_PAD
+          .decode(value)
+          .map_err(|_| PqJwkError::invalid())
+      })?;
+    let public =
+      deno_crypto::pq_interop::import_public_raw(algorithm, &public_bytes)
+        .map_err(|_| PqJwkError::invalid())?;
+    if is_public {
+      return Ok(KeyObjectHandle::AsymmetricPublic(
+        AsymmetricPublicKey::PostQuantum(public),
+      ));
+    }
+
+    let private_bytes = object
+      .get("priv")
+      .and_then(|value| value.as_str())
+      .ok_or_else(PqJwkError::missing_private)
+      .and_then(|value| {
+        BASE64_URL_SAFE_NO_PAD
+          .decode(value)
+          .map_err(|_| PqJwkError::invalid())
+      })?;
+    let private =
+      deno_crypto::pq_interop::import_private_seed(algorithm, &private_bytes)
+        .map_err(|_| PqJwkError::invalid())?;
+    if private.public_key() != public {
+      return Err(PqJwkError::invalid());
+    }
+    Ok(KeyObjectHandle::AsymmetricPrivate(
+      AsymmetricPrivateKey::PostQuantum(private),
+    ))
   }
 
   pub fn new_ec_jwk(
@@ -1461,6 +1693,24 @@ impl KeyObjectHandle {
         return Err(EcJwkError::UnsupportedCurve(jwk.crv().to_string()));
       }
     };
+
+    if !is_public {
+      let supplied_public = match jwk.crv() {
+        "P-256" => EcPublicKey::P256(p256::PublicKey::from_jwk(jwk)?),
+        "P-384" => EcPublicKey::P384(p384::PublicKey::from_jwk(jwk)?),
+        "P-521" => EcPublicKey::P521(p521::PublicKey::from_jwk(jwk)?),
+        "secp256k1" => EcPublicKey::Secp256k1(k256::PublicKey::from_jwk(jwk)?),
+        _ => unreachable!(),
+      };
+      let KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Ec(private)) =
+        &handle
+      else {
+        unreachable!();
+      };
+      if private.to_public_key() != supplied_public {
+        return Err(EcJwkError::PublicPrivateMismatch);
+      }
+    }
 
     Ok(handle)
   }
@@ -1545,7 +1795,91 @@ impl KeyObjectHandle {
     format: &str,
     typ: &str,
     passphrase: Option<&[u8]>,
+    named_curve: Option<&str>,
   ) -> Result<KeyObjectHandle, AsymmetricPublicKeyError> {
+    if format == "raw-public" {
+      let public_key = if let Some(algorithm) =
+        deno_crypto::pq_interop::Algorithm::from_name(typ)
+      {
+        ensure_node_pq_algorithm_supported(algorithm)?;
+        let key = deno_crypto::pq_interop::import_public_raw(algorithm, key)
+          .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
+        AsymmetricPublicKey::PostQuantum(key)
+      } else {
+        match typ {
+          "ec" => {
+            let key = match named_curve {
+              Some("P-224" | "secp224r1") => {
+                p224::PublicKey::from_sec1_bytes(key).map(EcPublicKey::P224)
+              }
+              Some("P-256" | "prime256v1" | "secp256r1") => {
+                p256::PublicKey::from_sec1_bytes(key).map(EcPublicKey::P256)
+              }
+              Some("P-384" | "secp384r1") => {
+                p384::PublicKey::from_sec1_bytes(key).map(EcPublicKey::P384)
+              }
+              Some("P-521" | "secp521r1") => {
+                p521::PublicKey::from_sec1_bytes(key).map(EcPublicKey::P521)
+              }
+              Some("secp256k1") => k256::PublicKey::from_sec1_bytes(key)
+                .map(EcPublicKey::Secp256k1),
+              _ => {
+                return Err(AsymmetricPublicKeyError::InvalidRawPublicKey);
+              }
+            }
+            .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
+            AsymmetricPublicKey::Ec(key)
+          }
+          "ed25519" => {
+            let bytes: &[u8; 32] = key
+              .try_into()
+              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
+            let key = ed25519_dalek::VerifyingKey::from_bytes(bytes)
+              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
+            AsymmetricPublicKey::Ed25519(key)
+          }
+          "x25519" => {
+            let bytes: [u8; 32] = key
+              .try_into()
+              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
+            AsymmetricPublicKey::X25519(x25519_dalek::PublicKey::from(bytes))
+          }
+          "ed448" => {
+            let bytes: &[u8; 57] = key
+              .try_into()
+              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
+            let key = ed448_goldilocks::VerifyingKey::from_bytes(bytes)
+              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
+            AsymmetricPublicKey::Ed448(key)
+          }
+          "x448" => {
+            let bytes: [u8; 56] = key
+              .try_into()
+              .map_err(|_| AsymmetricPublicKeyError::InvalidRawPublicKey)?;
+            AsymmetricPublicKey::X448(bytes)
+          }
+          _ => {
+            return Err(AsymmetricPublicKeyError::UnsupportedKeyType(
+              typ.to_string(),
+            ));
+          }
+        }
+      };
+      return Ok(KeyObjectHandle::AsymmetricPublic(public_key));
+    }
+    if format == "raw-private" || format == "raw-seed" {
+      let private = KeyObjectHandle::new_asymmetric_private_key_from_js(
+        key,
+        format,
+        typ,
+        passphrase,
+        named_curve,
+      )?;
+      let KeyObjectHandle::AsymmetricPrivate(private) = private else {
+        unreachable!();
+      };
+      return Ok(KeyObjectHandle::AsymmetricPublic(private.to_public_key()));
+    }
     let document = match format {
       "pem" => {
         let pem = std::str::from_utf8(key).map_err(|err| {
@@ -1560,7 +1894,11 @@ impl KeyObjectHandle {
         // the private key path, which knows how to decrypt them.
         if pem.contains("Proc-Type: 4,ENCRYPTED") {
           let handle = KeyObjectHandle::new_asymmetric_private_key_from_js(
-            key, format, typ, passphrase,
+            key,
+            format,
+            typ,
+            passphrase,
+            named_curve,
           )?;
           match handle {
             KeyObjectHandle::AsymmetricPrivate(private) => {
@@ -1588,7 +1926,11 @@ impl KeyObjectHandle {
           | rsa::pkcs1::RsaPrivateKey::PEM_LABEL
           | "DSA PRIVATE KEY" => {
             let handle = KeyObjectHandle::new_asymmetric_private_key_from_js(
-              key, format, typ, passphrase,
+              key,
+              format,
+              typ,
+              passphrase,
+              named_curve,
             )?;
             match handle {
               KeyObjectHandle::AsymmetricPrivate(private) => {
@@ -1762,6 +2104,15 @@ impl KeyObjectHandle {
           key: dh::PublicKey::from_bytes(public_key_int.value()),
           params,
         })
+      }
+      oid if deno_crypto::pq_interop::Algorithm::from_oid(oid).is_some() => {
+        ensure_node_pq_algorithm_supported(
+          deno_crypto::pq_interop::Algorithm::from_oid(oid).unwrap(),
+        )?;
+        let key =
+          deno_crypto::pq_interop::import_public_spki(document.as_bytes())
+            .map_err(|_| AsymmetricPublicKeyError::InvalidSpkiPublicKey)?;
+        AsymmetricPublicKey::PostQuantum(key)
       }
       _ => return Err(AsymmetricPublicKeyError::UnsupportedPrivateKeyOid),
     };
@@ -1987,6 +2338,10 @@ pub enum AsymmetricPrivateKeyJwkError {
   #[property("code" = "ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE")]
   #[error("Unsupported JWK Key Type.")]
   JwkExportNotImplementedForKeyType,
+  #[class(generic)]
+  #[property("code" = "ERR_CRYPTO_OPERATION_FAILED")]
+  #[error("key does not have an available seed")]
+  PostQuantumSeedUnavailable,
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -2087,6 +2442,13 @@ impl AsymmetricPublicKey {
             "e": bytes_to_b64(&e.to_bytes_be()),
         });
         Ok(jwk)
+      }
+      AsymmetricPublicKey::PostQuantum(key) => {
+        Ok(deno_core::serde_json::json!({
+          "kty": "AKP",
+          "alg": key.algorithm().name(),
+          "pub": bytes_to_b64(key.raw()),
+        }))
       }
       // RSA-PSS, DSA, X448 all map to "Unsupported JWK Key Type." in Node.js.
       _ => Err(AsymmetricPublicKeyJwkError::JwkExportNotImplementedForKeyType),
@@ -2264,6 +2626,9 @@ impl AsymmetricPublicKey {
               .map_err(|_| AsymmetricPublicKeyDerError::InvalidDhPublicKey)?
               .into_boxed_slice()
           }
+          AsymmetricPublicKey::PostQuantum(key) => {
+            key.spki().to_vec().into_boxed_slice()
+          }
         };
         Ok(der)
       }
@@ -2400,7 +2765,18 @@ impl AsymmetricPrivateKey {
             "crv": "Ed448",
             "x": bytes_to_b64(&x_bytes),
             "d": bytes_to_b64(&bytes),
-            "kty": "OKP",
+          "kty": "OKP",
+        }))
+      }
+      AsymmetricPrivateKey::PostQuantum(key) => {
+        let seed = key
+          .seed()
+          .ok_or(AsymmetricPrivateKeyJwkError::PostQuantumSeedUnavailable)?;
+        Ok(deno_core::serde_json::json!({
+          "kty": "AKP",
+          "alg": key.algorithm().name(),
+          "pub": bytes_to_b64(key.public_key().raw()),
+          "priv": bytes_to_b64(seed),
         }))
       }
       _ => Err(AsymmetricPrivateKeyJwkError::JwkExportNotImplementedForKeyType),
@@ -2595,6 +2971,9 @@ impl AsymmetricPrivateKey {
               .map_err(|_| AsymmetricPrivateKeyDerError::InvalidDhPrivateKey)?
               .into_boxed_slice()
           }
+          AsymmetricPrivateKey::PostQuantum(key) => {
+            key.pkcs8().to_vec().into_boxed_slice()
+          }
         };
 
         Ok(der)
@@ -2611,9 +2990,14 @@ pub fn op_node_create_private_key(
   #[string] format: &str,
   #[string] typ: &str,
   #[buffer] passphrase: Option<&[u8]>,
+  #[string] named_curve: Option<String>,
 ) -> Result<KeyObjectHandle, AsymmetricPrivateKeyError> {
   KeyObjectHandle::new_asymmetric_private_key_from_js(
-    key, format, typ, passphrase,
+    key,
+    format,
+    typ,
+    passphrase,
+    named_curve.as_deref(),
   )
 }
 
@@ -2634,6 +3018,9 @@ pub struct RsaJwkKey {
   d: Option<String>,
   p: Option<String>,
   q: Option<String>,
+  dp: Option<String>,
+  dq: Option<String>,
+  qi: Option<String>,
 }
 
 #[op2]
@@ -2643,6 +3030,15 @@ pub fn op_node_create_rsa_jwk(
   is_public: bool,
 ) -> Result<KeyObjectHandle, RsaJwkError> {
   KeyObjectHandle::new_rsa_jwk(jwk, is_public)
+}
+
+#[op2]
+#[cppgc]
+pub fn op_node_create_pq_jwk(
+  #[serde] jwk: deno_core::serde_json::Value,
+  is_public: bool,
+) -> Result<KeyObjectHandle, PqJwkError> {
+  KeyObjectHandle::new_pq_jwk(&jwk, is_public)
 }
 
 #[op2]
@@ -2661,9 +3057,14 @@ pub fn op_node_create_public_key(
   #[string] format: &str,
   #[string] typ: &str,
   #[buffer] passphrase: Option<&[u8]>,
+  #[string] named_curve: Option<String>,
 ) -> Result<KeyObjectHandle, AsymmetricPublicKeyError> {
   KeyObjectHandle::new_asymmetric_public_key_from_js(
-    key, format, typ, passphrase,
+    key,
+    format,
+    typ,
+    passphrase,
+    named_curve.as_deref(),
   )
 }
 
@@ -2713,6 +3114,12 @@ pub fn op_node_get_asymmetric_key_type(
     }
     KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Dh(_))
     | KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Dh(_)) => Ok("dh"),
+    KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::PostQuantum(
+      key,
+    )) => Ok(key.algorithm().node_name()),
+    KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::PostQuantum(
+      key,
+    )) => Ok(key.algorithm().node_name()),
     KeyObjectHandle::Secret(_) => Err(JsErrorBox::type_error(
       "symmetric key is not an asymmetric key",
     )),
@@ -2750,6 +3157,7 @@ pub enum AsymmetricKeyDetails {
   X448,
   Ed448,
   Dh,
+  PostQuantum,
 }
 
 #[op2]
@@ -2813,6 +3221,9 @@ pub fn op_node_get_asymmetric_key_details(
       AsymmetricPrivateKey::X448(_) => Ok(AsymmetricKeyDetails::X448),
       AsymmetricPrivateKey::Ed448(_) => Ok(AsymmetricKeyDetails::Ed448),
       AsymmetricPrivateKey::Dh(_) => Ok(AsymmetricKeyDetails::Dh),
+      AsymmetricPrivateKey::PostQuantum(_) => {
+        Ok(AsymmetricKeyDetails::PostQuantum)
+      }
     },
     KeyObjectHandle::AsymmetricPublic(public_key) => match public_key {
       AsymmetricPublicKey::Rsa(key) => {
@@ -2870,6 +3281,9 @@ pub fn op_node_get_asymmetric_key_details(
       AsymmetricPublicKey::X448(_) => Ok(AsymmetricKeyDetails::X448),
       AsymmetricPublicKey::Ed448(_) => Ok(AsymmetricKeyDetails::Ed448),
       AsymmetricPublicKey::Dh(_) => Ok(AsymmetricKeyDetails::Dh),
+      AsymmetricPublicKey::PostQuantum(_) => {
+        Ok(AsymmetricKeyDetails::PostQuantum)
+      }
     },
     KeyObjectHandle::Secret(_) => Err(JsErrorBox::type_error(
       "symmetric key is not an asymmetric key",
@@ -3332,6 +3746,50 @@ pub async fn op_node_generate_ed25519_key_async() -> KeyObjectHandlePair {
   spawn_blocking(ed25519_generate).await.unwrap()
 }
 
+fn post_quantum_generate(
+  algorithm_name: &str,
+) -> Result<KeyObjectHandlePair, JsErrorBox> {
+  let algorithm = deno_crypto::pq_interop::Algorithm::from_name(algorithm_name)
+    .ok_or_else(|| JsErrorBox::type_error("Invalid post-quantum algorithm"))?;
+  ensure_node_pq_algorithm_supported(algorithm)
+    .map_err(JsErrorBox::from_err)?;
+  let seed_len = match algorithm {
+    deno_crypto::pq_interop::Algorithm::MlDsa44
+    | deno_crypto::pq_interop::Algorithm::MlDsa65
+    | deno_crypto::pq_interop::Algorithm::MlDsa87 => 32,
+    deno_crypto::pq_interop::Algorithm::MlKem768
+    | deno_crypto::pq_interop::Algorithm::MlKem1024 => 64,
+    deno_crypto::pq_interop::Algorithm::MlKem512 => unreachable!(),
+  };
+  let mut seed = vec![0u8; seed_len];
+  thread_rng().fill_bytes(&mut seed);
+  let private = deno_crypto::pq_interop::import_private_seed(algorithm, &seed)
+    .map_err(|error| JsErrorBox::generic(error.to_string()))?;
+  let public = private.public_key();
+  Ok(KeyObjectHandlePair::new(
+    AsymmetricPrivateKey::PostQuantum(private),
+    AsymmetricPublicKey::PostQuantum(public),
+  ))
+}
+
+#[op2]
+#[cppgc]
+pub fn op_node_generate_post_quantum_key(
+  #[string] algorithm_name: &str,
+) -> Result<KeyObjectHandlePair, JsErrorBox> {
+  post_quantum_generate(algorithm_name)
+}
+
+#[op2]
+#[cppgc]
+pub async fn op_node_generate_post_quantum_key_async(
+  #[string] algorithm_name: String,
+) -> Result<KeyObjectHandlePair, JsErrorBox> {
+  spawn_blocking(move || post_quantum_generate(&algorithm_name))
+    .await
+    .unwrap()
+}
+
 fn x448_generate() -> KeyObjectHandlePair {
   let mut seed = [0u8; 56];
   thread_rng().fill_bytes(&mut seed);
@@ -3544,6 +4002,92 @@ pub fn op_node_export_secret_key(
     .as_secret_key()
     .ok_or_else(|| JsErrorBox::type_error("key is not a secret key"))?;
   Ok(key.to_vec().into())
+}
+
+#[op2]
+pub fn op_node_export_public_key_raw(
+  #[cppgc] handle: &KeyObjectHandle,
+  #[string] point_format: Option<String>,
+) -> Result<Uint8Array, JsErrorBox> {
+  let key = handle.as_public_key().ok_or_else(|| {
+    JsErrorBox::type_error("raw-public export requires a public key")
+  })?;
+  match key.as_ref() {
+    AsymmetricPublicKey::Ec(key) => {
+      use elliptic_curve::sec1::ToEncodedPoint;
+      let compressed = point_format.as_deref() == Some("compressed");
+      let bytes = match key {
+        EcPublicKey::P224(key) => {
+          key.to_encoded_point(compressed).as_bytes().to_vec()
+        }
+        EcPublicKey::P256(key) => {
+          key.to_encoded_point(compressed).as_bytes().to_vec()
+        }
+        EcPublicKey::P384(key) => {
+          key.to_encoded_point(compressed).as_bytes().to_vec()
+        }
+        EcPublicKey::P521(key) => {
+          key.to_encoded_point(compressed).as_bytes().to_vec()
+        }
+        EcPublicKey::Secp256k1(key) => {
+          key.to_encoded_point(compressed).as_bytes().to_vec()
+        }
+      };
+      Ok(bytes.into())
+    }
+    AsymmetricPublicKey::X25519(key) => Ok(key.as_bytes().to_vec().into()),
+    AsymmetricPublicKey::Ed25519(key) => Ok(key.to_bytes().to_vec().into()),
+    AsymmetricPublicKey::X448(key) => Ok(key.to_vec().into()),
+    AsymmetricPublicKey::Ed448(key) => Ok(key.to_bytes().to_vec().into()),
+    AsymmetricPublicKey::PostQuantum(key) => Ok(key.raw().to_vec().into()),
+    _ => Err(JsErrorBox::type_error(
+      "raw-public export is not supported for this key type",
+    )),
+  }
+}
+
+#[op2]
+pub fn op_node_export_private_key_raw(
+  #[cppgc] handle: &KeyObjectHandle,
+) -> Result<Uint8Array, JsErrorBox> {
+  let key = handle.as_private_key().ok_or_else(|| {
+    JsErrorBox::type_error("raw-private export requires a private key")
+  })?;
+  let bytes = match key {
+    AsymmetricPrivateKey::Ec(key) => match key {
+      EcPrivateKey::P224(key) => key.to_bytes().to_vec(),
+      EcPrivateKey::P256(key) => key.to_bytes().to_vec(),
+      EcPrivateKey::P384(key) => key.to_bytes().to_vec(),
+      EcPrivateKey::P521(key) => key.to_bytes().to_vec(),
+      EcPrivateKey::Secp256k1(key) => key.to_bytes().to_vec(),
+    },
+    AsymmetricPrivateKey::X25519(key) => key.to_bytes().to_vec(),
+    AsymmetricPrivateKey::Ed25519(key) => key.to_bytes().to_vec(),
+    AsymmetricPrivateKey::X448(key) => key.to_vec(),
+    AsymmetricPrivateKey::Ed448(key) => key.to_bytes().to_vec(),
+    _ => {
+      return Err(JsErrorBox::type_error(
+        "raw-private export is not supported for this key type",
+      ));
+    }
+  };
+  Ok(bytes.into())
+}
+
+#[op2]
+pub fn op_node_export_private_key_seed(
+  #[cppgc] handle: &KeyObjectHandle,
+) -> Result<Uint8Array, JsErrorBox> {
+  match handle.as_private_key() {
+    Some(AsymmetricPrivateKey::PostQuantum(key)) => {
+      key.seed().map(|seed| seed.to_vec().into()).ok_or_else(|| {
+        JsErrorBox::generic("key does not have an available seed")
+      })
+    }
+    _ => Err(JsErrorBox::type_error(
+      "raw-seed export requires a post-quantum private key",
+    )),
+  }
 }
 
 #[op2]
@@ -3908,6 +4452,7 @@ fn encrypt_pkcs8_private_key_pem(
   let pbkdf2_iters: u32 = 2048;
 
   let mut aes_iv = [0u8; 16];
+  let mut des_iv = [0u8; 8];
 
   let pbes2_params = match cipher_name {
     "aes-128-cbc" => {
@@ -3941,6 +4486,20 @@ fn encrypt_pkcs8_private_key_pem(
           "Unsupported cipher for PKCS#8 encryption: {cipher_name}"
         ))
       })?
+    }
+    "des-ede3-cbc" => {
+      thread_rng().fill_bytes(&mut des_iv);
+      let kdf = pbes2::Pbkdf2Params::hmac_with_sha256(pbkdf2_iters, &salt)
+        .map_err(|_| {
+          ExportPrivateKeyPemError::UnsupportedCipher(format!(
+            "Unsupported cipher for PKCS#8 encryption: {cipher_name}"
+          ))
+        })?
+        .into();
+      pbes2::Parameters {
+        kdf,
+        encryption: pbes2::EncryptionScheme::DesEde3Cbc { iv: &des_iv },
+      }
     }
     _ => {
       return Err(ExportPrivateKeyPemError::UnsupportedCipher(format!(
@@ -4135,9 +4694,9 @@ pub enum ExportPrivateKeyDerError {
   EncryptionFailed,
 }
 
-/// Encrypt a PKCS#8 DER private key using PBES2 (PBKDF2-HMAC-SHA256 + AES-CBC),
-/// matching the format produced by OpenSSL when given a cipher name like
-/// "aes-128-cbc". Returns the DER-encoded `EncryptedPrivateKeyInfo`.
+/// Encrypt a PKCS#8 DER private key using PBES2 with PBKDF2-HMAC-SHA256,
+/// matching the format produced by OpenSSL. Returns the DER-encoded
+/// `EncryptedPrivateKeyInfo`.
 fn encrypt_private_key_pkcs8_der(
   data: &[u8],
   cipher_name: &str,
@@ -4145,23 +4704,45 @@ fn encrypt_private_key_pkcs8_der(
 ) -> Result<Vec<u8>, ExportPrivateKeyDerError> {
   use pkcs8::pkcs5::pbes2;
 
-  // 16-byte PBKDF2 salt and 16-byte AES IV, both random.
+  // 16-byte PBKDF2 salt and cipher-specific IVs, all random.
   let mut salt = [0u8; 16];
-  let mut iv = [0u8; 16];
+  let mut aes_iv = [0u8; 16];
+  let mut des_iv = [0u8; 8];
   thread_rng().fill_bytes(&mut salt);
-  thread_rng().fill_bytes(&mut iv);
 
   // OpenSSL's default for PKCS#8 PBES2 export is 2048 iterations.
   const ITERATIONS: u32 = 2048;
 
   let pbes2_params = match cipher_name {
     "aes-128-cbc" => {
-      pbes2::Parameters::pbkdf2_sha256_aes128cbc(ITERATIONS, &salt, &iv)
+      thread_rng().fill_bytes(&mut aes_iv);
+      pbes2::Parameters::pbkdf2_sha256_aes128cbc(ITERATIONS, &salt, &aes_iv)
         .map_err(|_| ExportPrivateKeyDerError::EncryptionFailed)?
     }
-    "aes-256-cbc" => {
-      pbes2::Parameters::pbkdf2_sha256_aes256cbc(ITERATIONS, &salt, &iv)
+    "aes-192-cbc" => {
+      thread_rng().fill_bytes(&mut aes_iv);
+      let kdf = pbes2::Pbkdf2Params::hmac_with_sha256(ITERATIONS, &salt)
         .map_err(|_| ExportPrivateKeyDerError::EncryptionFailed)?
+        .into();
+      pbes2::Parameters {
+        kdf,
+        encryption: pbes2::EncryptionScheme::Aes192Cbc { iv: &aes_iv },
+      }
+    }
+    "aes-256-cbc" => {
+      thread_rng().fill_bytes(&mut aes_iv);
+      pbes2::Parameters::pbkdf2_sha256_aes256cbc(ITERATIONS, &salt, &aes_iv)
+        .map_err(|_| ExportPrivateKeyDerError::EncryptionFailed)?
+    }
+    "des-ede3-cbc" => {
+      thread_rng().fill_bytes(&mut des_iv);
+      let kdf = pbes2::Pbkdf2Params::hmac_with_sha256(ITERATIONS, &salt)
+        .map_err(|_| ExportPrivateKeyDerError::EncryptionFailed)?
+        .into();
+      pbes2::Parameters {
+        kdf,
+        encryption: pbes2::EncryptionScheme::DesEde3Cbc { iv: &des_iv },
+      }
     }
     _ => {
       return Err(ExportPrivateKeyDerError::UnsupportedCipher(format!(

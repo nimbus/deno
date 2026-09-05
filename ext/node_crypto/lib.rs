@@ -45,6 +45,7 @@ use rsa::traits::PublicKeyParts;
 pub mod cipher;
 pub(crate) mod dh;
 pub mod digest;
+pub mod kem;
 pub mod keys;
 pub(crate) mod md5_sha1;
 pub(crate) mod pkcs3;
@@ -96,6 +97,8 @@ deno_core::extension!(
     op_node_hash_update,
     op_node_hkdf_async,
     op_node_hkdf,
+    kem::op_node_kem_decapsulate,
+    kem::op_node_kem_encapsulate,
     op_node_pbkdf2_async,
     op_node_pbkdf2,
     op_node_pbkdf2_validate,
@@ -110,15 +113,18 @@ deno_core::extension!(
     op_node_sign,
     op_node_sign_ed25519,
     op_node_sign_ed448,
+    op_node_sign_ml_dsa,
     op_node_verify,
     op_node_verify_ed25519,
     op_node_verify_ed448,
+    op_node_verify_ml_dsa,
     op_node_verify_spkac,
     op_node_cert_export_public_key,
     op_node_cert_export_challenge,
     keys::op_node_create_private_key,
     keys::op_node_create_ed_raw,
     keys::op_node_create_rsa_jwk,
+    keys::op_node_create_pq_jwk,
     keys::op_node_create_ec_jwk,
     keys::op_node_create_public_key,
     keys::op_node_create_secret_key,
@@ -127,9 +133,12 @@ deno_core::extension!(
     keys::op_node_export_private_key_der,
     keys::op_node_export_private_key_jwk,
     keys::op_node_export_private_key_pem,
+    keys::op_node_export_private_key_raw,
     keys::op_node_export_public_key_der,
     keys::op_node_export_public_key_pem,
     keys::op_node_export_public_key_jwk,
+    keys::op_node_export_public_key_raw,
+    keys::op_node_export_private_key_seed,
     keys::op_node_export_secret_key_b64url,
     keys::op_node_export_secret_key,
     keys::op_node_generate_dh_group_key_async,
@@ -142,6 +151,8 @@ deno_core::extension!(
     keys::op_node_generate_ec_key,
     keys::op_node_generate_ed25519_key_async,
     keys::op_node_generate_ed25519_key,
+    keys::op_node_generate_post_quantum_key_async,
+    keys::op_node_generate_post_quantum_key,
     keys::op_node_generate_x448_key_async,
     keys::op_node_generate_x448_key,
     keys::op_node_generate_ed448_key_async,
@@ -1975,6 +1986,59 @@ pub fn op_node_verify_ed448(
   };
 
   Ok(ed448.verify_raw(&sig, data).is_ok())
+}
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+#[class(type)]
+pub enum SignMlDsaError {
+  #[error("Expected private key")]
+  ExpectedPrivateKey,
+  #[error("Expected ML-DSA private key")]
+  ExpectedMlDsaPrivateKey,
+  #[error("ML-DSA signing failed")]
+  SigningFailed,
+}
+
+#[op2]
+#[buffer]
+pub fn op_node_sign_ml_dsa(
+  #[cppgc] key: &KeyObjectHandle,
+  #[buffer] data: &[u8],
+) -> Result<Box<[u8]>, SignMlDsaError> {
+  let private = key
+    .as_private_key()
+    .ok_or(SignMlDsaError::ExpectedPrivateKey)?;
+  let AsymmetricPrivateKey::PostQuantum(private) = private else {
+    return Err(SignMlDsaError::ExpectedMlDsaPrivateKey);
+  };
+  private
+    .sign(data)
+    .map(Vec::into_boxed_slice)
+    .map_err(|_| SignMlDsaError::SigningFailed)
+}
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+#[class(type)]
+pub enum VerifyMlDsaError {
+  #[error("Expected public key")]
+  ExpectedPublicKey,
+  #[error("Expected ML-DSA public key")]
+  ExpectedMlDsaPublicKey,
+}
+
+#[op2(fast)]
+pub fn op_node_verify_ml_dsa(
+  #[cppgc] key: &KeyObjectHandle,
+  #[buffer] data: &[u8],
+  #[buffer] signature: &[u8],
+) -> Result<bool, VerifyMlDsaError> {
+  let public = key
+    .as_public_key()
+    .ok_or(VerifyMlDsaError::ExpectedPublicKey)?;
+  let AsymmetricPublicKey::PostQuantum(public) = public.as_ref() else {
+    return Err(VerifyMlDsaError::ExpectedMlDsaPublicKey);
+  };
+  Ok(public.verify(data, signature))
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]

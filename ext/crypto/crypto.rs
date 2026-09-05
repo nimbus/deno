@@ -156,21 +156,17 @@ impl Crypto {
     Ok(typed_array)
   }
 
-  /// `Crypto.registerSymbols(webidlBrand, kKeyObject)` — internal static
-  /// method called by the crypto module bootstrap to hand the WebIDL brand
-  /// symbol (a private of `ext:deno_webidl/00_webidl.js`) and the
-  /// `kKeyObject` symbol (a private of ext/node) over to the crypto cppgc
-  /// methods, which need them to brand every freshly-constructed
-  /// `CryptoKey`. Idempotent and effect-only; returns `true` on success.
+  /// `Crypto.registerSymbols(webidlBrand, cryptoKeyPrototype)` — internal
+  /// bootstrap hook for the native `CryptoKey` instance prototype.
   #[fast]
   #[rename("registerSymbols")]
   #[static_method]
   fn register_symbols<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     webidl_brand: v8::Local<'s, v8::Value>,
-    k_key_object: v8::Local<'s, v8::Value>,
+    crypto_key_prototype: v8::Local<'s, v8::Value>,
   ) -> bool {
-    crate::make_key::register_symbols(scope, webidl_brand, k_key_object)
+    crate::make_key::register_symbols(scope, webidl_brand, crypto_key_prototype)
   }
 
   #[rename("randomUUID")]

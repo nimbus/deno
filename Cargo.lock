@@ -2341,7 +2341,9 @@ dependencies = [
  "ecdsa",
  "elliptic-curve 0.13.8",
  "fips203",
+ "fips204",
  "fips205",
+ "ghash",
  "hmac",
  "num-traits",
  "ocb3",
@@ -2933,6 +2935,7 @@ dependencies = [
  "ctr",
  "data-encoding",
  "deno_core",
+ "deno_crypto",
  "deno_crypto_provider",
  "deno_error",
  "der 0.7.9",
@@ -4733,6 +4736,18 @@ dependencies = [
  "rand_core 0.6.4",
  "sha3 0.10.8",
  "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "fips204"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9fb5a367b9846933e271a3c2a992930743f82ae5e8cb7faa780715a80fa0b15"
+dependencies = [
+ "rand_core 0.6.4",
+ "sha2",
+ "sha3 0.10.8",
  "zeroize",
 ]
 
@@ -7915,6 +7930,7 @@ dependencies = [
  "aes",
  "cbc",
  "der 0.7.9",
+ "des",
  "pbkdf2",
  "scrypt",
  "sha2",

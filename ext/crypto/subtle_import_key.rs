@@ -399,8 +399,13 @@ fn import_key_rsa<'s>(
   match (format, key_data) {
     (KeyFormat::Pkcs8, ImportKeyData::Buffer(b)) => {
       check_usages_subset(usages, priv_usages)?;
+      if pkcs8_type_matches(&b, crate::shared::RSA_ENCRYPTION_OID)
+        == Some(false)
+      {
+        return Err(data_error("Invalid key type".into()));
+      }
       let result = op_crypto_import_key_inner(opts, KeyData::Pkcs8(b))
-        .map_err(|e| CryptoError::Other(deno_error::JsErrorBox::from_err(e)))?;
+        .map_err(der_import_error)?;
       let ImportKeyResult::Rsa {
         raw_data,
         modulus_length,
@@ -419,8 +424,12 @@ fn import_key_rsa<'s>(
     }
     (KeyFormat::Spki, ImportKeyData::Buffer(b)) => {
       check_usages_subset(usages, pub_usages)?;
+      if spki_type_matches(&b, crate::shared::RSA_ENCRYPTION_OID) == Some(false)
+      {
+        return Err(data_error("Invalid key type".into()));
+      }
       let result = op_crypto_import_key_inner(opts, KeyData::Spki(b))
-        .map_err(|e| CryptoError::Other(deno_error::JsErrorBox::from_err(e)))?;
+        .map_err(der_import_error)?;
       let ImportKeyResult::Rsa {
         raw_data,
         modulus_length,
@@ -722,14 +731,13 @@ fn import_key_ml_kem<'s>(
     }
     (KeyFormat::Pkcs8, ImportKeyData::Buffer(b)) => {
       check_usages_subset(usages, priv_usages)?;
-      let res =
-        crate::mlkem::import_pkcs8_native(&b).map_err(|e| match e {
-          crate::mlkem::MlKemError::UnsupportedPkcs8Format => not_supported(
-            "ML-KEM 'expandedKey' PKCS#8 format is not supported; only the seed form is supported"
-              .into(),
-          ),
-          _ => data_error("Invalid key data".into()),
-        })?;
+      let res = crate::mlkem::import_pkcs8_native(&b).map_err(|e| match e {
+        crate::mlkem::MlKemError::UnsupportedPkcs8Format => not_supported(
+          "Importing an ML-KEM PKCS#8 key without a seed is not supported"
+            .into(),
+        ),
+        _ => data_error("Invalid key data".into()),
+      })?;
       if res.variant != variant {
         return Err(data_error("Imported key algorithm does not match".into()));
       }
@@ -737,6 +745,7 @@ fn import_key_ml_kem<'s>(
     }
     (KeyFormat::Jwk, ImportKeyData::Jwk(jwk_g)) => {
       let jwk = v8::Local::new(scope, &jwk_g);
+      reject_duplicate_jwk_key_ops(scope, jwk)?;
       let wants_private = read_string_member(scope, jwk, b"priv").is_some();
       let expected = if wants_private {
         priv_usages
@@ -779,6 +788,9 @@ fn import_key_ml_kem<'s>(
         make_public(scope, pub_bytes)
       }
     }
+    (KeyFormat::Raw, _) => Err(not_supported(format!(
+      "Unable to import {name} using raw format"
+    ))),
     _ => Err(not_supported("Unsupported key format for ML-KEM".into())),
   }
 }
@@ -846,13 +858,14 @@ fn import_key_ml_dsa<'s>(
     }
     (KeyFormat::Pkcs8, ImportKeyData::Buffer(b)) => {
       check_usages_subset(usages, &["sign"])?;
-      let res = crate::mldsa::from_pkcs8_native(variant, &b).map_err(|e| match e {
-        crate::mldsa::MlDsaError::UnsupportedPkcs8Format => not_supported(
-          "ML-DSA 'expandedKey' PKCS#8 format is not supported; only the seed form is supported"
-            .into(),
-        ),
-        _ => data_error("Invalid key data".into()),
-      })?;
+      let res =
+        crate::mldsa::from_pkcs8_native(variant, &b).map_err(|e| match e {
+          crate::mldsa::MlDsaError::UnsupportedPkcs8Format => not_supported(
+            "Importing an ML-DSA PKCS#8 key without a seed is not supported"
+              .into(),
+          ),
+          _ => data_error("Invalid key data".into()),
+        })?;
       Ok(make_private(scope, res.seed, res.private_key))
     }
     (KeyFormat::Spki, ImportKeyData::Buffer(b)) => {
@@ -863,6 +876,7 @@ fn import_key_ml_dsa<'s>(
     }
     (KeyFormat::Jwk, ImportKeyData::Jwk(jwk_g)) => {
       let jwk = v8::Local::new(scope, &jwk_g);
+      reject_duplicate_jwk_key_ops(scope, jwk)?;
       let wants_private = read_string_member(scope, jwk, b"priv").is_some();
       let expected: &[&str] = if wants_private {
         &["sign"]
@@ -902,6 +916,9 @@ fn import_key_ml_dsa<'s>(
         Ok(make_public(scope, pub_bytes))
       }
     }
+    (KeyFormat::Raw, _) => Err(not_supported(format!(
+      "Unable to import {name} using raw format"
+    ))),
     _ => Err(not_supported("Unsupported key format for ML-DSA".into())),
   }
 }
@@ -975,6 +992,7 @@ fn import_key_slh_dsa<'s>(
     }
     (KeyFormat::Jwk, ImportKeyData::Jwk(jwk_g)) => {
       let jwk = v8::Local::new(scope, &jwk_g);
+      reject_duplicate_jwk_key_ops(scope, jwk)?;
       let wants_private = read_string_member(scope, jwk, b"priv").is_some();
       let expected: &[&str] = if wants_private {
         &["sign"]
@@ -1028,6 +1046,20 @@ fn mldsa_public_key_len(variant: u8) -> usize {
   }
 }
 
+fn reject_duplicate_jwk_key_ops<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  jwk: v8::Local<'s, v8::Object>,
+) -> Result<(), CryptoError> {
+  if let Some(key_ops) = read_string_array_member(scope, jwk, b"key_ops") {
+    for (index, operation) in key_ops.iter().enumerate() {
+      if key_ops[..index].contains(operation) {
+        return Err(data_error("Duplicate key operation".into()));
+      }
+    }
+  }
+  Ok(())
+}
+
 fn validate_jwk_akp<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   jwk: v8::Local<'s, v8::Object>,
@@ -1044,20 +1076,26 @@ fn validate_jwk_akp<'s>(
   if alg.as_deref() != Some(algorithm_name) {
     return Err(data_error("Invalid algorithm".into()));
   }
+  let key_ops = read_string_array_member(scope, jwk, b"key_ops");
+  if let Some(key_ops) = &key_ops {
+    for (index, operation) in key_ops.iter().enumerate() {
+      if key_ops[..index].contains(operation) {
+        return Err(data_error("Duplicate key operation".into()));
+      }
+      if !ALL_USAGES.contains(&operation.as_str()) {
+        return Err(data_error(
+          "'key_ops' property of JsonWebKey is invalid".into(),
+        ));
+      }
+    }
+  }
   if !usages.is_empty()
     && let Some(use_) = read_string_member(scope, jwk, b"use")
     && use_ != expected_use
   {
     return Err(data_error("Invalid key usage".into()));
   }
-  if let Some(key_ops) = read_string_array_member(scope, jwk, b"key_ops") {
-    for u in &key_ops {
-      if !ALL_USAGES.contains(&u.as_str()) {
-        return Err(data_error(
-          "'key_ops' property of JsonWebKey is invalid".into(),
-        ));
-      }
-    }
+  if let Some(key_ops) = key_ops {
     for u in usages {
       if !key_ops.iter().any(|k| k == u) {
         return Err(data_error(
@@ -1147,8 +1185,11 @@ fn import_key_ec<'s>(
       } else if !usages.is_empty() {
         return Err(syntax_error("Key usage must be empty".into()));
       }
+      if spki_type_matches(&b, elliptic_curve::ALGORITHM_OID) == Some(false) {
+        return Err(data_error("Invalid key type".into()));
+      }
       let result = op_crypto_import_key_inner(opts, KeyData::Spki(b))
-        .map_err(|e| CryptoError::Other(deno_error::JsErrorBox::from_err(e)))?;
+        .map_err(der_import_error)?;
       let ImportKeyResult::Ec { raw_data } = result else {
         return Err(data_error("Invalid key data".into()));
       };
@@ -1163,8 +1204,11 @@ fn import_key_ec<'s>(
     }
     (KeyFormat::Pkcs8, ImportKeyData::Buffer(b)) => {
       check_usages_subset(usages, &priv_usages)?;
+      if pkcs8_type_matches(&b, elliptic_curve::ALGORITHM_OID) == Some(false) {
+        return Err(data_error("Invalid key type".into()));
+      }
       let result = op_crypto_import_key_inner(opts, KeyData::Pkcs8(b))
-        .map_err(|e| CryptoError::Other(deno_error::JsErrorBox::from_err(e)))?;
+        .map_err(der_import_error)?;
       let ImportKeyResult::Ec { raw_data } = result else {
         return Err(data_error("Invalid key data".into()));
       };
@@ -1186,6 +1230,11 @@ fn import_key_ec<'s>(
         return Err(data_error(
           "'kty' property of JsonWebKey must be 'EC'".into(),
         ));
+      }
+      if read_string_member(scope, jwk, b"crv").as_deref()
+        != Some(named_curve.as_str())
+      {
+        return Err(data_error("Invalid curve".into()));
       }
       if !usages.is_empty()
         && let Some(use_) = read_string_member(scope, jwk, b"use")
@@ -1326,6 +1375,25 @@ impl OkpKind {
       Self::X25519 | Self::X448 => "enc",
     }
   }
+  fn spki_type_matches(self, key_data: &[u8]) -> Option<bool> {
+    let info = spki::SubjectPublicKeyInfoRef::try_from(key_data).ok()?;
+    Some(match self {
+      Self::Ed25519 => info.algorithm.oid == crate::ed25519::ED25519_OID,
+      Self::X25519 => info.algorithm.oid == crate::x25519::X25519_OID,
+      Self::X448 => info.algorithm.oid == crate::x448::X448_OID,
+    })
+  }
+  fn pkcs8_type_matches(self, key_data: &[u8]) -> Option<bool> {
+    use elliptic_curve::pkcs8::PrivateKeyInfo;
+    use elliptic_curve::pkcs8::der::Decode;
+
+    let info = PrivateKeyInfo::from_der(key_data).ok()?;
+    Some(match self {
+      Self::Ed25519 => info.algorithm.oid == crate::ed25519::ED25519_OID,
+      Self::X25519 => info.algorithm.oid == crate::x25519::X25519_OID,
+      Self::X448 => info.algorithm.oid == crate::x448::X448_OID,
+    })
+  }
   fn import_spki(self, key_data: &[u8], out: &mut [u8]) -> bool {
     let oid = match self {
       Self::Ed25519 => crate::ed25519::ED25519_OID,
@@ -1401,7 +1469,12 @@ fn import_key_okp<'s>(
       check_usages_subset(usages, kind.pub_usages())?;
       let mut out = vec![0u8; kind.key_len()];
       if !kind.import_spki(&b, &mut out) {
-        return Err(data_error("Invalid key data".into()));
+        let message = if kind.spki_type_matches(&b) == Some(false) {
+          "Invalid key type"
+        } else {
+          "Invalid key data"
+        };
+        return Err(data_error(message.into()));
       }
       Ok(make_crypto_key(
         scope,
@@ -1416,7 +1489,12 @@ fn import_key_okp<'s>(
       check_usages_subset(usages, kind.priv_usages())?;
       let mut out = vec![0u8; kind.key_len()];
       if !kind.import_pkcs8(&b, &mut out) {
-        return Err(data_error("Invalid key data".into()));
+        let message = if kind.pkcs8_type_matches(&b) == Some(false) {
+          "Invalid key type"
+        } else {
+          "Invalid key data"
+        };
+        return Err(data_error(message.into()));
       }
       Ok(make_crypto_key(
         scope,
@@ -1437,6 +1515,13 @@ fn import_key_okp<'s>(
       let crv = read_string_member(scope, jwk, b"crv");
       if crv.as_deref() != Some(kind.name()) {
         return Err(data_error("Invalid curve".into()));
+      }
+      if matches!(kind, OkpKind::Ed25519)
+        && let Some(jwk_alg) = read_string_member(scope, jwk, b"alg")
+        && jwk_alg != kind.name()
+        && jwk_alg != "EdDSA"
+      {
+        return Err(data_error(format!("Invalid algorithm: {jwk_alg}")));
       }
       if !usages.is_empty()
         && let Some(use_) = read_string_member(scope, jwk, b"use")
@@ -1617,7 +1702,7 @@ fn import_key_hmac<'s>(
     .map(str::to_string)
     .ok_or_else(|| data_error("HMAC import requires 'hash'".into()))?;
 
-  let data = match (format, key_data) {
+  let mut data = match (format, key_data) {
     (KeyFormat::Raw, ImportKeyData::Buffer(b))
     | (KeyFormat::RawSecret, ImportKeyData::Buffer(b)) => b,
     (KeyFormat::Jwk, ImportKeyData::Jwk(jwk_g)) => {
@@ -1649,6 +1734,13 @@ fn import_key_hmac<'s>(
     }
     length = override_;
   }
+  if !length.is_multiple_of(8) {
+    let keep = length % 8;
+    let mask = u8::MAX << (8 - keep);
+    if let Some(last) = data.last_mut() {
+      *last &= mask;
+    }
+  }
   let allowed_usages: Vec<&str> = filter_usages(usages, ALL_USAGES);
   Ok(make_crypto_key(
     scope,
@@ -1673,7 +1765,12 @@ fn import_key_kmac<'s>(
 ) -> Result<v8::Local<'s, v8::Object>, CryptoError> {
   check_usages_subset(usages, &["sign", "verify"])?;
   let data = match (format, key_data) {
-    (KeyFormat::RawSecret | KeyFormat::Raw, ImportKeyData::Buffer(b)) => b,
+    (KeyFormat::RawSecret, ImportKeyData::Buffer(b)) => b,
+    (KeyFormat::Raw, _) => {
+      return Err(not_supported(format!(
+        "Unable to import {name} using raw format"
+      )));
+    }
     (KeyFormat::Jwk, ImportKeyData::Jwk(jwk_g)) => {
       let jwk = v8::Local::new(scope, &jwk_g);
       if read_string_member(scope, jwk, b"kty").as_deref() != Some("oct") {
@@ -1716,17 +1813,21 @@ fn import_key_kmac<'s>(
   };
   let data_len_bits = (data.len() * 8) as u32;
   let length = if let Some(length) = length {
-    if length > data_len_bits || length <= data_len_bits.saturating_sub(8) {
-      return Err(data_error("Invalid KMAC key length".into()));
+    if length.div_ceil(8) != data.len() as u32 {
+      return Err(data_error("Invalid key length".into()));
     }
     length
   } else {
     data_len_bits
   };
-  if length == 0 || !length.is_multiple_of(8) {
-    return Err(data_error("Invalid KMAC key length".into()));
+  let mut bytes = data[..length.div_ceil(8) as usize].to_vec();
+  if !length.is_multiple_of(8) {
+    let keep = length % 8;
+    let mask = u8::MAX << (8 - keep);
+    if let Some(last) = bytes.last_mut() {
+      *last &= mask;
+    }
   }
-  let bytes = data[..(length / 8) as usize].to_vec();
   let allowed_usages: Vec<&str> = filter_usages(usages, ALL_USAGES);
   Ok(make_crypto_key(
     scope,
@@ -2006,6 +2107,37 @@ fn read_hash_name<'s>(
 
 pub fn data_error(msg: String) -> CryptoError {
   CryptoError::Other(JsErrorBox::new("DOMExceptionDataError", msg))
+}
+
+fn der_import_error(error: crate::import_key::ImportKeyError) -> CryptoError {
+  match error {
+    crate::import_key::ImportKeyError::UnsupportedAlgorithm => {
+      data_error("Invalid key type".into())
+    }
+    crate::import_key::ImportKeyError::CurveMismatch => {
+      data_error("Named curve mismatch".into())
+    }
+    other => CryptoError::Other(JsErrorBox::from_err(other)),
+  }
+}
+
+fn spki_type_matches(
+  data: &[u8],
+  expected: const_oid::ObjectIdentifier,
+) -> Option<bool> {
+  let info = spki::SubjectPublicKeyInfoRef::try_from(data).ok()?;
+  Some(info.algorithm.oid == expected)
+}
+
+fn pkcs8_type_matches(
+  data: &[u8],
+  expected: const_oid::ObjectIdentifier,
+) -> Option<bool> {
+  use elliptic_curve::pkcs8::PrivateKeyInfo;
+  use elliptic_curve::pkcs8::der::Decode;
+
+  let info = PrivateKeyInfo::from_der(data).ok()?;
+  Some(info.algorithm.oid == expected)
 }
 
 pub fn syntax_error(msg: String) -> CryptoError {

@@ -675,6 +675,9 @@ fn export_okp(
         crv: Some(okp_crv(kind).to_string()),
         ..Default::default()
       };
+      if matches!(kind, OkpKind::Ed25519) {
+        jwk.alg = Some("Ed25519".to_string());
+      }
       if key.key_type == CryptoKeyType::Private {
         let x = match kind {
           OkpKind::Ed25519 => {
@@ -788,6 +791,15 @@ fn export_akp_mlkem(
       }
       Ok(ExportKeyOutput::Jwk(Box::new(jwk)))
     }
+    KeyFormat::Raw => Err(not_supported(format!(
+      "Unable to export {} {} key using raw format",
+      key.algorithm_name,
+      match key.key_type {
+        CryptoKeyType::Public => "public",
+        CryptoKeyType::Private => "private",
+        CryptoKeyType::Secret => "secret",
+      }
+    ))),
     _ => Err(not_supported(format!(
       "Unsupported key format for ML-KEM: {format:?}"
     ))),
@@ -869,6 +881,15 @@ fn export_akp_mldsa(
       }
       Ok(ExportKeyOutput::Jwk(Box::new(jwk)))
     }
+    KeyFormat::Raw => Err(not_supported(format!(
+      "Unable to export {} {} key using raw format",
+      key.algorithm_name,
+      match key.key_type {
+        CryptoKeyType::Public => "public",
+        CryptoKeyType::Private => "private",
+        CryptoKeyType::Secret => "secret",
+      }
+    ))),
     _ => Err(not_supported(format!(
       "Unsupported key format for ML-DSA: {format:?}"
     ))),

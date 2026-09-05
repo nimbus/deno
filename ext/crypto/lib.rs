@@ -46,6 +46,7 @@ use sha3::Sha3_512;
 use signature::hazmat::PrehashSigner;
 use signature::hazmat::PrehashVerifier;
 
+mod aes_gcm;
 mod algorithm;
 mod crypto;
 mod crypto_key;
@@ -62,6 +63,7 @@ mod make_key;
 mod mldsa;
 mod mlkem;
 mod node_interop;
+pub mod pq_interop;
 mod shared;
 mod slhdsa;
 mod subtle_crypto;

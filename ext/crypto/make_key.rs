@@ -4,9 +4,10 @@
 //!
 //! Builds a `CryptoKey` cppgc instance plus the `{ cppgc: CryptoKeyHandle }`
 //! handle wrapper object, the algorithm dictionary object, and the frozen
-//! `usages` array, and stamps the `webidl.brand` / `kKeyObject` /
-//! `hostObjectBrand` symbols the same way the legacy JS `constructKey()`
-//! helper did. Used by every `SubtleCrypto` method (import/generate/derive
+//! `usages` array. It connects the cppgc instance prototype to the public
+//! `CryptoKey.prototype` and installs inherited WebIDL and structured-clone
+//! hooks without exposing own properties. Used by every `SubtleCrypto`
+//! method (import/generate/derive
 //! /wrap/unwrap/encapsulate/decapsulate/getPublicKey) now that those bodies
 //! live in Rust.
 
@@ -20,33 +21,22 @@ use crate::crypto_key::CryptoKeyType;
 use crate::key_store::CryptoKeyHandle;
 use crate::shared::RawKeyData;
 
-/// Process-wide cache of the per-isolate symbols the JS `constructKey()`
-/// helper used to stamp onto every `CryptoKey`. Populated on the first call
-/// to [`stamp_symbols`]; reused on every subsequent call. These are
-/// `Symbol.for(...)`-style well-known symbols (or, for `webidl.brand`,
-/// fetched once from the loaded webidl ESM), so caching as `Global<Symbol>`
-/// is safe across isolates because they always resolve to the same symbol
-/// identity per isolate.
+/// Per-isolate values needed to connect native `CryptoKey` instances to the
+/// JavaScript interface and structured-clone machinery.
 pub struct CryptoSymbols {
   pub webidl_brand: v8::Global<v8::Symbol>,
-  pub k_key_object: v8::Global<v8::Symbol>,
   pub host_object_brand: v8::Global<v8::Symbol>,
+  pub crypto_key_prototype: v8::Global<v8::Object>,
 }
 
 thread_local! {
-  // Owned (not `Box::leak`ed) so the three `v8::Global<v8::Symbol>` get
-  // dropped when the thread exits, releasing the V8 globals before isolate
-  // teardown.  Each worker (= each isolate = each thread) has its own
-  // instance.
+  // Owned so the V8 globals are released before isolate teardown. Each
+  // worker (= each isolate = each thread) has its own instance.
   static SYMBOLS: RefCell<Option<CryptoSymbols>> = const { RefCell::new(None) };
 }
 
-/// Register the three brand symbols that the JS `constructKey()` used to
-/// stamp onto every `CryptoKey`. Called once per isolate from JS at module
-/// init time (`op_crypto_install_symbols`). The symbols are stored in a
-/// thread-local because they are isolate-specific but a `OpState` borrow is
-/// not always reachable from inside the cppgc methods that need them (the
-/// async dispatcher already holds it mutable).
+/// Register the values used by native `CryptoKey` construction. Called once
+/// per isolate from JS when the lazy `SubtleCrypto` singleton is initialized.
 pub fn set_symbols(symbols: CryptoSymbols) {
   SYMBOLS.with(|cell| {
     *cell.borrow_mut() = Some(symbols);
@@ -149,7 +139,9 @@ fn build_algorithm_object_with_integrity<'s>(
         .unwrap();
     }
     let key = one_byte_internalized(scope, b"hash");
-    obj.set(scope, key.into(), hash_obj.into());
+    obj
+      .create_data_property(scope, key.into(), hash_obj.into())
+      .unwrap();
   }
   if let Some(ref curve) = dict.named_curve {
     set_string(scope, obj, b"namedCurve", curve);
@@ -166,7 +158,9 @@ fn build_algorithm_object_with_integrity<'s>(
     };
     let u8 = v8::Uint8Array::new(scope, backing, 0, pe.len()).unwrap();
     let key = one_byte_internalized(scope, b"publicExponent");
-    obj.set(scope, key.into(), u8.into());
+    obj
+      .create_data_property(scope, key.into(), u8.into())
+      .unwrap();
   }
   if freeze {
     obj
@@ -217,7 +211,9 @@ pub fn build_handle_object<'s>(
   let handle = make_cppgc_object(scope, CryptoKeyHandle::from_raw(data));
   let wrapper = v8::Object::new(scope);
   let key = one_byte_internalized(scope, b"cppgc");
-  wrapper.set(scope, key.into(), handle.into());
+  wrapper
+    .create_data_property(scope, key.into(), handle.into())
+    .unwrap();
   wrapper
 }
 
@@ -235,20 +231,12 @@ pub fn make_crypto_key<'s>(
   alg: AlgorithmDict,
   data: RawKeyData,
 ) -> v8::Local<'s, v8::Object> {
-  let key_data_jsval = key_data_to_jsval(scope, &data);
-  let host_object_snapshot = build_host_object_snapshot(
-    scope,
-    key_type,
-    extractable,
-    usages,
-    &alg,
-    &data,
-  );
+  let usages = canonicalize_usages(usages);
   let handle = build_handle_object(scope, data);
   let algorithm_obj = build_algorithm_object(scope, &alg);
-  let usages_arr = build_usages_array(scope, usages);
+  let usages_arr = build_usages_array(scope, &usages);
   let public_algorithm_obj = build_public_algorithm_object(scope, &alg);
-  let public_usages_arr = build_public_usages_array(scope, usages);
+  let public_usages_arr = build_public_usages_array(scope, &usages);
 
   let crypto_key = CryptoKey::from_parts(
     scope,
@@ -261,117 +249,142 @@ pub fn make_crypto_key<'s>(
     handle.into(),
   );
   let obj = make_cppgc_object(scope, crypto_key);
-  stamp_symbols(scope, obj, key_data_jsval, host_object_snapshot);
+  stamp_prototype(scope, obj);
   obj
 }
 
-fn stamp_symbols<'s>(
+fn canonicalize_usages<'a>(usages: &[&'a str]) -> Vec<&'a str> {
+  const ORDER: &[&str] = &[
+    "encrypt",
+    "decrypt",
+    "sign",
+    "verify",
+    "deriveKey",
+    "deriveBits",
+    "wrapKey",
+    "unwrapKey",
+    "encapsulateKey",
+    "decapsulateKey",
+    "encapsulateBits",
+    "decapsulateBits",
+  ];
+  ORDER
+    .iter()
+    .filter_map(|candidate| {
+      usages.iter().find(|usage| *usage == candidate).copied()
+    })
+    .collect()
+}
+
+fn stamp_prototype<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   key: v8::Local<'s, v8::Object>,
-  k_key_object_val: v8::Local<'s, v8::Value>,
-  host_object_snapshot: v8::Local<'s, v8::Value>,
 ) {
-  // Clone the three cached `v8::Global<v8::Symbol>`s out while we hold the
-  // thread-local borrow, then materialize them as `v8::Local`s once the
-  // borrow has been released (`v8::Local::new` needs `scope`, which we
-  // can't lend through the closure because the closure can't capture
-  // `scope` while the with-borrow is active).
-  let Some((brand_g, k_key_object_g, host_brand_g)) =
-    with_symbols(scope, |syms| {
+  let Some((brand_g, host_brand_g, public_prototype_g)) =
+    with_symbols(scope, |symbols| {
       (
-        syms.webidl_brand.clone(),
-        syms.k_key_object.clone(),
-        syms.host_object_brand.clone(),
+        symbols.webidl_brand.clone(),
+        symbols.host_object_brand.clone(),
+        symbols.crypto_key_prototype.clone(),
       )
     })
   else {
     return;
   };
+  let public_prototype = v8::Local::new(scope, &public_prototype_g);
+  let internal_prototype = v8::Object::new(scope);
+  let _ = internal_prototype.set_prototype(scope, public_prototype.into());
+  let _ = key.set_prototype(scope, internal_prototype.into());
+
   let brand = v8::Local::new(scope, &brand_g);
-  let k_key_object = v8::Local::new(scope, &k_key_object_g);
   let host_brand_sym = v8::Local::new(scope, &host_brand_g);
-  // The brand symbols must be non-enumerable to match the legacy JS
-  // `ObjectDefineProperty(key, sym, { value: ... })` shape. Without
-  // `DONT_ENUM` the cppgc instance exposes them as plain own properties,
-  // which breaks `assert.deepStrictEqual` of two distinct keys with the
-  // same material (test/parallel/test-assert-deep.js Crypto subtest) and
-  // shows up as `[Symbol(...)]` slots in `Deno.inspect()` output.
-  let _ = key.define_own_property(
+  let _ = internal_prototype.define_own_property(
     scope,
     brand.into(),
     brand.into(),
-    v8::PropertyAttribute::DONT_ENUM,
+    v8::PropertyAttribute::READ_ONLY
+      | v8::PropertyAttribute::DONT_ENUM
+      | v8::PropertyAttribute::DONT_DELETE,
   );
 
-  let _ = key.define_own_property(
-    scope,
-    k_key_object.into(),
-    k_key_object_val,
-    v8::PropertyAttribute::DONT_ENUM,
-  );
-
-  // The hostObjectBrand is a function-valued property that the
-  // structured-clone serializer calls; replicate the legacy JS shape.
-  // The legacy JS used `ObjectDefineProperty(key, hostObjectBrand, { value:
-  // () => snapshot })` -- a closure-bound function. From Rust the same
-  // shape is built via a FunctionTemplate whose `data` slot carries the
-  // snapshot and whose body returns it.
-  let ft = v8::FunctionTemplate::builder(host_object_thunk)
-    .data(host_object_snapshot)
-    .build(scope);
+  // The serializer calls inherited host-object functions with the instance
+  // as `this`, so one native function can serve every key without placing a
+  // symbol on the instance.
+  let ft = v8::FunctionTemplate::new(scope, host_object_thunk);
   let host_fn = ft.get_function(scope).unwrap();
-  let _ = key.define_own_property(
+  let _ = internal_prototype.define_own_property(
     scope,
     host_brand_sym.into(),
     host_fn.into(),
-    v8::PropertyAttribute::DONT_ENUM,
+    v8::PropertyAttribute::READ_ONLY
+      | v8::PropertyAttribute::DONT_ENUM
+      | v8::PropertyAttribute::DONT_DELETE,
   );
 }
 
 fn host_object_thunk(
-  _scope: &mut v8::PinScope,
+  scope: &mut v8::PinScope,
   args: v8::FunctionCallbackArguments,
   mut rv: v8::ReturnValue,
 ) {
-  rv.set(args.data());
+  let Some(key) = deno_core::cppgc::try_unwrap_cppgc_object::<CryptoKey>(
+    scope,
+    args.this().into(),
+  ) else {
+    return;
+  };
+  if let Some(snapshot) = build_host_object_snapshot(scope, &key) {
+    rv.set(snapshot);
+  }
 }
 
-/// Build the `{ type: "CryptoKey", keyType, extractable, usages, algorithm,
-/// keyData }` snapshot the legacy `hostObjectBrand` getter returned.
+/// Build the structured-clone snapshot from immutable native slots.
 fn build_host_object_snapshot<'s>(
   scope: &mut v8::PinScope<'s, '_>,
-  key_type: CryptoKeyType,
-  extractable: bool,
-  usages: &[&str],
-  alg: &AlgorithmDict,
-  data: &RawKeyData,
-) -> v8::Local<'s, v8::Value> {
+  key: &CryptoKey,
+) -> Option<v8::Local<'s, v8::Value>> {
   let obj = v8::Object::new(scope);
   let type_key = one_byte_internalized(scope, b"type");
   let type_val = v8::String::new(scope, "CryptoKey").unwrap();
-  obj.set(scope, type_key.into(), type_val.into());
+  obj
+    .create_data_property(scope, type_key.into(), type_val.into())
+    .unwrap();
 
   let key_type_key = one_byte_internalized(scope, b"keyType");
-  let key_type_val = v8::String::new(scope, key_type_str(key_type)).unwrap();
-  obj.set(scope, key_type_key.into(), key_type_val.into());
+  let key_type_val =
+    v8::String::new(scope, key_type_str(key.key_type())).unwrap();
+  obj
+    .create_data_property(scope, key_type_key.into(), key_type_val.into())
+    .unwrap();
 
   let ext_key = one_byte_internalized(scope, b"extractable");
-  let ext_val = v8::Boolean::new(scope, extractable);
-  obj.set(scope, ext_key.into(), ext_val.into());
+  let ext_val = v8::Boolean::new(scope, key.extractable_());
+  obj
+    .create_data_property(scope, ext_key.into(), ext_val.into())
+    .unwrap();
 
   let usages_key = one_byte_internalized(scope, b"usages");
-  let usages_val = build_usages_array(scope, usages);
-  obj.set(scope, usages_key.into(), usages_val.into());
+  let usages = key.usages_as_vec(scope)?;
+  let usages = usages.iter().map(String::as_str).collect::<Vec<_>>();
+  let usages_val = build_usages_array(scope, &usages);
+  obj
+    .create_data_property(scope, usages_key.into(), usages_val.into())
+    .unwrap();
 
   let alg_key = one_byte_internalized(scope, b"algorithm");
-  let alg_val = build_algorithm_object(scope, alg);
-  obj.set(scope, alg_key.into(), alg_val.into());
+  let alg_val = key.algorithm_local(scope)?;
+  obj
+    .create_data_property(scope, alg_key.into(), alg_val.into())
+    .unwrap();
 
   let kd_key = one_byte_internalized(scope, b"keyData");
-  let kd_val = key_data_to_jsval(scope, data);
-  obj.set(scope, kd_key.into(), kd_val);
+  let handle = key.key_handle(scope)?;
+  let kd_val = key_data_to_jsval(scope, handle.data());
+  obj
+    .create_data_property(scope, kd_key.into(), kd_val)
+    .unwrap();
 
-  obj.into()
+  Some(obj.into())
 }
 
 fn key_type_str(t: CryptoKeyType) -> &'static str {
@@ -414,11 +427,15 @@ fn key_data_to_jsval<'s>(
       let obj = v8::Object::new(scope);
       let pk_key = one_byte_internalized(scope, b"privateKey");
       let pk_arr = u8a(scope, private_key);
-      obj.set(scope, pk_key.into(), pk_arr.into());
+      obj
+        .create_data_property(scope, pk_key.into(), pk_arr.into())
+        .unwrap();
       if let Some(seed) = seed {
         let seed_key = one_byte_internalized(scope, b"seed");
         let seed_arr = u8a(scope, seed);
-        obj.set(scope, seed_key.into(), seed_arr.into());
+        obj
+          .create_data_property(scope, seed_key.into(), seed_arr.into())
+          .unwrap();
       }
       obj.into()
     }
@@ -433,7 +450,9 @@ fn tagged<'s>(
   let obj = v8::Object::new(scope);
   let type_key = one_byte_internalized(scope, b"type");
   let type_val = v8::String::new(scope, kind).unwrap();
-  obj.set(scope, type_key.into(), type_val.into());
+  obj
+    .create_data_property(scope, type_key.into(), type_val.into())
+    .unwrap();
   let data_key = one_byte_internalized(scope, b"data");
   let backing = if bytes.is_empty() {
     v8::ArrayBuffer::new(scope, 0)
@@ -445,7 +464,9 @@ fn tagged<'s>(
     v8::ArrayBuffer::with_backing_store(scope, &bs)
   };
   let data_arr = v8::Uint8Array::new(scope, backing, 0, bytes.len()).unwrap();
-  obj.set(scope, data_key.into(), data_arr.into());
+  obj
+    .create_data_property(scope, data_key.into(), data_arr.into())
+    .unwrap();
   obj.into()
 }
 
@@ -457,7 +478,7 @@ fn set_string<'s>(
 ) {
   let k = one_byte_internalized(scope, field);
   let v = v8::String::new(scope, value).unwrap();
-  obj.set(scope, k.into(), v.into());
+  obj.create_data_property(scope, k.into(), v.into()).unwrap();
 }
 
 fn set_u32<'s>(
@@ -468,7 +489,7 @@ fn set_u32<'s>(
 ) {
   let k = one_byte_internalized(scope, field);
   let n = v8::Number::new(scope, value as f64);
-  obj.set(scope, k.into(), n.into());
+  obj.create_data_property(scope, k.into(), n.into()).unwrap();
 }
 
 fn one_byte_internalized<'s>(
@@ -479,22 +500,18 @@ fn one_byte_internalized<'s>(
     .unwrap()
 }
 
-/// Body of the `Crypto.registerSymbols(webidlBrand, kKeyObject)` static
-/// method. Called once during module load to hand the WebIDL brand symbol
-/// (private to the webidl ESM) and the node:crypto `kKeyObject` symbol
-/// (private to ext/node) over to the crypto cppgc methods, which need them
-/// to brand every freshly-constructed `CryptoKey`. Lives here as a Rust
-/// function so it can be reused from a `#[static_method]` on either
-/// `Crypto` or `SubtleCrypto` without introducing a new standalone op.
+/// Register per-isolate values needed by native `CryptoKey` construction.
 pub fn register_symbols<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   webidl_brand: v8::Local<'s, v8::Value>,
-  k_key_object: v8::Local<'s, v8::Value>,
+  crypto_key_prototype: v8::Local<'s, v8::Value>,
 ) -> bool {
   let Ok(webidl_brand) = v8::Local::<v8::Symbol>::try_from(webidl_brand) else {
     return false;
   };
-  let Ok(k_key_object) = v8::Local::<v8::Symbol>::try_from(k_key_object) else {
+  let Ok(crypto_key_prototype) =
+    v8::Local::<v8::Object>::try_from(crypto_key_prototype)
+  else {
     return false;
   };
   let host_obj = {
@@ -503,8 +520,8 @@ pub fn register_symbols<'s>(
   };
   set_symbols(CryptoSymbols {
     webidl_brand: v8::Global::new(scope, webidl_brand),
-    k_key_object: v8::Global::new(scope, k_key_object),
     host_object_brand: v8::Global::new(scope, host_obj),
+    crypto_key_prototype: v8::Global::new(scope, crypto_key_prototype),
   });
   true
 }
