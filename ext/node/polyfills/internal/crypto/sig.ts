@@ -11,6 +11,10 @@ const {
   ArrayBufferPrototype,
   ArrayBufferPrototypeGetByteLength,
   ArrayPrototypeIncludes,
+  DataViewPrototype,
+  DataViewPrototypeGetBuffer,
+  DataViewPrototypeGetByteLength,
+  DataViewPrototypeGetByteOffset,
   Error,
   FunctionPrototypeApply,
   FunctionPrototypeCall,
@@ -18,6 +22,8 @@ const {
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
+  PromisePrototypeThen,
+  RangeError,
   ReflectHas,
   StringFromCharCode,
   StringPrototypeIncludes,
@@ -41,10 +47,12 @@ const {
   op_node_sign_ed25519,
   op_node_sign_ed448,
   op_node_sign_ml_dsa,
+  op_node_sign_ml_dsa_async,
   op_node_verify,
   op_node_verify_ed25519,
   op_node_verify_ed448,
   op_node_verify_ml_dsa,
+  op_node_verify_ml_dsa_async,
 } = core.ops;
 
 const {
@@ -127,6 +135,51 @@ function getIntOption(name, options) {
     throw new ERR_INVALID_ARG_VALUE(`options.${name}`, value);
   }
   return undefined;
+}
+
+function getContext(options): Uint8Array | undefined {
+  const context = options?.context;
+  if (context === undefined) {
+    return undefined;
+  }
+  if (!ArrayBufferIsView(context)) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "options.context",
+      ["Buffer", "TypedArray", "DataView"],
+      context,
+    );
+  }
+  const bytes = ObjectPrototypeIsPrototypeOf(DataViewPrototype, context)
+    ? new Uint8Array(
+      DataViewPrototypeGetBuffer(context),
+      DataViewPrototypeGetByteOffset(context),
+      DataViewPrototypeGetByteLength(context),
+    )
+    : new Uint8Array(
+      TypedArrayPrototypeGetBuffer(context),
+      TypedArrayPrototypeGetByteOffset(context),
+      TypedArrayPrototypeGetByteLength(context),
+    );
+  if (TypedArrayPrototypeGetByteLength(bytes) > 255) {
+    const error = new RangeError("context string must be at most 255 bytes");
+    ObjectDefineProperty(error, "code", {
+      __proto__: null,
+      configurable: true,
+      value: "ERR_OUT_OF_RANGE",
+    });
+    throw error;
+  }
+  return bytes;
+}
+
+function unsupportedContext(): Error {
+  const error = new Error("Context parameter is unsupported");
+  ObjectDefineProperty(error, "code", {
+    __proto__: null,
+    configurable: true,
+    value: "ERR_CRYPTO_OPERATION_FAILED",
+  });
+  return error;
 }
 
 // Private key types that need to be converted to public keys for verification
@@ -418,6 +471,8 @@ function signOneShot(
       TypedArrayPrototypeGetByteLength(data as ArrayBufferView),
     )
     : data as ArrayBufferView | string;
+  const context = getContext(key);
+  const contextBytes = context ?? new Uint8Array();
 
   try {
     const res = prepareAsymmetricKey(key, kConsumePrivate);
@@ -436,20 +491,30 @@ function signOneShot(
 
     let result: Buffer;
     const keyType = op_node_get_asymmetric_key_type(handle);
-    const context = typeof key === "object" && key !== null
-      ? (key as Record<string, unknown>).context
-      : undefined;
     if (
-      !isMlDsaKeyType(keyType) && context !== undefined &&
-      TypedArrayPrototypeGetByteLength(context) > 0
+      !isMlDsaKeyType(keyType) && keyType !== "ed448" &&
+      TypedArrayPrototypeGetByteLength(contextBytes) > 0
     ) {
-      throw new TypeError("Context parameter is unsupported");
+      throw unsupportedContext();
     }
     if (isMlDsaKeyType(keyType)) {
       if (algorithm != null) {
         throw unsupportedMlDsaDigest();
       }
-      result = Buffer.from(op_node_sign_ml_dsa(handle, dataBytes));
+      if (callback) {
+        const asyncData = typeof dataBytes === "string"
+          ? Buffer.from(dataBytes)
+          : dataBytes;
+        PromisePrototypeThen(
+          op_node_sign_ml_dsa_async(handle, asyncData, contextBytes),
+          (signature) => callback(null, Buffer.from(signature)),
+          (error) => callback(error),
+        );
+        return;
+      }
+      result = Buffer.from(
+        op_node_sign_ml_dsa(handle, dataBytes, contextBytes),
+      );
     } else if (keyType === "ed25519") {
       if (algorithm != null && algorithm !== "sha512") {
         throw new TypeError("Only 'sha512' is supported for Ed25519 keys");
@@ -458,7 +523,7 @@ function signOneShot(
       op_node_sign_ed25519(handle, dataBytes, result);
     } else if (keyType === "ed448") {
       result = new FastBuffer(114);
-      op_node_sign_ed448(handle, dataBytes, result);
+      op_node_sign_ed448(handle, dataBytes, contextBytes, result);
     } else {
       let digest = algorithm;
       if (digest == null) {
@@ -545,6 +610,8 @@ function verifyOneShot(
       TypedArrayPrototypeGetByteLength(data as ArrayBufferView),
     )
     : data as ArrayBufferView | string;
+  const context = getContext(key);
+  const contextBytes = context ?? new Uint8Array();
 
   try {
     const res = prepareAsymmetricKey(key, kConsumePublic);
@@ -575,27 +642,53 @@ function verifyOneShot(
 
     let result: boolean;
     const keyType = op_node_get_asymmetric_key_type(handle);
-    const context = typeof key === "object" && key !== null
-      ? (key as Record<string, unknown>).context
-      : undefined;
     if (
-      !isMlDsaKeyType(keyType) && context !== undefined &&
-      TypedArrayPrototypeGetByteLength(context) > 0
+      !isMlDsaKeyType(keyType) && keyType !== "ed448" &&
+      TypedArrayPrototypeGetByteLength(contextBytes) > 0
     ) {
-      throw new TypeError("Context parameter is unsupported");
+      throw unsupportedContext();
     }
     if (isMlDsaKeyType(keyType)) {
       if (algorithm != null) {
         throw unsupportedMlDsaDigest();
       }
-      result = op_node_verify_ml_dsa(handle, dataBytes, signature);
+      if (callback) {
+        const asyncData = typeof dataBytes === "string"
+          ? Buffer.from(dataBytes)
+          : dataBytes;
+        const asyncSignature = typeof signature === "string"
+          ? Buffer.from(signature)
+          : signature;
+        PromisePrototypeThen(
+          op_node_verify_ml_dsa_async(
+            handle,
+            asyncData,
+            asyncSignature,
+            contextBytes,
+          ),
+          (verified) => callback(null, verified),
+          (error) => callback(error, false),
+        );
+        return;
+      }
+      result = op_node_verify_ml_dsa(
+        handle,
+        dataBytes,
+        signature,
+        contextBytes,
+      );
     } else if (keyType === "ed25519") {
       if (algorithm != null && algorithm !== "sha512") {
         throw new TypeError("Only 'sha512' is supported for Ed25519 keys");
       }
       result = op_node_verify_ed25519(handle, dataBytes, signature);
     } else if (keyType === "ed448") {
-      result = op_node_verify_ed448(handle, dataBytes, signature);
+      result = op_node_verify_ed448(
+        handle,
+        dataBytes,
+        contextBytes,
+        signature,
+      );
     } else if (
       keyType === "x25519" || keyType === "x448" || keyType === "dh"
     ) {

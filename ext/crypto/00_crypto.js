@@ -32,6 +32,7 @@ const {
   DataViewPrototypeGetByteLength,
   Error,
   FunctionPrototypeCall,
+  MathCeil,
   NumberIsFinite,
   NumberIsInteger,
   ObjectAssign,
@@ -379,7 +380,7 @@ function nodeRsaPssSaltLengthError(methodName, args) {
   ) {
     return undefined;
   }
-  const max = modulusLength / 8 - hashLength - 2;
+  const max = MathCeil((modulusLength - 1) / 8) - hashLength - 2;
   if (saltLength <= max) {
     return undefined;
   }
@@ -960,7 +961,7 @@ function supports(operation, algorithm, lengthOrHash = undefined) {
     const error = new TypeError(
       'Value of "this" must be of type SubtleCrypto constructor',
     );
-    error.code = "ERR_INVALID_THIS";
+    tagNodeErrorCode(error, "ERR_INVALID_THIS");
     throw error;
   }
   return FunctionPrototypeCall(
