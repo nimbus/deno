@@ -172,6 +172,64 @@ Deno.test("Readable toWeb keeps one error sentinel after close", async () => {
   });
 });
 
+Deno.test("Readable toWeb keeps byte stream mode after close", async () => {
+  const readable = new PassThrough();
+  readable.end();
+  readable.destroy();
+  await once(readable, "close");
+
+  // @ts-ignore `@types/node` does not expose the Node 24 `type` option.
+  const webReadable = Readable.toWeb(readable, { type: "bytes" });
+  const reader = webReadable.getReader({ mode: "byob" });
+  assertEquals(await reader.read(new Uint8Array(1)), {
+    value: new Uint8Array(0),
+    done: true,
+  });
+});
+
+Deno.test("Readable toWeb completes a pending BYOB read", async () => {
+  const readable = new PassThrough();
+  // @ts-ignore `@types/node` does not expose the Node 24 `type` option.
+  const webReadable = Readable.toWeb(readable, { type: "bytes" });
+  const reader = webReadable.getReader({ mode: "byob" });
+  const read = reader.read(new Uint8Array(1));
+
+  readable.end();
+  await once(readable, "end");
+
+  assertEquals(await read, {
+    value: new Uint8Array(0),
+    done: true,
+  });
+  await reader.closed;
+});
+
+Deno.test("Readable toWeb preserves premature close after destruction", async () => {
+  const readable = new PassThrough();
+  readable.destroy();
+  await once(readable, "close");
+
+  const reader = Readable.toWeb(readable).getReader();
+  const error = await reader.read().then(
+    () => null,
+    (error) => error,
+  );
+  assertEquals(error?.code, "ABORT_ERR");
+  await reader.closed.catch(() => {});
+});
+
+Deno.test("Readable toWeb closes a disabled readable side", async () => {
+  // @ts-ignore Node accepts the internal `readable` construction option.
+  const duplex = new Duplex({ readable: false });
+  assertEquals(duplex.readable, false);
+  assertEquals(duplex.readableEnded, true);
+  duplex.destroy();
+  assertEquals(duplex.readableEnded, true);
+
+  const reader = Readable.toWeb(duplex).getReader();
+  await reader.closed;
+});
+
 Deno.test("Duplex fromWeb handles readable errors", async () => {
   let errorController!: ReadableStreamDefaultController;
   const readable = new ReadableStream({
