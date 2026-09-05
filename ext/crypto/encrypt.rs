@@ -38,6 +38,9 @@ pub enum EncryptError {
   #[class("DOMExceptionOperationError")]
   #[error("invalid tag length")]
   InvalidTagLength,
+  #[class("DOMExceptionOperationError")]
+  #[error("initialization vector must not be empty")]
+  InvalidGcmIvLength,
   #[class(type)]
   #[error("invalid ChaCha20-Poly1305 nonce length: expected 12 bytes")]
   InvalidChaChaNonceLength,
@@ -129,6 +132,9 @@ pub(crate) fn encrypt_aes_gcm(
       }
       crate::aes_gcm::AesGcmError::InvalidTagLength => {
         EncryptError::InvalidTagLength
+      }
+      crate::aes_gcm::AesGcmError::InvalidIvLength => {
+        EncryptError::InvalidGcmIvLength
       }
       crate::aes_gcm::AesGcmError::TooMuchData => EncryptError::TooMuchData,
       crate::aes_gcm::AesGcmError::AuthenticationFailed => EncryptError::Failed,
