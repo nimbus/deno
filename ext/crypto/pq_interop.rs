@@ -327,11 +327,17 @@ mod tests {
 
   #[test]
   fn ml_kem_encapsulation_round_trip() {
-    let private =
-      import_private_seed(Algorithm::MlKem768, &[0x42; 64]).unwrap();
-    let (shared_key, ciphertext) = private.public_key().encapsulate().unwrap();
+    for algorithm in [
+      Algorithm::MlKem512,
+      Algorithm::MlKem768,
+      Algorithm::MlKem1024,
+    ] {
+      let private = import_private_seed(algorithm, &[0x42; 64]).unwrap();
+      let (shared_key, ciphertext) =
+        private.public_key().encapsulate().unwrap();
 
-    assert_eq!(private.decapsulate(&ciphertext).unwrap(), shared_key);
+      assert_eq!(private.decapsulate(&ciphertext).unwrap(), shared_key);
+    }
   }
 
   #[test]

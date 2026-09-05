@@ -11,8 +11,6 @@
 //! /wrap/unwrap/encapsulate/decapsulate/getPublicKey) now that those bodies
 //! live in Rust.
 
-use std::cell::RefCell;
-
 use deno_core::cppgc::make_cppgc_object;
 use deno_core::v8;
 
@@ -23,35 +21,26 @@ use crate::shared::RawKeyData;
 
 /// Per-isolate values needed to connect native `CryptoKey` instances to the
 /// JavaScript interface and structured-clone machinery.
-pub struct CryptoSymbols {
-  pub webidl_brand: v8::Global<v8::Symbol>,
-  pub host_object_brand: v8::Global<v8::Symbol>,
-  pub crypto_key_prototype: v8::Global<v8::Object>,
-}
-
-thread_local! {
-  // Owned so the V8 globals are released before isolate teardown. Each
-  // worker (= each isolate = each thread) has its own instance.
-  static SYMBOLS: RefCell<Option<CryptoSymbols>> = const { RefCell::new(None) };
+pub struct CryptoKeyIsolateState {
+  pub crypto_key_internal_prototype: v8::Global<v8::Object>,
 }
 
 /// Register the values used by native `CryptoKey` construction. Called once
 /// per isolate from JS when the lazy `SubtleCrypto` singleton is initialized.
-pub fn set_symbols(symbols: CryptoSymbols) {
-  SYMBOLS.with(|cell| {
-    *cell.borrow_mut() = Some(symbols);
-  });
+fn set_isolate_state(
+  scope: &mut v8::PinScope<'_, '_>,
+  state: CryptoKeyIsolateState,
+) {
+  scope.set_slot(state);
 }
 
-/// Lend the registered symbols to `f`. Returns `None` if [`set_symbols`]
-/// has not been called on this thread. The borrow scope is short — the
-/// callback only needs scope-local `v8::Local`s built from the cached
-/// `v8::Global<v8::Symbol>`s — so re-entrancy is not a concern.
-pub fn with_symbols<F, R>(_scope: &mut v8::PinScope<'_, '_>, f: F) -> Option<R>
+/// Lend the registered isolate values to `f`. Returns `None` if
+/// [`set_isolate_state`] has not run for this isolate.
+fn with_isolate_state<F, R>(scope: &mut v8::PinScope<'_, '_>, f: F) -> Option<R>
 where
-  F: FnOnce(&CryptoSymbols) -> R,
+  F: FnOnce(&CryptoKeyIsolateState) -> R,
 {
-  SYMBOLS.with(|cell| cell.borrow().as_ref().map(f))
+  scope.get_slot::<CryptoKeyIsolateState>().map(f)
 }
 
 /// Per-algorithm dictionary slots that get baked into the `CryptoKey`'s
@@ -280,46 +269,13 @@ fn stamp_prototype<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   key: v8::Local<'s, v8::Object>,
 ) {
-  let Some((brand_g, host_brand_g, public_prototype_g)) =
-    with_symbols(scope, |symbols| {
-      (
-        symbols.webidl_brand.clone(),
-        symbols.host_object_brand.clone(),
-        symbols.crypto_key_prototype.clone(),
-      )
-    })
-  else {
+  let Some(internal_prototype_g) = with_isolate_state(scope, |state| {
+    state.crypto_key_internal_prototype.clone()
+  }) else {
     return;
   };
-  let public_prototype = v8::Local::new(scope, &public_prototype_g);
-  let internal_prototype = v8::Object::new(scope);
-  let _ = internal_prototype.set_prototype(scope, public_prototype.into());
+  let internal_prototype = v8::Local::new(scope, &internal_prototype_g);
   let _ = key.set_prototype(scope, internal_prototype.into());
-
-  let brand = v8::Local::new(scope, &brand_g);
-  let host_brand_sym = v8::Local::new(scope, &host_brand_g);
-  let _ = internal_prototype.define_own_property(
-    scope,
-    brand.into(),
-    brand.into(),
-    v8::PropertyAttribute::READ_ONLY
-      | v8::PropertyAttribute::DONT_ENUM
-      | v8::PropertyAttribute::DONT_DELETE,
-  );
-
-  // The serializer calls inherited host-object functions with the instance
-  // as `this`, so one native function can serve every key without placing a
-  // symbol on the instance.
-  let ft = v8::FunctionTemplate::new(scope, host_object_thunk);
-  let host_fn = ft.get_function(scope).unwrap();
-  let _ = internal_prototype.define_own_property(
-    scope,
-    host_brand_sym.into(),
-    host_fn.into(),
-    v8::PropertyAttribute::READ_ONLY
-      | v8::PropertyAttribute::DONT_ENUM
-      | v8::PropertyAttribute::DONT_DELETE,
-  );
 }
 
 fn host_object_thunk(
@@ -518,10 +474,34 @@ pub fn register_symbols<'s>(
     let name = v8::String::new(scope, "Deno.core.hostObject").unwrap();
     v8::Symbol::for_key(scope, name)
   };
-  set_symbols(CryptoSymbols {
-    webidl_brand: v8::Global::new(scope, webidl_brand),
-    host_object_brand: v8::Global::new(scope, host_obj),
-    crypto_key_prototype: v8::Global::new(scope, crypto_key_prototype),
-  });
+  let internal_prototype = v8::Object::new(scope);
+  let _ = internal_prototype.set_prototype(scope, crypto_key_prototype.into());
+  let _ = internal_prototype.define_own_property(
+    scope,
+    webidl_brand.into(),
+    webidl_brand.into(),
+    v8::PropertyAttribute::READ_ONLY
+      | v8::PropertyAttribute::DONT_ENUM
+      | v8::PropertyAttribute::DONT_DELETE,
+  );
+  // The serializer calls inherited host-object functions with the instance
+  // as `this`, so one native function can serve every key without placing a
+  // symbol on the instance.
+  let ft = v8::FunctionTemplate::new(scope, host_object_thunk);
+  let host_fn = ft.get_function(scope).unwrap();
+  let _ = internal_prototype.define_own_property(
+    scope,
+    host_obj.into(),
+    host_fn.into(),
+    v8::PropertyAttribute::READ_ONLY
+      | v8::PropertyAttribute::DONT_ENUM
+      | v8::PropertyAttribute::DONT_DELETE,
+  );
+  set_isolate_state(
+    scope,
+    CryptoKeyIsolateState {
+      crypto_key_internal_prototype: v8::Global::new(scope, internal_prototype),
+    },
+  );
   true
 }
