@@ -2,7 +2,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 (function () {
 const { core } = __bootstrap;
-const { op_node_webstreams_closed_error_sentinel_enabled } = core.ops;
+const { op_node_webstreams_closed_readable_propagates_error } = core.ops;
 const { destroy, destroyer } = core.loadExtScript(
   "ext:deno_node/internal/streams/destroy.js",
 );
@@ -515,12 +515,28 @@ function newReadableStreamFromStreamReadable(
   }
 
   if (isDestroyed(streamReadable) || !isReadable(streamReadable)) {
-    if (op_node_webstreams_closed_error_sentinel_enabled()) {
+    const propagateError = op_node_webstreams_closed_readable_propagates_error();
+    if (propagateError) {
       attachErrorSentinel(streamReadable);
     }
-    const readable = new ReadableStream();
-    readable.cancel();
-    return readable;
+    const streamError = streamReadable.errored;
+    const readableEnded = streamReadable.readableEnded === true ||
+      isReadableEnded(streamReadable) === true;
+    const error = propagateError && streamError && typeof streamError !== "boolean"
+      ? streamError
+      : propagateError && isDestroyed(streamReadable) && !readableEnded
+      ? new AbortError()
+      : undefined;
+    return new ReadableStream({
+      type: options.type,
+      start(controller) {
+        if (error) {
+          controller.error(error);
+        } else {
+          controller.close();
+        }
+      },
+    });
   }
 
   const objectMode = streamReadable.readableObjectMode;
@@ -604,6 +620,9 @@ function newReadableStreamFromStreamReadable(
       return;
     }
     controller.close();
+    if (isByteStream) {
+      controller.byobRequest?.respond(0);
+    }
   });
 
   streamReadable.on("data", onData);

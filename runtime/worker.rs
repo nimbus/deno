@@ -679,7 +679,7 @@ impl MainWorker {
           deno_node::HeapSnapshotNearHeapLimitPolicy::AllowProcessLifetime,
           deno_node::AesGcmImplicitShortTagPolicy::Deny,
           deno_node::DgramDefaultLookupPolicy::BypassIpLiterals,
-          deno_node::ClosedReadableErrorSentinelPolicy::IncludeAlreadyClosed,
+          deno_node::ClosedReadableAdapterPolicy::PropagateError,
         ),
         ops::runtime::deno_runtime::args(main_module.clone()),
         ops::worker_host::deno_worker_host::args(
