@@ -286,7 +286,7 @@ function queryObjects(
       validateOneOf(options.format, "options.format", ["count", "summary"]);
     }
   }
-  const format = options?.format;
+  const format = options?.format ?? "count";
 
   const name = typeof ctor.name === "string" ? ctor.name : "";
   if (name === "") {
@@ -300,9 +300,6 @@ function queryObjects(
     if (count === 0) return [];
     return [`${count} instance(s) of ${name}`];
   }
-  // Default format returns live object handles, which would require V8's
-  // `HeapProfiler::QueryObjects` (not exposed in rusty_v8). Returning an
-  // empty array keeps the signature sensible.
   return [];
 }
 
