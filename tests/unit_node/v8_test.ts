@@ -227,10 +227,9 @@ Deno.test({
   name: "queryObjects counts instances by constructor",
   fn() {
     class QueryObjectsTestFixture {}
-    const before = v8.queryObjects(QueryObjectsTestFixture, {
-      format: "count",
-    });
+    const before = v8.queryObjects(QueryObjectsTestFixture);
     assertEquals(typeof before, "number");
+    const beforeCount = before as unknown as number;
     const instances = [];
     for (let i = 0; i < 50; i++) {
       instances.push(new QueryObjectsTestFixture());
@@ -238,7 +237,7 @@ Deno.test({
     const after = v8.queryObjects(QueryObjectsTestFixture, {
       format: "count",
     });
-    assertEquals(after - before >= 50, true);
+    assertEquals(after - beforeCount >= 50, true);
 
     const summary = v8.queryObjects(QueryObjectsTestFixture, {
       format: "summary",
