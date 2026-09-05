@@ -99,6 +99,30 @@ pub use crate::shared::SharedError;
 pub use crate::x448::X448Error;
 pub use crate::x25519::X25519Error;
 
+/// Selects the observable Node.js WebCrypto error contract without changing
+/// standards-only Deno behavior. Embedders choose the policy when they build
+/// an execution runtime.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WebCryptoErrorPolicy {
+  #[default]
+  WebStandard,
+  Node22,
+  Node24,
+}
+
+#[op2(fast)]
+fn op_crypto_error_policy(state: &OpState) -> u8 {
+  match state
+    .try_borrow::<WebCryptoErrorPolicy>()
+    .copied()
+    .unwrap_or_default()
+  {
+    WebCryptoErrorPolicy::WebStandard => 0,
+    WebCryptoErrorPolicy::Node22 => 1,
+    WebCryptoErrorPolicy::Node24 => 2,
+  }
+}
+
 #[op2(fast)]
 fn op_crypto_is_seeded(state: &OpState) -> bool {
   state.try_borrow::<StdRng>().is_some()
@@ -115,6 +139,7 @@ deno_core::extension!(deno_crypto,
   deps = [ deno_webidl, deno_web ],
   ops = [
     crypto::op_crypto_random_uuid_batch,
+    op_crypto_error_policy,
     op_crypto_is_seeded,
   ],
   objects = [
@@ -125,8 +150,10 @@ deno_core::extension!(deno_crypto,
   lazy_loaded_js = [ "00_crypto.js" ],
   options = {
     maybe_seed: Option<u64>,
+    error_policy: WebCryptoErrorPolicy,
   },
   state = |state, options| {
+    state.put(options.error_policy);
     if let Some(seed) = options.maybe_seed {
       state.put(StdRng::seed_from_u64(seed));
     }
@@ -221,7 +248,7 @@ pub enum CryptoError {
   #[error("The provided value is not an integer-type TypedArray")]
   TypedArrayNotInteger,
   #[class("DOMExceptionNotSupportedError")]
-  #[error("Algorithm '{0}' is not supported")]
+  #[error("Unrecognized algorithm name: {0}")]
   UnsupportedDigestAlgorithm(String),
   #[class(generic)]
   #[error("failed to allocate UUID string")]
@@ -389,7 +416,9 @@ pub(crate) fn sign_key_sync(
               CryptoHash::Sha256 => sha2::Sha256::digest(data).to_vec(),
               CryptoHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
               CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
-              _ => return Err(CryptoError::UnsupportedAlgorithm),
+              CryptoHash::Sha3_256 => sha3::Sha3_256::digest(data).to_vec(),
+              CryptoHash::Sha3_384 => sha3::Sha3_384::digest(data).to_vec(),
+              CryptoHash::Sha3_512 => sha3::Sha3_512::digest(data).to_vec(),
             };
             // Sign the prehashed message, producing a raw r||s signature.
             let signature: P256Signature =
@@ -405,7 +434,19 @@ pub(crate) fn sign_key_sync(
               CryptoHash::Sha256 => sha2::Sha256::digest(data).to_vec(),
               CryptoHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
               CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
-              _ => return Err(CryptoError::UnsupportedAlgorithm),
+              CryptoHash::Sha3_256 => sha3::Sha3_256::digest(data).to_vec(),
+              CryptoHash::Sha3_384 => sha3::Sha3_384::digest(data).to_vec(),
+              CryptoHash::Sha3_512 => sha3::Sha3_512::digest(data).to_vec(),
+            };
+            // RustCrypto's bits2field accepts a digest no shorter than half
+            // the curve field size. SHA-1 is 20 bytes, so P-384 needs four
+            // leading zero bytes.
+            let prehash = if prehash.len() < 24 {
+              let mut padded = vec![0u8; 24 - prehash.len()];
+              padded.extend_from_slice(&prehash);
+              padded
+            } else {
+              prehash
             };
             let signature: P384Signature =
               signing_key.sign_prehash(&prehash)?;
@@ -422,7 +463,9 @@ pub(crate) fn sign_key_sync(
               CryptoHash::Sha256 => sha2::Sha256::digest(data).to_vec(),
               CryptoHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
               CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
-              _ => return Err(CryptoError::UnsupportedAlgorithm),
+              CryptoHash::Sha3_256 => sha3::Sha3_256::digest(data).to_vec(),
+              CryptoHash::Sha3_384 => sha3::Sha3_384::digest(data).to_vec(),
+              CryptoHash::Sha3_512 => sha3::Sha3_512::digest(data).to_vec(),
             };
             // P-521 field size is 66 bytes; bits2field requires at least
             // half that (33 bytes). Left-pad shorter hashes to meet the
@@ -639,7 +682,9 @@ pub(crate) fn verify_key_sync(
                   CryptoHash::Sha256 => sha2::Sha256::digest(data).to_vec(),
                   CryptoHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
                   CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
-                  _ => return Err(CryptoError::UnsupportedAlgorithm),
+                  CryptoHash::Sha3_256 => sha3::Sha3_256::digest(data).to_vec(),
+                  CryptoHash::Sha3_384 => sha3::Sha3_384::digest(data).to_vec(),
+                  CryptoHash::Sha3_512 => sha3::Sha3_512::digest(data).to_vec(),
                 };
                 verifying_key.verify_prehash(&prehash, &signature).is_ok()
               }
@@ -665,7 +710,19 @@ pub(crate) fn verify_key_sync(
                   CryptoHash::Sha256 => sha2::Sha256::digest(data).to_vec(),
                   CryptoHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
                   CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
-                  _ => return Err(CryptoError::UnsupportedAlgorithm),
+                  CryptoHash::Sha3_256 => sha3::Sha3_256::digest(data).to_vec(),
+                  CryptoHash::Sha3_384 => sha3::Sha3_384::digest(data).to_vec(),
+                  CryptoHash::Sha3_512 => sha3::Sha3_512::digest(data).to_vec(),
+                };
+                // RustCrypto's bits2field accepts a digest no shorter than
+                // half the curve field size. SHA-1 is 20 bytes, so P-384
+                // needs four leading zero bytes.
+                let prehash = if prehash.len() < 24 {
+                  let mut padded = vec![0u8; 24 - prehash.len()];
+                  padded.extend_from_slice(&prehash);
+                  padded
+                } else {
+                  prehash
                 };
                 verifying_key.verify_prehash(&prehash, &signature).is_ok()
               }
@@ -693,7 +750,9 @@ pub(crate) fn verify_key_sync(
                   CryptoHash::Sha256 => sha2::Sha256::digest(data).to_vec(),
                   CryptoHash::Sha384 => sha2::Sha384::digest(data).to_vec(),
                   CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
-                  _ => return Err(CryptoError::UnsupportedAlgorithm),
+                  CryptoHash::Sha3_256 => sha3::Sha3_256::digest(data).to_vec(),
+                  CryptoHash::Sha3_384 => sha3::Sha3_384::digest(data).to_vec(),
+                  CryptoHash::Sha3_512 => sha3::Sha3_512::digest(data).to_vec(),
                 };
                 // P-521 field size is 66 bytes; bits2field requires at least
                 // half that (33 bytes). Left-pad shorter hashes to meet the
@@ -977,4 +1036,34 @@ fn test_fast_uuid_v4_correctness() {
     .as_uuid()
     .to_string();
   assert_eq!(uuid, uuid_lib);
+}
+
+#[test]
+fn test_p256_sha3_256_node_vector() {
+  fn decode_hex<const N: usize>(input: &str) -> [u8; N] {
+    assert_eq!(input.len(), N * 2);
+    let mut output = [0; N];
+    for (index, pair) in input.as_bytes().chunks_exact(2).enumerate() {
+      let digit = |value: u8| match value {
+        b'0'..=b'9' => value - b'0',
+        b'a'..=b'f' => value - b'a' + 10,
+        _ => panic!("invalid test-vector hex"),
+      };
+      output[index] = digit(pair[0]) << 4 | digit(pair[1]);
+    }
+    output
+  }
+
+  let public_key = decode_hex::<65>(
+    "04b1d1e7da708dfadf90bc013a4009184bdb3f9065078f5598f6ad263865a387e249ebf1a514ad8c943635a66d8acd64ebf2c876e55448813f10026a5e1f0a9817",
+  );
+  let prehash = decode_hex::<32>(
+    "dcfc9307e3bca259403e864418bc12fa8f6cd2f4419248d9a84bf4133107afc1",
+  );
+  let signature = decode_hex::<64>(
+    "f6a48eb5557f484ed0c3e4b5c78a3cf497cbd346db06a4165d429248aa2cc51a69747d09f57af145469a8b607a9b8b9709629d74e8f5ca337c6ddc581b6f6103",
+  );
+  let verifying_key = P256VerifyingKey::from_sec1_bytes(&public_key).unwrap();
+  let signature = P256Signature::from_slice(&signature).unwrap();
+  assert!(verifying_key.verify_prehash(&prehash, &signature).is_ok());
 }

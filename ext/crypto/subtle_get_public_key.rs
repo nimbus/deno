@@ -41,6 +41,37 @@ pub fn run<'s>(
   usages: Vec<String>,
 ) -> Result<v8::Local<'s, v8::Object>, CryptoError> {
   let algorithm_name = key.algorithm_name.as_str();
+  if key.key_type != CryptoKeyType::Private {
+    return Err(match key.key_type {
+      CryptoKeyType::Secret => {
+        not_supported("key must be a private key".into())
+      }
+      CryptoKeyType::Public => {
+        invalid_access("key must be a private key".into())
+      }
+      CryptoKeyType::Private => unreachable!(),
+    });
+  }
+
+  let allowed_usages: &[&str] = match algorithm_name {
+    "RSA-OAEP" => &["encrypt", "wrapKey"],
+    "RSASSA-PKCS1-v1_5" | "RSA-PSS" | "ECDSA" | "Ed25519" | "ML-DSA-44"
+    | "ML-DSA-65" | "ML-DSA-87" => &["verify"],
+    "ECDH" | "X25519" | "X448" => &[],
+    "ML-KEM-512" | "ML-KEM-768" | "ML-KEM-1024" => {
+      &["encapsulateKey", "encapsulateBits"]
+    }
+    _ if crate::slhdsa::variant_from_name(algorithm_name).is_some() => {
+      &["verify"]
+    }
+    _ => {
+      return Err(not_supported(format!(
+        "getPublicKey() is not supported for {algorithm_name}"
+      )));
+    }
+  };
+  validate_public_key_usages(&usages, allowed_usages)?;
+
   match algorithm_name {
     "RSASSA-PKCS1-v1_5" | "RSA-PSS" | "RSA-OAEP" | "ECDSA" | "ECDH"
     | "Ed25519" | "X25519" | "X448" | "ML-DSA-44" | "ML-DSA-65"
@@ -52,18 +83,8 @@ pub fn run<'s>(
       )));
     }
   }
-  if key.key_type != CryptoKeyType::Private {
-    return Err(invalid_access(
-      "Public keys can only be derived from private keys".into(),
-    ));
-  }
-
   match algorithm_name {
     "ML-KEM-512" | "ML-KEM-768" | "ML-KEM-1024" => {
-      validate_public_key_usages(
-        &usages,
-        &["encapsulateKey", "encapsulateBits"],
-      )?;
       let variant = match algorithm_name {
         "ML-KEM-512" => crate::mlkem::MlKemVariant::MlKem512,
         "ML-KEM-768" => crate::mlkem::MlKemVariant::MlKem768,
@@ -86,7 +107,6 @@ pub fn run<'s>(
       ))
     }
     "ML-DSA-44" | "ML-DSA-65" | "ML-DSA-87" => {
-      validate_public_key_usages(&usages, &["verify"])?;
       let variant = match algorithm_name {
         "ML-DSA-44" => 0u8,
         "ML-DSA-65" => 1,
@@ -112,7 +132,6 @@ pub fn run<'s>(
     _ if let Some(variant) =
       crate::slhdsa::variant_from_name(algorithm_name) =>
     {
-      validate_public_key_usages(&usages, &["verify"])?;
       let public_key = crate::slhdsa::public_from_private(
         variant,
         key.raw.expanded_private_key(),
@@ -227,7 +246,7 @@ fn validate_public_key_usages(
     if !allowed.contains(&u.as_str()) {
       return Err(CryptoError::Other(JsErrorBox::new(
         "DOMExceptionSyntaxError",
-        "Invalid key usage",
+        "Unsupported key usage",
       )));
     }
   }

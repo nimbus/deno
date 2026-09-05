@@ -4,6 +4,7 @@ use aws_lc_rs::signature::Ed25519KeyPair;
 use aws_lc_rs::signature::KeyPair;
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+use curve25519_dalek::edwards::CompressedEdwardsY;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use spki::der::Encode;
@@ -59,12 +60,27 @@ pub(crate) fn ed25519_verify(
   data: &[u8],
   signature: &[u8],
 ) -> bool {
+  if pubkey.len() != 32 || signature.len() != 64 {
+    return false;
+  }
+  if has_small_order(pubkey) || has_small_order(&signature[..32]) {
+    return false;
+  }
   aws_lc_rs::signature::UnparsedPublicKey::new(
     &aws_lc_rs::signature::ED25519,
     pubkey,
   )
   .verify(data, signature)
   .is_ok()
+}
+
+fn has_small_order(encoded: &[u8]) -> bool {
+  let Ok(encoded) = <&[u8; 32]>::try_from(encoded) else {
+    return true;
+  };
+  CompressedEdwardsY(*encoded)
+    .decompress()
+    .is_none_or(|point| point.is_small_order())
 }
 
 // id-Ed25519 OBJECT IDENTIFIER ::= { 1 3 101 112 }

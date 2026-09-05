@@ -475,6 +475,37 @@ function getOpenSSLSecLevel(): number {
 
 const kAesKeyLengths = [128, 192, 256];
 
+// Node exposes this internal registry to its own WebCrypto fixtures and
+// helpers. Nimbus supports the Node 24 exportable-key set below; Deno-only
+// algorithms stay out of this Node compatibility surface.
+const kSupportedAlgorithms = {
+  exportKey: {
+    "AES-CBC": null,
+    "AES-CTR": null,
+    "AES-GCM": null,
+    "AES-KW": null,
+    "AES-OCB": null,
+    "ChaCha20-Poly1305": null,
+    ECDH: null,
+    ECDSA: null,
+    Ed25519: null,
+    HMAC: null,
+    KMAC128: null,
+    KMAC256: null,
+    "ML-DSA-44": null,
+    "ML-DSA-65": null,
+    "ML-DSA-87": null,
+    "ML-KEM-512": null,
+    "ML-KEM-768": null,
+    "ML-KEM-1024": null,
+    "RSA-OAEP": null,
+    "RSA-PSS": null,
+    "RSASSA-PKCS1-v1_5": null,
+    X25519: null,
+    X448: null,
+  },
+};
+
 const _defaultExport = {
   getDefaultEncoding,
   setDefaultEncoding,
@@ -490,6 +521,7 @@ const _defaultExport = {
   kHandle,
   kKeyObject,
   kAesKeyLengths,
+  kSupportedAlgorithms,
 };
 
 return {
@@ -506,6 +538,7 @@ return {
   setEngine,
   getOpenSSLSecLevel,
   kAesKeyLengths,
+  kSupportedAlgorithms,
   kHandle,
   kKeyObject,
   default: _defaultExport,

@@ -6,7 +6,9 @@ const { internals, primordials } = __bootstrap;
 const { Symbol } = primordials;
 
 const kHandle = Symbol("kHandle");
-const kKeyObject = Symbol("kKeyObject");
+const kKeyObject = internals.kKeyObject === undefined
+  ? Symbol("kKeyObject")
+  : internals.kKeyObject;
 
 internals.kKeyObject = kKeyObject;
 

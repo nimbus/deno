@@ -41,12 +41,16 @@ impl CryptoKeyType {
 pub struct CryptoKey {
   key_type: CryptoKeyType,
   extractable: bool,
-  /// The frozen-array of `KeyUsage` strings returned by the `usages` getter.
-  /// Stored as `v8::Global` so the getter satisfies `SameObject` per spec.
+  /// The immutable internal `KeyUsage` list used by crypto operations.
   usages: v8::Global<v8::Value>,
-  /// The algorithm dictionary returned by the `algorithm` getter (also
-  /// `SameObject`).
+  /// The immutable internal algorithm dictionary used by crypto operations.
   algorithm: v8::Global<v8::Value>,
+  /// The mutable public `KeyUsage` view returned by the `usages` getter.
+  /// Node exposes a stable copy whose mutation does not alter internal slots.
+  public_usages: v8::Global<v8::Value>,
+  /// The mutable public algorithm view returned by the `algorithm` getter.
+  /// It is also a stable copy that is separate from the internal dictionary.
+  public_algorithm: v8::Global<v8::Value>,
   /// Opaque, JS-side wrapper carrying a cppgc-tracked
   /// [`crate::key_store::CryptoKeyHandle`] on its `cppgc` property. Held by
   /// reference so two `CryptoKey`s representing the two halves of a key pair
@@ -94,7 +98,7 @@ impl CryptoKey {
     &self,
     scope: &mut v8::PinScope<'s, '_>,
   ) -> v8::Local<'s, v8::Value> {
-    v8::Local::new(scope, &self.usages)
+    v8::Local::new(scope, &self.public_usages)
   }
 
   #[getter]
@@ -102,7 +106,37 @@ impl CryptoKey {
     &self,
     scope: &mut v8::PinScope<'s, '_>,
   ) -> v8::Local<'s, v8::Value> {
-    v8::Local::new(scope, &self.algorithm)
+    v8::Local::new(scope, &self.public_algorithm)
+  }
+
+  /// Internal immutable-slot view used by the custom inspector. Public
+  /// `algorithm` and `usages` views are mutable copies under Node's contract,
+  /// but inspection must continue to report the original key metadata.
+  #[rename("inspectSnapshot")]
+  #[required(1)]
+  #[static_method]
+  fn inspect_snapshot<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    #[cppgc] key: &CryptoKey,
+  ) -> v8::Local<'s, v8::Object> {
+    let view = v8::Object::new(scope);
+    let set = |scope: &mut v8::PinScope<'s, '_>,
+               view: v8::Local<'s, v8::Object>,
+               name: &str,
+               value: v8::Local<'s, v8::Value>| {
+      let name = v8::String::new(scope, name).unwrap();
+      view.set(scope, name.into(), value);
+    };
+
+    let key_type = v8::String::new(scope, key.key_type.as_str()).unwrap();
+    set(scope, view, "type", key_type.into());
+    let extractable = v8::Boolean::new(scope, key.extractable);
+    set(scope, view, "extractable", extractable.into());
+    let algorithm = v8::Local::new(scope, &key.algorithm);
+    set(scope, view, "algorithm", algorithm);
+    let usages = v8::Local::new(scope, &key.usages);
+    set(scope, view, "usages", usages);
+    view
   }
 
   /// Internal `CryptoKey.exportNodeMaterial(key)` — used by the
@@ -269,6 +303,8 @@ impl CryptoKey {
     extractable: bool,
     usages: v8::Local<v8::Value>,
     algorithm: v8::Local<v8::Value>,
+    public_usages: v8::Local<v8::Value>,
+    public_algorithm: v8::Local<v8::Value>,
     handle: v8::Local<v8::Value>,
   ) -> Self {
     Self {
@@ -276,6 +312,8 @@ impl CryptoKey {
       extractable,
       usages: v8::Global::new(scope, usages),
       algorithm: v8::Global::new(scope, algorithm),
+      public_usages: v8::Global::new(scope, public_usages),
+      public_algorithm: v8::Global::new(scope, public_algorithm),
       handle: v8::Global::new(scope, handle),
     }
   }
