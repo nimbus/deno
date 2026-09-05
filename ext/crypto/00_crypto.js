@@ -42,7 +42,8 @@ const {
   ObjectHasOwn,
   ObjectPrototypeIsPrototypeOf,
   Promise,
-  PromisePrototypeCatch,
+  PromisePrototype,
+  PromisePrototypeThen,
   SafeArrayIterator,
   StringPrototypeIncludes,
   StringPrototypeSlice,
@@ -180,12 +181,17 @@ function tagNodeErrorCode(error, code) {
     (typeof error === "object" && error !== null) ||
     typeof error === "function"
   ) {
-    ObjectDefineProperty(error, "code", {
-      __proto__: null,
-      value: code,
-      configurable: true,
-      writable: true,
-    });
+    try {
+      ObjectDefineProperty(error, "code", {
+        __proto__: null,
+        value: code,
+        configurable: true,
+        writable: true,
+      });
+    } catch {
+      // A thrown value can be frozen or non-extensible. Error decoration
+      // must not replace the original exception with this secondary failure.
+    }
   }
   return error;
 }
@@ -359,6 +365,51 @@ function rsaPssHashLengthBytes(name) {
     default:
       return undefined;
   }
+}
+
+function normalizeNodeRsaPssArgs(methodName, args) {
+  if (
+    op_crypto_error_policy() !== WEB_CRYPTO_ERROR_POLICY_NODE24 ||
+    (methodName !== "sign" && methodName !== "verify")
+  ) {
+    return args;
+  }
+  const algorithm = args[0];
+  if (
+    algorithm === null ||
+    (typeof algorithm !== "object" && typeof algorithm !== "function")
+  ) {
+    return args;
+  }
+  const prefix = `Failed to execute '${methodName}' on 'SubtleCrypto'`;
+  const name = webidl.converters.DOMString(
+    algorithm.name,
+    prefix,
+    "Argument 1",
+  );
+  if (StringPrototypeToUpperCase(name) !== "RSA-PSS") {
+    return args;
+  }
+  const saltLength = webidl.converters["unsigned long"](
+    algorithm.saltLength,
+    prefix,
+    "'saltLength' of 'RsaPssParams'",
+    { __proto__: null, enforceRange: true },
+  );
+  const normalized = ObjectCreate(null);
+  ObjectDefineProperty(normalized, "name", {
+    __proto__: null,
+    value: name,
+    enumerable: true,
+  });
+  ObjectDefineProperty(normalized, "saltLength", {
+    __proto__: null,
+    value: saltLength,
+    enumerable: true,
+  });
+  return methodName === "sign"
+    ? [normalized, args[1], args[2]]
+    : [normalized, args[1], args[2], args[3]];
 }
 
 function nodeRsaPssSaltLengthError(methodName, args) {
@@ -831,6 +882,24 @@ function decorateNodeWebCryptoError(methodName, args, error, argumentCount) {
   return error;
 }
 
+function decorateNodeWebCryptoErrorSafely(
+  methodName,
+  args,
+  error,
+  argumentCount,
+) {
+  try {
+    return decorateNodeWebCryptoError(
+      methodName,
+      args,
+      error,
+      argumentCount,
+    );
+  } catch {
+    return error;
+  }
+}
+
 function validateNodeWebCryptoCall(methodName, args) {
   if (op_crypto_error_policy() !== WEB_CRYPTO_ERROR_POLICY_NODE24) {
     return;
@@ -872,7 +941,7 @@ function callSubtleAsPromise(
   argumentCount = args.length,
   errorArgs = args,
 ) {
-  const promise = new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     try {
       webidl.assertBranded(
         receiver,
@@ -883,24 +952,50 @@ function callSubtleAsPromise(
       reject(tagNodeErrorCode(error, "ERR_INVALID_THIS"));
       return;
     }
+    let callArgs;
     try {
-      validateNodeWebCryptoCall(methodName, errorArgs);
-      resolve(FunctionPrototypeCall(
-        cppgc,
-        receiver,
-        ...new SafeArrayIterator(args),
-      ));
+      callArgs = normalizeNodeRsaPssArgs(methodName, args);
     } catch (error) {
       reject(error);
+      return;
     }
-  });
-  return PromisePrototypeCatch(promise, (error) => {
-    throw decorateNodeWebCryptoError(
-      methodName,
-      errorArgs,
-      error,
-      argumentCount,
-    );
+    const decoratedArgs = callArgs === args ? errorArgs : callArgs;
+    try {
+      validateNodeWebCryptoCall(methodName, decoratedArgs);
+      const operation = FunctionPrototypeCall(
+        cppgc,
+        receiver,
+        ...new SafeArrayIterator(callArgs),
+      );
+      if (ObjectPrototypeIsPrototypeOf(PromisePrototype, operation)) {
+        // This promise is internal. Force intrinsic species construction
+        // before a primordial reaction so user changes to Promise prototypes
+        // cannot alter the WebCrypto return type or make this call throw
+        // synchronously.
+        ObjectDefineProperty(operation, "constructor", {
+          __proto__: null,
+          value: undefined,
+          configurable: true,
+        });
+        PromisePrototypeThen(operation, resolve, (error) => {
+          reject(decorateNodeWebCryptoErrorSafely(
+            methodName,
+            decoratedArgs,
+            error,
+            argumentCount,
+          ));
+        });
+      } else {
+        resolve(operation);
+      }
+    } catch (error) {
+      reject(decorateNodeWebCryptoErrorSafely(
+        methodName,
+        decoratedArgs,
+        error,
+        argumentCount,
+      ));
+    }
   });
 }
 

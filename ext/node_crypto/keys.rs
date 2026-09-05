@@ -618,24 +618,27 @@ pub enum EcJwkError {
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
-#[class(generic)]
-#[property("code" = "ERR_CRYPTO_INVALID_JWK")]
-#[error("{message}")]
-pub struct PqJwkError {
-  message: &'static str,
+pub enum PqJwkError {
+  #[class(generic)]
+  #[property("code" = "ERR_CRYPTO_INVALID_JWK")]
+  #[error("{0}")]
+  Invalid(&'static str),
+  #[class(inherit)]
+  #[error(transparent)]
+  Unsupported(
+    #[from]
+    #[inherit]
+    UnsupportedPostQuantumAlgorithmError,
+  ),
 }
 
 impl PqJwkError {
   fn invalid() -> Self {
-    Self {
-      message: "Invalid JWK",
-    }
+    Self::Invalid("Invalid JWK")
   }
 
   fn missing_private() -> Self {
-    Self {
-      message: "JWK does not contain private key material",
-    }
+    Self::Invalid("JWK does not contain private key material")
   }
 }
 
@@ -1611,6 +1614,7 @@ impl KeyObjectHandle {
       deno_crypto::pq_interop::Algorithm::from_name(algorithm_name)
         .filter(|algorithm| algorithm.name() == algorithm_name)
         .ok_or_else(PqJwkError::invalid)?;
+    ensure_node_pq_algorithm_supported(algorithm)?;
     let public_bytes = object
       .get("pub")
       .and_then(|value| value.as_str())
@@ -5349,6 +5353,18 @@ pub fn op_node_validate_crl(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn node_jwk_import_rejects_ml_kem_512_provider_gap() {
+    let jwk = deno_core::serde_json::json!({
+      "kty": "AKP",
+      "alg": "ML-KEM-512",
+    });
+    assert!(matches!(
+      KeyObjectHandle::new_pq_jwk(&jwk, true),
+      Err(PqJwkError::Unsupported(_))
+    ));
+  }
 
   // Cross-check our generic implementation of the PKCS#12 PBKDF
   // (RFC 7292 Appendix B.2) against test vectors computed with an

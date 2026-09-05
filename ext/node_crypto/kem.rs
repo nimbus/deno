@@ -1,6 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-use deno_core::JsBuffer;
 use deno_core::ToJsBuffer;
 use deno_core::op2;
 use deno_core::unsync::spawn_blocking;
@@ -157,7 +156,7 @@ pub fn op_node_kem_decapsulate(
 #[buffer]
 pub async fn op_node_kem_decapsulate_async(
   #[cppgc] handle: &KeyObjectHandle,
-  #[buffer] ciphertext: JsBuffer,
+  #[buffer(copy)] ciphertext: Box<[u8]>,
 ) -> Result<Box<[u8]>, KemError> {
   let private = handle
     .as_private_key()
