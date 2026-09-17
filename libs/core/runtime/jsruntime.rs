@@ -3227,6 +3227,13 @@ impl JsRuntimeForSnapshot {
         data_store,
       )
     };
+    // `prepare_for_snapshot` destroys the realm, and with it the
+    // `ContextState` that owns `tick_info`, `immediate_info` and
+    // `timer_info`. The typed arrays `store_js_callbacks` published over
+    // those allocations stay reachable from the context, so V8's serializer
+    // reads each external backing store while `create_blob` runs. Keep the
+    // allocations alive until the blob exists.
+    let info_buffers = realm.0.context_state.shared_info_buffers();
     drop(realm);
 
     let v8_data = self
@@ -3235,6 +3242,7 @@ impl JsRuntimeForSnapshot {
       .prepare_for_snapshot()
       .create_blob(v8::FunctionCodeHandling::Keep)
       .unwrap();
+    drop(info_buffers);
 
     snapshot::serialize(v8_data, sidecar_data)
   }
