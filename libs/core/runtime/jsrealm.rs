@@ -123,13 +123,17 @@ pub struct ContextState {
   /// Shared tick info buffer exposed to JS as a Uint8Array.
   /// Index 0: hasTickScheduled (1 = true, 0 = false)
   /// Index 1: hasRejectionToWarn (set by Rust in promise_reject_callback)
-  pub(crate) tick_info: Box<[u8; 2]>,
+  ///
+  /// `Rc` because `store_js_callbacks` hands the raw address to V8 as an
+  /// external `BackingStore`. See [`SharedInfoBuffers`] for the lifetime
+  /// contract that keeps that address valid.
+  pub(crate) tick_info: Rc<[u8; 2]>,
   /// Shared immediate info buffer exposed to JS as a Uint32Array.
   /// Indices: IMM_IDX_COUNT, IMM_IDX_REF_COUNT, IMM_IDX_HAS_OUTSTANDING
-  pub(crate) immediate_info: Box<[u32; 3]>,
+  pub(crate) immediate_info: Rc<[u32; 3]>,
   /// Shared timer info buffer exposed to JS as an Int32Array.
   /// Index 0: refed timer count (managed by JS)
-  pub(crate) timer_info: Box<[i32; 1]>,
+  pub(crate) timer_info: Rc<[i32; 1]>,
   /// Active JS-managed timers tracked for the leak sanitizer.
   /// Maps timer ID → (is_repeat, is_system). System timers (e.g.
   /// AbortSignal.timeout) are excluded from sanitizer stats.
@@ -178,7 +182,36 @@ pub struct ContextState {
   pub(crate) uv_timer_wake_deadline: Cell<Option<u64>>,
 }
 
+/// Owns the three shared info buffers independently of [`ContextState`].
+///
+/// `store_js_callbacks` publishes `tick_info`, `immediate_info` and
+/// `timer_info` to JS as typed arrays over *external* `BackingStore`s, with a
+/// no-op deleter, because `ContextState` owns the memory. That makes the
+/// address a contract: V8 may read it for as long as the typed arrays are
+/// reachable from the context, which outlasts `ContextState` in one case.
+///
+/// Snapshot creation is that case. `JsRuntimeInner::cleanup` destroys the
+/// realm (and with it `ContextState`) before `create_blob` runs V8's
+/// serializer, and the serializer copies each external backing store into the
+/// blob. Holding `SharedInfoBuffers` across `create_blob` keeps the three
+/// allocations alive for that read.
+pub(crate) struct SharedInfoBuffers {
+  _tick_info: Rc<[u8; 2]>,
+  _immediate_info: Rc<[u32; 3]>,
+  _timer_info: Rc<[i32; 1]>,
+}
+
 impl ContextState {
+  /// Clone owning handles to the buffers that JS holds external
+  /// `BackingStore`s over. See [`SharedInfoBuffers`].
+  pub(crate) fn shared_info_buffers(&self) -> SharedInfoBuffers {
+    SharedInfoBuffers {
+      _tick_info: self.tick_info.clone(),
+      _immediate_info: self.immediate_info.clone(),
+      _timer_info: self.timer_info.clone(),
+    }
+  }
+
   pub(crate) fn has_tick_scheduled(&self) -> bool {
     self.tick_info[0] != 0
   }
@@ -203,8 +236,8 @@ impl ContextState {
     Self {
       isolate: Some(isolate_ptr),
       exception_state: Default::default(),
-      tick_info: Box::new([0u8; 2]),
-      immediate_info: Box::new([0u32; 3]),
+      tick_info: Rc::new([0u8; 2]),
+      immediate_info: Rc::new([0u32; 3]),
       js_event_loop_tick_cb: Default::default(),
       js_process_timers_cb: Default::default(),
       js_drain_next_tick_and_macrotasks_cb: Default::default(),
@@ -222,7 +255,7 @@ impl ContextState {
       pending_ops: op_driver,
       task_spawner_factory: Default::default(),
       user_timer: Default::default(),
-      timer_info: Box::new([0i32; 1]),
+      timer_info: Rc::new([0i32; 1]),
       active_timers: Default::default(),
       unrefed_ops,
       external_ops_tracker,
