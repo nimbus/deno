@@ -3585,13 +3585,14 @@ function setupHandle(socket, type, options) {
           // the same position on its graceful path: it ends the writable
           // side, resumes reading and leaves the destroy alone.
           if (!socket.destroyed) {
+            let finTimer;
             const destroySocket = () => {
               clearTimeout(finTimer);
               if (!socket.destroyed) {
                 socket.destroy();
               }
             };
-            const finTimer = setTimeout(() => {
+            finTimer = setTimeout(() => {
               debugSession(type, "peer FIN timeout, destroying socket");
               destroySocket();
             }, SESSION_TEARDOWN_FIN_TIMEOUT);
