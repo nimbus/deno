@@ -532,6 +532,101 @@ pub unsafe fn uv_tcp_open_listener(tcp: *mut uv_tcp_t, fd: c_int) -> c_int {
 
 const UV_TCP_REUSEPORT: u32 = 4;
 
+/// Bind `socket` to `addr`.
+///
+/// On macOS, an ephemeral bind of a dual-stack IPv6 socket to `[::]:0` can
+/// return a port that another socket holds on a specific IPv4 address, such
+/// as `127.0.0.1:P` (Apple FB12128351). The kernel accepts the listener, but
+/// IPv4 clients that dial `127.0.0.1:P` reach the more specific socket, so
+/// the listener never sees them. Real libuv has the same defect.
+///
+/// For that case, take the port from the IPv4 allocator, which never returns
+/// a port that an IPv4 socket holds, then bind the dual-stack socket to it
+/// explicitly. The explicit bind runs without SO_REUSEADDR and SO_REUSEPORT,
+/// so it fails with EADDRINUSE if the port is held on any address. The
+/// options are restored after the bind, so the socket keeps libuv's options.
+/// This is the workaround from Apple DTS in
+/// https://developer.apple.com/forums/thread/728392.
+fn bind_socket(
+  socket: &tokio::net::TcpSocket,
+  addr: SocketAddr,
+) -> std::io::Result<()> {
+  #[cfg(target_os = "macos")]
+  if let SocketAddr::V6(v6) = addr
+    && v6.ip().is_unspecified()
+    && v6.port() == 0
+    && matches!(socket2::SockRef::from(socket).only_v6(), Ok(false))
+    && let Some(result) = macos_dual_stack::bind_ephemeral(socket, v6)
+  {
+    return result;
+  }
+  socket.bind(addr)
+}
+
+#[cfg(target_os = "macos")]
+mod macos_dual_stack {
+  use std::net::Ipv4Addr;
+  use std::net::SocketAddr;
+  use std::net::SocketAddrV6;
+
+  /// Upper bound on port candidates. A candidate fails only when another
+  /// socket takes it between the IPv4 probe and the IPv6 bind, or when an
+  /// IPv6-only socket holds it, so a few attempts are enough.
+  const MAX_ATTEMPTS: usize = 16;
+
+  /// Bind `socket` to an ephemeral port that no IPv4 socket holds.
+  ///
+  /// Returns `None` when no candidate port is usable. The caller then falls
+  /// back to the kernel's ephemeral bind, so `listen(0)` never fails because
+  /// of this workaround.
+  pub(super) fn bind_ephemeral(
+    socket: &tokio::net::TcpSocket,
+    addr: SocketAddrV6,
+  ) -> Option<std::io::Result<()>> {
+    let reuseaddr = socket.reuseaddr().ok()?;
+    let reuseport = socket.reuseport().ok()?;
+    if socket.set_reuseaddr(false).is_err()
+      || socket.set_reuseport(false).is_err()
+    {
+      socket.set_reuseaddr(reuseaddr).ok();
+      socket.set_reuseport(reuseport).ok();
+      return None;
+    }
+
+    let mut result = None;
+    for _ in 0..MAX_ATTEMPTS {
+      let Ok(port) = ipv4_ephemeral_port() else {
+        break;
+      };
+      let candidate =
+        SocketAddrV6::new(*addr.ip(), port, addr.flowinfo(), addr.scope_id());
+      match socket.bind(SocketAddr::V6(candidate)) {
+        Ok(()) => {
+          result = Some(Ok(()));
+          break;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+        Err(e) => {
+          result = Some(Err(e));
+          break;
+        }
+      }
+    }
+
+    socket.set_reuseaddr(reuseaddr).ok();
+    socket.set_reuseport(reuseport).ok();
+    result
+  }
+
+  /// Get a port from the IPv4 ephemeral allocator. The probe socket is
+  /// closed before it listens or connects, so it leaves no TIME_WAIT state.
+  fn ipv4_ephemeral_port() -> std::io::Result<u16> {
+    let probe = tokio::net::TcpSocket::new_v4()?;
+    probe.bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))?;
+    Ok(probe.local_addr()?.port())
+  }
+}
+
 /// ### Safety
 /// `tcp` must be a valid pointer to an initialized `uv_tcp_t`.
 ///
@@ -662,7 +757,7 @@ pub unsafe fn uv_tcp_bind(
       (*tcp).internal_fd = Some(socket.as_raw_socket());
     }
 
-    match socket.bind(sa) {
+    match bind_socket(&socket, sa) {
       Ok(()) => {
         (*tcp).internal_delayed_error = 0;
       }
@@ -1176,7 +1271,7 @@ pub unsafe fn uv_listen(
             }
           };
           s.set_reuseaddr(true).ok();
-          if let Err(ref e) = s.bind(bind_addr) {
+          if let Err(ref e) = bind_socket(&s, bind_addr) {
             return io_error_to_uv(e);
           }
           s

@@ -3503,6 +3503,12 @@ function handleHeaderContinue(headers) {
   }
 }
 
+// How long the nghttp2-driven teardown in `socketOnData` waits for the peer to
+// close its side of the socket before it closes the file descriptor anyway. It
+// bounds a peer that sends no FIN. The normal path never reaches it, because
+// the peer answers our FIN in one round trip.
+const SESSION_TEARDOWN_FIN_TIMEOUT = 5000;
+
 // Creates the internal Http2Session handle for an Http2Session
 // instance. This occurs only after the socket connection has been
 // established. Note: the Http2Session will take over ownership
@@ -3567,13 +3573,40 @@ function setupHandle(socket, type, options) {
           // socket.write(GOAWAY) is still pending in the writable stream
           // buffer -- destroy() abandons buffered writes, so the peer never
           // sees the GOAWAY frame. Use socket.end() so the GOAWAY is flushed
-          // before FIN is sent, then destroy after the writable side drains
-          // to ensure the peer's read side observes connection close (some
-          // peers won't surface an error on a half-open FIN alone).
+          // before FIN is sent.
+          //
+          // Do not destroy as soon as our own writable side drains either.
+          // destroy() closes the file descriptor, so any segment the peer
+          // still has in flight is answered with RST and the peer reports
+          // `read ECONNRESET` instead of a clean end. Wait for the peer's
+          // FIN, which arrives as "end", and keep a bounded fallback for a
+          // peer that never closes its side. The timer is unref'd so it
+          // cannot hold application shutdown open. finishSessionClose takes
+          // the same position on its graceful path: it ends the writable
+          // side, resumes reading and leaves the destroy alone.
           if (!socket.destroyed) {
-            socket.end(() => {
+            let finTimer;
+            const destroySocket = () => {
+              clearTimeout(finTimer);
               if (!socket.destroyed) {
                 socket.destroy();
+              }
+            };
+            finTimer = setTimeout(() => {
+              debugSession(type, "peer FIN timeout, destroying socket");
+              destroySocket();
+            }, SESSION_TEARDOWN_FIN_TIMEOUT);
+            finTimer.unref();
+            socket.once("close", () => clearTimeout(finTimer));
+            socket.once("end", destroySocket);
+            // Keep reading so the peer's FIN is observed even once the
+            // session object is gone.
+            socket.resume();
+            socket.end(() => {
+              // A peer that closed its side before the GOAWAY drained emits
+              // no further "end", so there is nothing left to wait for.
+              if (socket.readableEnded) {
+                destroySocket();
               }
             });
           }
