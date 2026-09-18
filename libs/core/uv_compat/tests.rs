@@ -1594,6 +1594,178 @@ async fn tcp_bind_eaddrinuse_deferred_to_listen() {
   .await;
 }
 
+// ========== Dual-stack ephemeral bind on macOS (Apple FB12128351) ==========
+
+/// Build `[::]:0` as a `sockaddr_in6`.
+#[cfg(target_os = "macos")]
+fn ipv6_unspecified_ephemeral() -> libc::sockaddr_in6 {
+  // SAFETY: sockaddr_in6 is plain old data; all-zero is `[::]:0`.
+  let mut addr: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+  addr.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as u8;
+  addr.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+  addr
+}
+
+/// Bind `tcp` to `[::]:0` and return the port that the kernel assigned.
+///
+/// ### Safety
+/// `tcp` must be initialized by `uv_tcp_init`.
+#[cfg(target_os = "macos")]
+unsafe fn bind_ipv6_ephemeral(tcp: *mut uv_tcp_t) -> u16 {
+  let addr = ipv6_unspecified_ephemeral();
+  // SAFETY: Caller guarantees tcp is initialized; addr is a valid sockaddr_in6.
+  unsafe {
+    assert_ok(uv_tcp_bind(tcp, &addr as *const _ as *const c_void, 0, 0));
+    let mut name: libc::sockaddr_in6 = std::mem::zeroed();
+    let mut namelen = std::mem::size_of::<libc::sockaddr_in6>() as i32;
+    assert_ok(uv_tcp_getsockname(
+      tcp,
+      &mut name as *mut _ as *mut c_void,
+      &mut namelen,
+    ));
+    u16::from_be(name.sin6_port)
+  }
+}
+
+/// On macOS, the dual-stack ephemeral allocator can return a port that an
+/// IPv4 socket holds on 127.0.0.1. IPv4 clients of such a listener reach the
+/// other socket instead. With sequential allocation
+/// (`net.inet.tcp.randomize_ports=0`), one pass over the default ephemeral
+/// range (49152-65535) lands on every held port; with random allocation,
+/// the expected number of collisions over the same number of binds is well
+/// above one. Without the workaround in `bind_socket`, this test fails.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "current_thread")]
+async fn tcp_bind_ipv6_ephemeral_skips_held_ipv4_ports() {
+  const HELD: usize = 64;
+  const BINDS: usize = 17_000;
+  const CHUNK: usize = 1_024;
+
+  run_test(async |runtime, uv_loop| {
+    let held: Vec<std::net::TcpListener> = (0..HELD)
+      .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+      .collect();
+    let held_ports: std::collections::HashSet<u16> = held
+      .iter()
+      .map(|l| l.local_addr().unwrap().port())
+      .collect();
+
+    let mut collisions = Vec::new();
+    for _ in 0..BINDS.div_ceil(CHUNK) {
+      let mut handles = Vec::with_capacity(CHUNK);
+      for _ in 0..CHUNK {
+        let handle = Box::new(std::mem::MaybeUninit::<uv_tcp_t>::uninit());
+        let tcp = Box::into_raw(handle) as *mut uv_tcp_t;
+        // SAFETY: tcp is a fresh allocation that lives until run_close.
+        unsafe {
+          uv_tcp_init(uv_loop, tcp);
+          let port = bind_ipv6_ephemeral(tcp);
+          if held_ports.contains(&port) {
+            collisions.push(port);
+          }
+          uv_close(tcp as *mut uv_handle_t, None);
+        }
+        handles.push(tcp);
+      }
+      // Let the loop drain the closing queue before the memory is freed.
+      tick(runtime).await;
+      for tcp in handles {
+        // SAFETY: The loop no longer references the closed handle.
+        drop(unsafe {
+          Box::from_raw(tcp as *mut std::mem::MaybeUninit<uv_tcp_t>)
+        });
+      }
+    }
+
+    assert!(
+      collisions.is_empty(),
+      "[::]:0 returned ports held on 127.0.0.1: {collisions:?}"
+    );
+    drop(held);
+  })
+  .await;
+}
+
+/// The workaround binds without SO_REUSEADDR. The socket must still accept
+/// IPv4 clients and keep libuv's SO_REUSEADDR after the bind.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "current_thread")]
+async fn tcp_bind_ipv6_ephemeral_stays_dual_stack() {
+  run_test(async |runtime, uv_loop| {
+    let mut server = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+    let server_ptr = server.as_mut_ptr();
+
+    unsafe extern "C" fn on_connection(_: *mut uv_stream_t, status: i32) {
+      assert_eq!(status, 0);
+    }
+
+    // SAFETY: server_ptr is valid for the whole test.
+    unsafe {
+      uv_tcp_init(uv_loop, server_ptr);
+      let port = bind_ipv6_ephemeral(server_ptr);
+      assert_ne!(port, 0);
+
+      let fd = (*server_ptr).internal_fd.expect("bound socket has an fd");
+      let mut reuseaddr: libc::c_int = 0;
+      let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+      assert_eq!(
+        libc::getsockopt(
+          fd,
+          libc::SOL_SOCKET,
+          libc::SO_REUSEADDR,
+          &mut reuseaddr as *mut _ as *mut c_void,
+          &mut len,
+        ),
+        0
+      );
+      assert_ne!(reuseaddr, 0, "SO_REUSEADDR must be restored after bind");
+
+      assert_ok(uv_listen(
+        server_ptr as *mut uv_stream_t,
+        128,
+        Some(on_connection),
+      ));
+
+      let client = std::net::TcpStream::connect(("127.0.0.1", port))
+        .expect("IPv4 client must reach the dual-stack listener");
+      let mut accepted = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+      let accepted_ptr = accepted.as_mut_ptr();
+      uv_tcp_init(uv_loop, accepted_ptr);
+      let mut status = UV_EAGAIN;
+      for _ in 0..100 {
+        tick(runtime).await;
+        status = uv_accept(
+          server_ptr as *mut uv_stream_t,
+          accepted_ptr as *mut uv_stream_t,
+        );
+        if status != UV_EAGAIN {
+          break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+      }
+      assert_ok(status);
+      let mut peer: libc::sockaddr_in6 = std::mem::zeroed();
+      let mut peerlen = std::mem::size_of::<libc::sockaddr_in6>() as i32;
+      assert_ok(uv_tcp_getpeername(
+        accepted_ptr,
+        &mut peer as *mut _ as *mut c_void,
+        &mut peerlen,
+      ));
+      assert_eq!(
+        u16::from_be(peer.sin6_port),
+        client.local_addr().unwrap().port(),
+        "the listener must accept the IPv4 client that dialed it"
+      );
+
+      drop(client);
+      uv_close(accepted_ptr as *mut uv_handle_t, None);
+      uv_close(server_ptr as *mut uv_handle_t, None);
+      tick(runtime).await;
+    }
+  })
+  .await;
+}
+
 // ========== TCP connect returns UV_EALREADY on duplicate ==========
 
 #[tokio::test(flavor = "current_thread")]
