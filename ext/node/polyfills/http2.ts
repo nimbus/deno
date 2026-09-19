@@ -3565,6 +3565,11 @@ function setupHandle(socket, type, options) {
       // where nghttp2 emits a stream-level RST_STREAM and a connection-level
       // GOAWAY in the same mem_recv batch as the HEADERS frame.
       if (!handle.hasPendingData() && !this.destroyed) {
+        // Read the GOAWAY code before onstreamclose tears the handle down.
+        // A non-zero code means nghttp2 ended the session because the peer
+        // broke the protocol, which is Node's `session.destroy(err)` case.
+        const sentGoawayCode = handle.lastSentGoawayCode();
+        const peerBrokeProtocol = sentGoawayCode > NGHTTP2_NO_ERROR;
         process.nextTick(() => {
           if (this.destroyed) return;
           handle.onstreamclose();
@@ -3575,15 +3580,25 @@ function setupHandle(socket, type, options) {
           // sees the GOAWAY frame. Use socket.end() so the GOAWAY is flushed
           // before FIN is sent.
           //
-          // Do not destroy as soon as our own writable side drains either.
-          // destroy() closes the file descriptor, so any segment the peer
-          // still has in flight is answered with RST and the peer reports
-          // `read ECONNRESET` instead of a clean end. Wait for the peer's
-          // FIN, which arrives as "end", and keep a bounded fallback for a
-          // peer that never closes its side. The timer is unref'd so it
-          // cannot hold application shutdown open. finishSessionClose takes
-          // the same position on its graceful path: it ends the writable
-          // side, resumes reading and leaves the destroy alone.
+          // On a clean shutdown, do not destroy as soon as our own writable
+          // side drains either. destroy() closes the file descriptor, so any
+          // segment the peer still has in flight is answered with RST and the
+          // peer reports `read ECONNRESET` instead of a clean end. Wait for
+          // the peer's FIN, which arrives as "end", and keep a bounded
+          // fallback for a peer that never closes its side. The timer is
+          // unref'd so it cannot hold application shutdown open.
+          // finishSessionClose takes the same position on its graceful path:
+          // it ends the writable side, resumes reading and leaves the destroy
+          // alone.
+          //
+          // After a protocol error there is nothing to wait for. Node
+          // destroys the socket one turn after the writable side drains
+          // (finishSessionClose, `if (!session.closed)`), so a peer that
+          // holds its side open -- `allowHalfOpen`, or a peer that keeps
+          // writing after the GOAWAY -- learns of the close at once instead
+          // of after the FIN timeout. See
+          // `parallel/test-http2-max-invalid-frames.js`, whose client stops
+          // only when the socket errors.
           if (!socket.destroyed) {
             let finTimer;
             const destroySocket = () => {
@@ -3592,20 +3607,25 @@ function setupHandle(socket, type, options) {
                 socket.destroy();
               }
             };
-            finTimer = setTimeout(() => {
-              debugSession(type, "peer FIN timeout, destroying socket");
-              destroySocket();
-            }, SESSION_TEARDOWN_FIN_TIMEOUT);
-            finTimer.unref();
-            socket.once("close", () => clearTimeout(finTimer));
-            socket.once("end", destroySocket);
-            // Keep reading so the peer's FIN is observed even once the
-            // session object is gone.
-            socket.resume();
+            if (!peerBrokeProtocol) {
+              finTimer = setTimeout(() => {
+                debugSession(type, "peer FIN timeout, destroying socket");
+                destroySocket();
+              }, SESSION_TEARDOWN_FIN_TIMEOUT);
+              finTimer.unref();
+              socket.once("close", () => clearTimeout(finTimer));
+              socket.once("end", destroySocket);
+              // Keep reading so the peer's FIN is observed even once the
+              // session object is gone.
+              socket.resume();
+            }
             socket.end(() => {
-              // A peer that closed its side before the GOAWAY drained emits
-              // no further "end", so there is nothing left to wait for.
-              if (socket.readableEnded) {
+              // A peer that broke the protocol gets no grace period, and a
+              // peer that closed its side before the GOAWAY drained emits no
+              // further "end", so there is nothing left to wait for.
+              if (peerBrokeProtocol) {
+                setImmediate(destroySocket);
+              } else if (socket.readableEnded) {
                 destroySocket();
               }
             });
