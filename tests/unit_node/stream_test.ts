@@ -412,3 +412,12 @@ Deno.test("exported `promises` from node:stream works", async () => {
   }
   await promise;
 });
+
+Deno.test("Readable#read() without a size returns one buffered chunk", () => {
+  const readable = new Readable({ read() {} });
+  readable.push(new Uint8Array(3));
+  readable.push(new Uint8Array(5));
+  assertEquals(readable.readableLength, 8);
+  assertEquals(readable.read().length, 3);
+  assertEquals(readable.read(readable.readableLength).length, 5);
+});

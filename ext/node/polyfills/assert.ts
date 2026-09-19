@@ -4,6 +4,10 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const {
+  op_node_assert_call_tracker_exposed,
+  op_node_assert_class_api_exposed,
+} = core.ops;
 const { AssertionError } = core.loadExtScript(
   "ext:deno_node/internal/assert/assertion_error.js",
 );
@@ -988,8 +992,52 @@ const default_ = ObjectAssign(assert, {
   throws,
 });
 
+// Node.js 20 has no `Assert` class and no `partialDeepStrictEqual`. Node.js 25
+// removed `CallTracker` (DEP0173). The embedder can change the target after a
+// startup snapshot, so `refreshApiSurface()` reads the policy again.
+const kVersionedExports = ["Assert", "CallTracker", "partialDeepStrictEqual"];
+const versionedExportBindings = [];
+
+function versionedExports() {
+  const classApi = op_node_assert_class_api_exposed();
+  return {
+    __proto__: null,
+    Assert: classApi ? Assert : undefined,
+    CallTracker: op_node_assert_call_tracker_exposed()
+      ? CallTracker_
+      : undefined,
+    partialDeepStrictEqual: classApi ? partialDeepStrictEqual : undefined,
+  };
+}
+
+function refreshApiSurface() {
+  const exports = versionedExports();
+  ArrayPrototypeForEach(kVersionedExports, (name) => {
+    const value = exports[name];
+    ArrayPrototypeForEach([assert, strict], (target) => {
+      if (value === undefined) {
+        delete target[name];
+      } else if (target[name] !== value) {
+        setOwnProperty(target, name, value);
+      }
+    });
+  });
+  ArrayPrototypeForEach(versionedExportBindings, (update) => update(exports));
+}
+
+// An ESM facade binds its `Assert`, `CallTracker` and `partialDeepStrictEqual`
+// exports here.
+function bindVersionedExports(update) {
+  ArrayPrototypePush(versionedExportBindings, update);
+  update(versionedExports());
+}
+
+refreshApiSurface();
+
 return {
   default: default_,
+  bindVersionedExports,
+  refreshApiSurface,
   Assert,
   AssertionError,
   CallTracker: CallTracker_,

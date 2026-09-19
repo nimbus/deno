@@ -75,6 +75,17 @@ pub enum UrlSearchParamsNullPolicy {
   Stringify,
 }
 
+/// How `inspect` shows a proxy when `showProxy` is off.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProxyInspectPolicy {
+  /// Show only the target, as Node.js 25 and earlier do.
+  #[default]
+  TargetOnly,
+  /// Show the target in `Proxy(...)`, one wrapper for each proxy layer, as
+  /// Node.js 26 and later do (nodejs/node#61077).
+  AnnotateTarget,
+}
+
 deno_core::extension!(deno_web,
   deps = [ deno_webidl ],
   ops = [
@@ -207,6 +218,7 @@ deno_core::extension!(deno_web,
     enable_css_parser_features: bool,
     bc: InMemoryBroadcastChannel,
     url_search_params_null_policy: UrlSearchParamsNullPolicy,
+    proxy_inspect_policy: ProxyInspectPolicy,
   },
   state = |state, options| {
     state.put(options.blob_store);
@@ -217,6 +229,7 @@ deno_core::extension!(deno_web,
     state.put(geometry::State::new(options.enable_css_parser_features));
     state.put(options.bc);
     state.put(options.url_search_params_null_policy);
+    state.put(options.proxy_inspect_policy);
     state.put(broadcast_channel::BroadcastSabStash::default());
   }
 );

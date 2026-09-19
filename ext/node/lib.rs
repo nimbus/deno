@@ -32,6 +32,7 @@ extern crate libz_sys as zlib;
 pub mod ops;
 
 use deno_dotenv::parse_env_content_hook;
+pub use deno_node_crypto::DhComputeSecretPolicy;
 pub use deno_package_json::PackageJson;
 use deno_permissions::PermissionCheckError;
 pub use node_resolver::DENO_SUPPORTED_BUILTIN_NODE_MODULES as SUPPORTED_BUILTIN_NODE_MODULES;
@@ -60,6 +61,74 @@ pub enum DgramDefaultLookupPolicy {
   BypassIpLiterals,
 }
 
+/// The auth tag that `Cipheriv#getAuthTag()` returns after `final()` fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CipherAuthTagPolicy {
+  /// Match Node.js 20 and 22, which return a zero-filled tag.
+  ZeroFilledAfterFailedFinal,
+  /// Match Node.js 24.2 and later (nodejs/node#58547), which throw
+  /// `ERR_CRYPTO_INVALID_STATE` until final computes the tag.
+  RequireComputedTag,
+}
+
+/// Whether `node:crypto` has the password-based cipher API: `createCipher`,
+/// `createDecipher`, `Cipher` and `Decipher` (DEP0106).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PasswordCipherApiPolicy {
+  /// Match Node.js 20, which keeps the deprecated API.
+  ExposeDeprecated,
+  /// Match Node.js 22, which removed the API (nodejs/node#50973) but still
+  /// exports `Cipher` and `Decipher` as `undefined`.
+  RemovedWithUndefinedClassExports,
+  /// Match Node.js 24 and later, which also removed the `undefined` exports
+  /// (nodejs/node#57266).
+  Removed,
+}
+
+/// How `events.once()` and `events.on()` treat their `options` argument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventsOptionsPolicy {
+  /// Match Node.js 20, which reads `options.signal` without validating
+  /// `options` itself.
+  ReadWithoutValidation,
+  /// Match Node.js 22 and later (nodejs/node#46018), which throw
+  /// `ERR_INVALID_ARG_TYPE` when `options` is not an object.
+  RequireObject,
+}
+
+/// How `Readable#read()` without a size chooses the amount to return from a
+/// paused byte stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadableReadPolicy {
+  /// Match Node.js 24 and earlier, which return all buffered data as one
+  /// chunk.
+  ConcatenateBuffered,
+  /// Match Node.js 26 and later (nodejs/node#60441), which return one
+  /// buffered chunk at a time.
+  OneBufferAtATime,
+}
+
+/// The largest `Buffer` size: `buffer.kMaxLength` and
+/// `buffer.constants.MAX_LENGTH`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BufferMaxLengthPolicy {
+  /// Match Node.js 20 on 64-bit platforms, where the V8 `TypedArray` limit is
+  /// 2^32 bytes.
+  Uint32Range,
+  /// Match Node.js 22 and later on 64-bit platforms, where the limit is
+  /// `Number.MAX_SAFE_INTEGER`.
+  SafeInteger,
+}
+
+impl BufferMaxLengthPolicy {
+  fn max_length(self) -> f64 {
+    match self {
+      Self::Uint32Range => 4_294_967_296.0,
+      Self::SafeInteger => 9_007_199_254_740_991.0,
+    }
+  }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClosedReadableAdapterPolicy {
   LegacyClose,
@@ -83,6 +152,59 @@ mod dgram_policy_tests {
         .bypasses_ip_literals()
     );
     assert!(DgramDefaultLookupPolicy::BypassIpLiterals.bypasses_ip_literals());
+  }
+}
+
+/// How `AssertionError` shows the difference between `actual` and `expected`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssertionErrorDiffPolicy {
+  /// Match Node.js 20, which compares the inspected lines position by
+  /// position and does not copy an error `cause` into the message.
+  LineByLine,
+  /// Match Node.js 22.12 and later (nodejs/node#54862), which use the Myers
+  /// diff algorithm and accept the `diff` option.
+  Myers,
+}
+
+/// Which versioned classes and functions `node:assert` exports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssertApiPolicy {
+  /// Match Node.js 20, which exports the deprecated `CallTracker` (DEP0173)
+  /// and has no `Assert` class and no `partialDeepStrictEqual`.
+  CallTrackerOnly,
+  /// Match Node.js 22 and 24, which also export the `Assert` class (22.19.0)
+  /// and `partialDeepStrictEqual` (22.13.0).
+  AssertClassAndCallTracker,
+  /// Match Node.js 25 and later, which removed `CallTracker` (DEP0173
+  /// End-of-Life).
+  AssertClassOnly,
+}
+
+/// When a deep-equality comparison stops at a circular reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeepEqualCyclePolicy {
+  /// Match Node.js 22 and earlier, where the recursion stops only when both
+  /// sides reach a circular reference.
+  BothSides,
+  /// Match Node.js 24 and later (nodejs/node#57622), where the recursion stops
+  /// when either side reaches a circular reference.
+  EitherSide,
+}
+
+#[cfg(test)]
+mod buffer_max_length_policy_tests {
+  use super::BufferMaxLengthPolicy;
+
+  #[test]
+  fn selects_the_node_20_and_the_current_buffer_limits() {
+    assert_eq!(
+      BufferMaxLengthPolicy::Uint32Range.max_length(),
+      2f64.powi(32)
+    );
+    assert_eq!(
+      BufferMaxLengthPolicy::SafeInteger.max_length(),
+      2f64.powi(53) - 1.0
+    );
   }
 }
 
@@ -180,6 +302,89 @@ fn op_node_gcm_implicit_short_tag_warns_unconditionally(
     state.borrow::<AesGcmImplicitShortTagPolicy>(),
     AesGcmImplicitShortTagPolicy::WarnDeprecated
   )
+}
+
+#[op2(fast)]
+fn op_node_cipher_auth_tag_requires_computed(state: &OpState) -> bool {
+  !matches!(
+    state.try_borrow::<CipherAuthTagPolicy>(),
+    Some(CipherAuthTagPolicy::ZeroFilledAfterFailedFinal)
+  )
+}
+
+#[op2(fast)]
+fn op_node_password_cipher_api_exposed(state: &OpState) -> bool {
+  matches!(
+    state.try_borrow::<PasswordCipherApiPolicy>(),
+    Some(PasswordCipherApiPolicy::ExposeDeprecated)
+  )
+}
+
+#[op2(fast)]
+fn op_node_password_cipher_classes_exported_as_undefined(
+  state: &OpState,
+) -> bool {
+  matches!(
+    state.try_borrow::<PasswordCipherApiPolicy>(),
+    Some(PasswordCipherApiPolicy::RemovedWithUndefinedClassExports)
+  )
+}
+
+#[op2(fast)]
+fn op_node_events_options_require_object(state: &OpState) -> bool {
+  !matches!(
+    state.try_borrow::<EventsOptionsPolicy>(),
+    Some(EventsOptionsPolicy::ReadWithoutValidation)
+  )
+}
+
+#[op2(fast)]
+fn op_node_readable_read_one_buffer_at_a_time(state: &OpState) -> bool {
+  !matches!(
+    state.try_borrow::<ReadableReadPolicy>(),
+    Some(ReadableReadPolicy::ConcatenateBuffered)
+  )
+}
+
+#[op2(fast)]
+fn op_node_assertion_error_uses_myers_diff(state: &OpState) -> bool {
+  !matches!(
+    state.try_borrow::<AssertionErrorDiffPolicy>(),
+    Some(AssertionErrorDiffPolicy::LineByLine)
+  )
+}
+
+#[op2(fast)]
+fn op_node_assert_class_api_exposed(state: &OpState) -> bool {
+  !matches!(
+    state.try_borrow::<AssertApiPolicy>(),
+    Some(AssertApiPolicy::CallTrackerOnly)
+  )
+}
+
+#[op2(fast)]
+fn op_node_assert_call_tracker_exposed(state: &OpState) -> bool {
+  !matches!(
+    state.try_borrow::<AssertApiPolicy>(),
+    Some(AssertApiPolicy::AssertClassOnly)
+  )
+}
+
+#[op2(fast)]
+fn op_node_deep_equal_stops_at_either_cycle(state: &OpState) -> bool {
+  !matches!(
+    state.try_borrow::<DeepEqualCyclePolicy>(),
+    Some(DeepEqualCyclePolicy::BothSides)
+  )
+}
+
+#[op2(fast)]
+fn op_node_buffer_max_length(state: &OpState) -> f64 {
+  state
+    .try_borrow::<BufferMaxLengthPolicy>()
+    .copied()
+    .unwrap_or(BufferMaxLengthPolicy::SafeInteger)
+    .max_length()
 }
 
 #[op2(fast)]
@@ -427,6 +632,16 @@ deno_core::extension!(deno_node,
     op_node_build_os,
     op_node_gcm_implicit_short_tag_allowed,
     op_node_gcm_implicit_short_tag_warns_unconditionally,
+    op_node_cipher_auth_tag_requires_computed,
+    op_node_password_cipher_api_exposed,
+    op_node_password_cipher_classes_exported_as_undefined,
+    op_node_events_options_require_object,
+    op_node_readable_read_one_buffer_at_a_time,
+    op_node_buffer_max_length,
+    op_node_assertion_error_uses_myers_diff,
+    op_node_deep_equal_stops_at_either_cycle,
+    op_node_assert_class_api_exposed,
+    op_node_assert_call_tracker_exposed,
     op_node_webstreams_closed_readable_propagates_error,
     ops::udp::op_node_dgram_default_lookup_bypasses_ip_literals,
     op_node_load_env_file,
@@ -885,6 +1100,15 @@ deno_core::extension!(deno_node,
     aes_gcm_implicit_short_tag_policy: AesGcmImplicitShortTagPolicy,
     dgram_default_lookup_policy: DgramDefaultLookupPolicy,
     closed_readable_adapter_policy: ClosedReadableAdapterPolicy,
+    cipher_auth_tag_policy: CipherAuthTagPolicy,
+    password_cipher_api_policy: PasswordCipherApiPolicy,
+    events_options_policy: EventsOptionsPolicy,
+    dh_compute_secret_policy: DhComputeSecretPolicy,
+    readable_read_policy: ReadableReadPolicy,
+    buffer_max_length_policy: BufferMaxLengthPolicy,
+    assertion_error_diff_policy: AssertionErrorDiffPolicy,
+    deep_equal_cycle_policy: DeepEqualCyclePolicy,
+    assert_api_policy: AssertApiPolicy,
   },
   state = |state, options| {
     state.put(options.fs.clone());
@@ -892,6 +1116,15 @@ deno_core::extension!(deno_node,
     state.put(options.aes_gcm_implicit_short_tag_policy);
     state.put(options.dgram_default_lookup_policy);
     state.put(options.closed_readable_adapter_policy);
+    state.put(options.cipher_auth_tag_policy);
+    state.put(options.password_cipher_api_policy);
+    state.put(options.events_options_policy);
+    state.put(options.dh_compute_secret_policy);
+    state.put(options.readable_read_policy);
+    state.put(options.buffer_max_length_policy);
+    state.put(options.assertion_error_diff_policy);
+    state.put(options.deep_equal_cycle_policy);
+    state.put(options.assert_api_policy);
     state.put(ops::module_hooks::LoaderHookRegistry::default());
 
     if let Some(init) = &options.maybe_init {

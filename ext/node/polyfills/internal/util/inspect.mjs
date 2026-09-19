@@ -25,7 +25,6 @@ const { core, primordials } = __bootstrap;
 const {
   ArrayIsArray,
   ArrayPrototypeFilter,
-  FunctionPrototypeCall,
   JSONStringify,
   Number,
   NumberParseFloat,
@@ -53,6 +52,7 @@ const {
   StringPrototypeSlice,
   StringPrototypeSplit,
   SymbolFor,
+  SymbolToPrimitive,
 } = primordials;
 const {
   validateBoolean,
@@ -380,35 +380,51 @@ const isZeroWidthCodePoint = (code) => {
     (code >= 0xE0100 && code <= 0xE01EF); // Variation Selectors
 };
 
+function returnFalse() {
+  return false;
+}
+
 function hasBuiltInToString(value) {
-  // TODO(wafuwafu13): Implement
-  // // Prevent triggering proxy traps.
-  // const getFullProxy = false;
-  // const proxyTarget = getProxyDetails(value, getFullProxy);
-  const proxyTarget = undefined;
-  if (proxyTarget !== undefined) {
-    value = proxyTarget;
+  // Prevent triggering proxy traps. Unwrap every proxy layer (Node.js 26
+  // behavior) so that a nested proxy does not call the traps of an inner
+  // handler either.
+  const proxyDetails = core.getProxyDetails(value);
+  if (proxyDetails !== null) {
+    const proxyTarget = proxyDetails[0];
+    if (proxyTarget === null) {
+      return true;
+    }
+    return hasBuiltInToString(proxyTarget);
   }
 
-  // Count objects that have no `toString` function as built-in.
+  let hasOwnToString = ObjectPrototypeHasOwnProperty;
+  let hasOwnToPrimitive = ObjectPrototypeHasOwnProperty;
+
+  // Count objects without `toString` and `Symbol.toPrimitive` function as
+  // built-in.
   if (typeof value.toString !== "function") {
-    return true;
-  }
-
-  // The object has a own `toString` property. Thus it's not a built-in one.
-  if (
-    FunctionPrototypeCall(Object.prototype.hasOwnProperty, value, "toString")
-  ) {
+    if (typeof value[SymbolToPrimitive] !== "function") {
+      return true;
+    } else if (ObjectPrototypeHasOwnProperty(value, SymbolToPrimitive)) {
+      return false;
+    }
+    hasOwnToString = returnFalse;
+  } else if (ObjectPrototypeHasOwnProperty(value, "toString")) {
+    return false;
+  } else if (typeof value[SymbolToPrimitive] !== "function") {
+    hasOwnToPrimitive = returnFalse;
+  } else if (ObjectPrototypeHasOwnProperty(value, SymbolToPrimitive)) {
     return false;
   }
 
-  // Find the object that has the `toString` property as own property in the
-  // prototype chain.
+  // Find the object that has the `toString` property or `Symbol.toPrimitive`
+  // property as own property in the prototype chain.
   let pointer = value;
   do {
     pointer = ObjectGetPrototypeOf(pointer);
   } while (
-    !FunctionPrototypeCall(Object.prototype.hasOwnProperty, pointer, "toString")
+    !hasOwnToString(pointer, "toString") &&
+    !hasOwnToPrimitive(pointer, SymbolToPrimitive)
   );
 
   // Check closer if the object is a built-in.

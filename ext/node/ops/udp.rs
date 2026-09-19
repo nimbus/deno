@@ -1,13 +1,17 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::borrow::Cow;
+use std::cell::Ref;
 use std::cell::RefCell;
+use std::future::poll_fn;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::str::FromStr;
+use std::task::Poll;
 
+use deno_core::AsyncRefCell;
 use deno_core::CancelFuture;
 use deno_core::CancelHandle;
 use deno_core::JsBuffer;
@@ -21,6 +25,7 @@ use socket2::Domain;
 use socket2::Protocol;
 use socket2::Socket;
 use socket2::Type;
+use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
 
 use crate::DgramDefaultLookupPolicy;
@@ -51,8 +56,31 @@ pub enum NodeUdpError {
 }
 
 pub struct NodeUdpSocketResource {
-  pub socket: UdpSocket,
-  pub cancel: CancelHandle,
+  // Node.js closes the UDP fd synchronously in uv_close(). `close` takes the
+  // socket out of this cell, so the fd closes while a send or recv op still
+  // holds the resource.
+  socket: RefCell<Option<UdpSocket>>,
+  // The poll_* socket methods wake only the most recent waiter in each
+  // direction, so concurrent ops take turns in FIFO order.
+  send_turn: AsyncRefCell<()>,
+  recv_turn: AsyncRefCell<()>,
+  cancel: CancelHandle,
+}
+
+impl NodeUdpSocketResource {
+  fn new(socket: UdpSocket) -> Self {
+    Self {
+      socket: RefCell::new(Some(socket)),
+      send_turn: Default::default(),
+      recv_turn: Default::default(),
+      cancel: Default::default(),
+    }
+  }
+
+  fn socket(&self) -> Result<Ref<'_, UdpSocket>, NodeUdpError> {
+    Ref::filter_map(self.socket.borrow(), Option::as_ref)
+      .map_err(|_| NodeUdpError::Canceled(deno_core::Canceled))
+  }
 }
 
 #[op2(fast)]
@@ -70,6 +98,7 @@ impl Resource for NodeUdpSocketResource {
   }
 
   fn close(self: Rc<Self>) {
+    drop(self.socket.take());
     self.cancel.cancel()
   }
 }
@@ -121,10 +150,7 @@ pub fn op_node_udp_bind(
   let socket = UdpSocket::from_std(std_socket)?;
   let local_addr = socket.local_addr()?;
 
-  let resource = NodeUdpSocketResource {
-    socket,
-    cancel: Default::default(),
-  };
+  let resource = NodeUdpSocketResource::new(socket);
   let rid = state.resource_table.add(resource);
 
   Ok((rid, local_addr.ip().to_string(), local_addr.port()))
@@ -146,7 +172,7 @@ pub fn op_node_udp_join_multi_v4(
     .transpose()?
     .unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-  resource.socket.join_multicast_v4(addr, iface)?;
+  resource.socket()?.join_multicast_v4(addr, iface)?;
   Ok(())
 }
 
@@ -166,7 +192,7 @@ pub fn op_node_udp_leave_multi_v4(
     .transpose()?
     .unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-  resource.socket.leave_multicast_v4(addr, iface)?;
+  resource.socket()?.leave_multicast_v4(addr, iface)?;
   Ok(())
 }
 
@@ -285,7 +311,7 @@ pub fn op_node_udp_join_multi_v6(
 
   let addr = Ipv6Addr::from_str(address)?;
   let iface = resolve_ipv6_interface(interface_addr.as_deref())?;
-  resource.socket.join_multicast_v6(&addr, iface)?;
+  resource.socket()?.join_multicast_v6(&addr, iface)?;
   Ok(())
 }
 
@@ -300,7 +326,7 @@ pub fn op_node_udp_leave_multi_v6(
 
   let addr = Ipv6Addr::from_str(address)?;
   let iface = resolve_ipv6_interface(interface_addr.as_deref())?;
-  resource.socket.leave_multicast_v6(&addr, iface)?;
+  resource.socket()?.leave_multicast_v6(&addr, iface)?;
   Ok(())
 }
 
@@ -311,7 +337,7 @@ pub fn op_node_udp_set_broadcast(
   on: bool,
 ) -> Result<(), NodeUdpError> {
   let resource = state.resource_table.get::<NodeUdpSocketResource>(rid)?;
-  resource.socket.set_broadcast(on)?;
+  resource.socket()?.set_broadcast(on)?;
   Ok(())
 }
 
@@ -324,9 +350,9 @@ pub fn op_node_udp_set_multicast_loopback(
 ) -> Result<(), NodeUdpError> {
   let resource = state.resource_table.get::<NodeUdpSocketResource>(rid)?;
   if is_v4 {
-    resource.socket.set_multicast_loop_v4(on)?;
+    resource.socket()?.set_multicast_loop_v4(on)?;
   } else {
-    resource.socket.set_multicast_loop_v6(on)?;
+    resource.socket()?.set_multicast_loop_v6(on)?;
   }
   Ok(())
 }
@@ -338,7 +364,7 @@ pub fn op_node_udp_set_multicast_ttl(
   #[smi] ttl: u32,
 ) -> Result<(), NodeUdpError> {
   let resource = state.resource_table.get::<NodeUdpSocketResource>(rid)?;
-  resource.socket.set_multicast_ttl_v4(ttl)?;
+  resource.socket()?.set_multicast_ttl_v4(ttl)?;
   Ok(())
 }
 
@@ -349,7 +375,8 @@ pub fn op_node_udp_set_ttl(
   #[smi] ttl: u32,
 ) -> Result<(), NodeUdpError> {
   let resource = state.resource_table.get::<NodeUdpSocketResource>(rid)?;
-  let sock_ref = socket2::SockRef::from(&resource.socket);
+  let socket = resource.socket()?;
+  let sock_ref = socket2::SockRef::from(&*socket);
   sock_ref.set_ttl(ttl)?;
   Ok(())
 }
@@ -362,7 +389,8 @@ pub fn op_node_udp_set_multicast_interface(
   #[string] interface_address: &str,
 ) -> Result<(), NodeUdpError> {
   let resource = state.resource_table.get::<NodeUdpSocketResource>(rid)?;
-  let sock_ref = socket2::SockRef::from(&resource.socket);
+  let socket = resource.socket()?;
+  let sock_ref = socket2::SockRef::from(&*socket);
   if is_ipv6 {
     let index = ipv6_interface_index(interface_address)?;
     sock_ref.set_multicast_if_v6(index)?;
@@ -534,7 +562,7 @@ pub fn op_node_udp_join_source_specific(
     windows_sys::Win32::Networking::WinSock::IP_ADD_SOURCE_MEMBERSHIP;
 
   source_specific_multicast(
-    &resource.socket,
+    &*resource.socket()?,
     source_addr,
     group_addr,
     interface_addr,
@@ -563,7 +591,7 @@ pub fn op_node_udp_leave_source_specific(
     windows_sys::Win32::Networking::WinSock::IP_DROP_SOURCE_MEMBERSHIP;
 
   source_specific_multicast(
-    &resource.socket,
+    &*resource.socket()?,
     source_addr,
     group_addr,
     interface_addr,
@@ -604,11 +632,16 @@ pub async fn op_node_udp_send(
   }
 
   let cancel = RcRef::map(&resource, |r| &r.cancel);
-  let nwritten = resource
-    .socket
-    .send_to(&buf, &addr)
-    .or_cancel(cancel)
-    .await??;
+  let nwritten = async {
+    let _turn = RcRef::map(&resource, |r| &r.send_turn).borrow_mut().await;
+    poll_fn(|cx| match resource.socket() {
+      Ok(socket) => socket.poll_send_to(cx, &buf, addr).map_err(Into::into),
+      Err(err) => Poll::Ready(Err(err)),
+    })
+    .await
+  }
+  .or_cancel(cancel)
+  .await??;
 
   Ok(nwritten)
 }
@@ -633,11 +666,20 @@ pub async fn op_node_udp_recv(
     .get::<NodeUdpSocketResource>(rid)?;
 
   let cancel = RcRef::map(&resource, |r| &r.cancel);
-  let (nread, remote_addr) = resource
-    .socket
-    .recv_from(&mut buf)
-    .or_cancel(cancel)
-    .await??;
+  let mut read_buf = ReadBuf::new(&mut buf);
+  let remote_addr = async {
+    let _turn = RcRef::map(&resource, |r| &r.recv_turn).borrow_mut().await;
+    poll_fn(|cx| match resource.socket() {
+      Ok(socket) => {
+        socket.poll_recv_from(cx, &mut read_buf).map_err(Into::into)
+      }
+      Err(err) => Poll::Ready(Err(err)),
+    })
+    .await
+  }
+  .or_cancel(cancel)
+  .await??;
+  let nread = read_buf.filled().len();
 
   Ok(RecvResult {
     nread,
@@ -660,7 +702,7 @@ pub fn op_node_udp_fd_for_ipc(
   #[cfg(unix)]
   {
     use std::os::unix::io::AsRawFd;
-    let fd = resource.socket.as_raw_fd();
+    let fd = resource.socket()?.as_raw_fd();
     if fd < 0 {
       return Ok(-1);
     }
@@ -692,10 +734,7 @@ pub fn op_node_udp_open(
     std_socket.set_nonblocking(true)?;
     let local_addr = std_socket.local_addr()?;
     let socket = UdpSocket::from_std(std_socket)?;
-    let resource = NodeUdpSocketResource {
-      socket,
-      cancel: Default::default(),
-    };
+    let resource = NodeUdpSocketResource::new(socket);
     let rid = state.resource_table.add(resource);
     Ok((rid, local_addr.ip().to_string(), local_addr.port()))
   }

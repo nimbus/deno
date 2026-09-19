@@ -42,28 +42,43 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::pkcs8::DecodePublicKey;
 use rsa::traits::PublicKeyParts;
 
+pub(crate) mod aead_mode;
 pub mod cipher;
+pub(crate) mod des3_wrap;
 pub(crate) mod dh;
+pub(crate) mod dh_compute_secret;
 pub mod digest;
 pub mod kem;
 pub mod keys;
 pub(crate) mod md5_sha1;
+pub(crate) mod password_key;
 pub(crate) mod pkcs3;
 pub(crate) mod primes;
 pub mod sign;
 pub mod x509;
 
+pub use self::dh_compute_secret::DhComputeSecretPolicy;
 use self::digest::match_fixed_digest_with_eager_block_buffer;
 
 deno_core::extension!(
   deno_node_crypto,
   ops = [
+    aead_mode::op_node_aead_mode_create,
+    aead_mode::op_node_aead_mode_final,
+    aead_mode::op_node_aead_mode_set_aad,
+    aead_mode::op_node_aead_mode_set_auth_tag,
+    aead_mode::op_node_aead_mode_update,
     op_node_check_prime_async,
     op_node_check_prime_bytes_async,
     op_node_check_prime_bytes,
     op_node_check_prime,
+    op_node_aes_wrap_check_params,
     op_node_aes_wrap_key,
     op_node_aes_unwrap_key,
+    des3_wrap::op_node_des3_wrap_check_params,
+    des3_wrap::op_node_des3_wrap_key,
+    des3_wrap::op_node_des3_unwrap_key,
+    password_key::op_node_password_cipher_key_iv,
     op_node_cipheriv_encrypt,
     op_node_cipheriv_final,
     op_node_cipheriv_set_aad,
@@ -77,6 +92,7 @@ deno_core::extension!(
     op_node_decipheriv_auth_tag,
     op_node_dh_check,
     op_node_dh_compute_secret,
+    dh_compute_secret::op_node_dh_compute_secret_checked,
     op_node_diffie_hellman,
     op_node_ecdh_compute_public_key,
     op_node_ecdh_compute_secret,
@@ -629,6 +645,15 @@ pub fn op_node_public_decrypt(
     }
     _ => Err(PrivateEncryptDecryptError::UnknownPadding),
   }
+}
+
+#[op2(fast)]
+pub fn op_node_aes_wrap_check_params(
+  #[string] algorithm: &str,
+  #[buffer] key: &[u8],
+  #[buffer] iv: &[u8],
+) -> Result<(), cipher::AesWrapError> {
+  cipher::aes_wrap_check_params(algorithm, key, iv)
 }
 
 #[op2]

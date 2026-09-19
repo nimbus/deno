@@ -115,11 +115,29 @@ const untransferableSymbol = SymbolFor(
   "nodejs.worker_threads.untransferable",
 );
 
+/**
+ * Returns `undefined` when `value` is not a proxy. Otherwise returns
+ * `[target, handler]`, or only the target when `showProxy` is not `true`
+ * (`GetProxyDetails` in src/node_util.cc). The target and the handler of a
+ * revoked proxy are `null`. No proxy trap runs.
+ */
+function getProxyDetails(value: unknown, showProxy?: boolean): unknown {
+  const details = core.getProxyDetails(value);
+  if (details === null) {
+    return undefined;
+  }
+  if (arguments.length === 1 || showProxy === true) {
+    return details;
+  }
+  return details[0];
+}
+
 const _defaultExport = {
   guessHandleType,
   isArrayIndex,
   getOwnNonIndexProperties,
   arrayBufferViewHasBuffer,
+  getProxyDetails,
   parseEnv,
   untransferableSymbol,
 };
@@ -129,6 +147,7 @@ return {
   isArrayIndex,
   getOwnNonIndexProperties,
   arrayBufferViewHasBuffer,
+  getProxyDetails,
   ALL_PROPERTIES,
   ONLY_WRITABLE,
   ONLY_ENUMERABLE,

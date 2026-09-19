@@ -6,7 +6,9 @@ const { core, primordials } = __bootstrap;
 const { inspect } = core.loadExtScript(
   "ext:deno_node/internal/util/inspect.mjs",
 );
-const { isError } = core.loadExtScript("ext:deno_node/internal/util.mjs");
+const { isError, removeColors } = core.loadExtScript(
+  "ext:deno_node/internal/util.mjs",
+);
 const { isErrorStackTraceLimitWritable } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -19,6 +21,7 @@ const { validateObject } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
 const io = core.loadExtScript("ext:deno_io/12_io.js");
+const { op_node_assertion_error_uses_myers_diff } = core.ops;
 
 function getConsoleWidth() {
   try {
@@ -36,6 +39,7 @@ const {
   Error,
   ErrorCaptureStackTrace,
   ErrorPrototype,
+  MathMax,
   ObjectAssign,
   ObjectDefineProperty,
   ObjectGetPrototypeOf,
@@ -46,6 +50,7 @@ const {
   ReflectSet,
   String,
   StringPrototypeRepeat,
+  StringPrototypeEndsWith,
   StringPrototypeSlice,
   StringPrototypeSplit,
 } = primordials;
@@ -74,8 +79,10 @@ const kMethodsWithCustomMessageDiff = [
   "strictEqual",
   "partialDeepStrictEqual",
 ];
+// Node.js 20 has no `partialDeepStrictEqual`.
+const kMethodsWithCustomMessageLineDiff = ["deepStrictEqual", "strictEqual"];
 
-function copyError(source) {
+function copyError(source, copyCause) {
   const target = ObjectAssign(
     { __proto__: ObjectGetPrototypeOf(source) },
     source,
@@ -84,11 +91,12 @@ function copyError(source) {
     __proto__: null,
     value: source.message,
   });
-  if (ObjectPrototypeHasOwnProperty(source, "cause")) {
+  // Node.js 20 does not copy the `cause`.
+  if (copyCause && ObjectPrototypeHasOwnProperty(source, "cause")) {
     let { cause } = source;
 
     if (isError(cause)) {
-      cause = copyError(cause);
+      cause = copyError(cause, copyCause);
     }
 
     ObjectDefineProperty(target, "cause", { __proto__: null, value: cause });
@@ -307,6 +315,243 @@ function createErrDiff(
   return `${headerMessage}${skippedMessage}\n${message}\n`;
 }
 
+// Node.js 20 compares the inspected lines of both values position by
+// position. Node.js 22.12 and later use the Myers diff algorithm
+// (nodejs/node#54862). This is the Node.js 20.20 implementation.
+function createLineErrDiff(actual, expected, operator, message = "") {
+  let other = "";
+  let res = "";
+  let end = "";
+  let skipped = false;
+  const actualInspected = inspectValue(actual);
+  const actualLines = StringPrototypeSplit(actualInspected, "\n");
+  const expectedLines = StringPrototypeSplit(inspectValue(expected), "\n");
+
+  let i = 0;
+  let indicator = "";
+
+  operator = checkOperator(actual, expected, operator);
+
+  // If "actual" and "expected" fit on a single line and they are not strictly
+  // equal, check further special handling.
+  if (
+    actualLines.length === 1 && expectedLines.length === 1 &&
+    actualLines[0] !== expectedLines[0]
+  ) {
+    // Check for the visible length using the `removeColors()` function, if
+    // appropriate.
+    const c = inspect.defaultOptions.colors;
+    const actualRaw = c ? removeColors(actualLines[0]) : actualLines[0];
+    const expectedRaw = c ? removeColors(expectedLines[0]) : expectedLines[0];
+    const inputLength = actualRaw.length + expectedRaw.length;
+    // If the character length of "actual" and "expected" together is less than
+    // kMaxShortStringLength and if neither is an object and at least one of
+    // them is not `zero`, use the strict equal comparison to visualize the
+    // output.
+    if (inputLength <= kMaxShortStringLength) {
+      if (
+        (typeof actual !== "object" || actual === null) &&
+        (typeof expected !== "object" || expected === null) &&
+        (actual !== 0 || expected !== 0)
+      ) { // -0 === +0
+        return `${getErrorMessage(operator, message)}\n\n` +
+          `${actualLines[0]} !== ${expectedLines[0]}\n`;
+      }
+    } else if (operator !== "strictEqualObject") {
+      // If the stderr is a tty and the input length is lower than the current
+      // columns per line, add a mismatch indicator below the output. If it is
+      // not a tty, use a default value of 80 characters.
+      const maxLength = io.stderr.isTerminal() ? getConsoleWidth() : 80;
+      if (inputLength < maxLength) {
+        while (actualRaw[i] === expectedRaw[i]) {
+          i++;
+        }
+        // Ignore the first characters.
+        if (i > 2) {
+          // Add position indicator for the first mismatch in case it is a
+          // single line and the input length is less than the column length.
+          indicator = `\n  ${StringPrototypeRepeat(" ", i)}^`;
+          i = 0;
+        }
+      }
+    }
+  }
+
+  // Remove all ending lines that match (this optimizes the output for
+  // readability by reducing the number of total changed lines).
+  let a = actualLines[actualLines.length - 1];
+  let b = expectedLines[expectedLines.length - 1];
+  while (a === b) {
+    if (i++ < 3) {
+      end = `\n  ${a}${end}`;
+    } else {
+      other = a;
+    }
+    ArrayPrototypePop(actualLines);
+    ArrayPrototypePop(expectedLines);
+    if (actualLines.length === 0 || expectedLines.length === 0) {
+      break;
+    }
+    a = actualLines[actualLines.length - 1];
+    b = expectedLines[expectedLines.length - 1];
+  }
+
+  const maxLines = MathMax(actualLines.length, expectedLines.length);
+  // Strict equal with identical objects that are not identical by reference.
+  // E.g., assert.deepStrictEqual({ a: Symbol() }, { a: Symbol() })
+  if (maxLines === 0) {
+    // We have to get the result again. The lines were all removed before.
+    const actualLines = StringPrototypeSplit(actualInspected, "\n");
+
+    // Only remove lines in case it makes sense to collapse those.
+    if (actualLines.length > 50) {
+      actualLines[46] = `${colors.blue}...${colors.white}`;
+      while (actualLines.length > 47) {
+        ArrayPrototypePop(actualLines);
+      }
+    }
+
+    return `${kReadableOperator.notIdentical}\n\n` +
+      `${ArrayPrototypeJoin(actualLines, "\n")}\n`;
+  }
+
+  // There were at least five identical lines at the end. Mark a couple of
+  // skipped.
+  if (i >= 5) {
+    end = `\n${colors.blue}...${colors.white}${end}`;
+    skipped = true;
+  }
+  if (other !== "") {
+    end = `\n  ${other}${end}`;
+    other = "";
+  }
+
+  let printedLines = 0;
+  let identical = 0;
+  const msg = `${
+    getErrorMessage(operator, message)
+  }\n${colors.green}+ actual${colors.white} ${colors.red}- expected${colors.white}`;
+  const skippedMsg = ` ${colors.blue}...${colors.white} Lines skipped`;
+
+  let lines = actualLines;
+  let plusMinus = `${colors.green}+${colors.white}`;
+  let maxLength = expectedLines.length;
+  if (actualLines.length < maxLines) {
+    lines = expectedLines;
+    plusMinus = `${colors.red}-${colors.white}`;
+    maxLength = actualLines.length;
+  }
+
+  for (i = 0; i < maxLines; i++) {
+    if (maxLength < i + 1) {
+      // If more than two former lines are identical, print them. Collapse them
+      // in case more than five lines were identical.
+      if (identical > 2) {
+        if (identical > 3) {
+          if (identical > 4) {
+            if (identical === 5) {
+              res += `\n  ${lines[i - 3]}`;
+              printedLines++;
+            } else {
+              res += `\n${colors.blue}...${colors.white}`;
+              skipped = true;
+            }
+          }
+          res += `\n  ${lines[i - 2]}`;
+          printedLines++;
+        }
+        res += `\n  ${lines[i - 1]}`;
+        printedLines++;
+      }
+      // No identical lines before.
+      identical = 0;
+      // Add the expected line to the cache.
+      if (lines === actualLines) {
+        res += `\n${plusMinus} ${lines[i]}`;
+      } else {
+        other += `\n${plusMinus} ${lines[i]}`;
+      }
+      printedLines++;
+      // Only extra actual lines exist
+      // Lines diverge
+    } else {
+      const expectedLine = expectedLines[i];
+      let actualLine = actualLines[i];
+      // If the lines diverge, specifically check for lines that only diverge by
+      // a trailing comma. In that case it is actually identical and we should
+      // mark it as such.
+      let divergingLines = actualLine !== expectedLine &&
+        (!StringPrototypeEndsWith(actualLine, ",") ||
+          StringPrototypeSlice(actualLine, 0, -1) !== expectedLine);
+      // If the expected line has a trailing comma but is otherwise identical,
+      // add a comma at the end of the actual line. Otherwise the output could
+      // look weird as in:
+      //
+      //   [
+      //     1         // No comma at the end!
+      // +   2
+      //   ]
+      //
+      if (
+        divergingLines &&
+        StringPrototypeEndsWith(expectedLine, ",") &&
+        StringPrototypeSlice(expectedLine, 0, -1) === actualLine
+      ) {
+        divergingLines = false;
+        actualLine += ",";
+      }
+      if (divergingLines) {
+        // If more than two former lines are identical, print them. Collapse
+        // them in case more than five lines were identical.
+        if (identical > 2) {
+          if (identical > 3) {
+            if (identical > 4) {
+              if (identical === 5) {
+                res += `\n  ${actualLines[i - 3]}`;
+                printedLines++;
+              } else {
+                res += `\n${colors.blue}...${colors.white}`;
+                skipped = true;
+              }
+            }
+            res += `\n  ${actualLines[i - 2]}`;
+            printedLines++;
+          }
+          res += `\n  ${actualLines[i - 1]}`;
+          printedLines++;
+        }
+        // No identical lines before.
+        identical = 0;
+        // Add the actual line to the result and cache the expected diverging
+        // line so consecutive diverging lines show up as +++--- and not +-+-+-.
+        res += `\n${colors.green}+${colors.white} ${actualLine}`;
+        other += `\n${colors.red}-${colors.white} ${expectedLine}`;
+        printedLines += 2;
+        // Lines are identical
+      } else {
+        // Add all cached information to the result before adding other things
+        // and reset the cache.
+        res += other;
+        other = "";
+        identical++;
+        // The very first identical line since the last diverging line is be
+        // added to the result.
+        if (identical <= 2) {
+          res += `\n  ${actualLine}`;
+          printedLines++;
+        }
+      }
+    }
+    // Inspected object to big (Show ~50 rows max)
+    if (printedLines > 50 && i < maxLines - 2) {
+      return `${msg}${skippedMsg}\n${res}\n${colors.blue}...${colors.white}${other}\n` +
+        `${colors.blue}...${colors.white}`;
+    }
+  }
+
+  return `${msg}${skipped ? skippedMsg : ""}\n${res}${other}${end}${indicator}`;
+}
+
 function addEllipsis(string) {
   const lines = StringPrototypeSplit(string, "\n", 11);
   if (lines.length > 10) {
@@ -329,8 +574,17 @@ class AssertionError extends Error {
       details,
       // Compatibility with older versions.
       stackStartFunction,
-      diff = "simple",
     } = options;
+    // Node.js 20 has no `diff` option and always shortens the message.
+    const usesMyersDiff = op_node_assertion_error_uses_myers_diff();
+    let diff = "simple";
+    if (usesMyersDiff && options.diff !== undefined) {
+      diff = options.diff;
+    }
+    const createDiff = usesMyersDiff ? createErrDiff : createLineErrDiff;
+    const methodsWithCustomMessageDiff = usesMyersDiff
+      ? kMethodsWithCustomMessageDiff
+      : kMethodsWithCustomMessageLineDiff;
     let {
       actual,
       expected,
@@ -342,8 +596,8 @@ class AssertionError extends Error {
     }
 
     if (message != null) {
-      if (ArrayPrototypeIncludes(kMethodsWithCustomMessageDiff, operator)) {
-        super(createErrDiff(actual, expected, operator, message, diff));
+      if (ArrayPrototypeIncludes(methodsWithCustomMessageDiff, operator)) {
+        super(createDiff(actual, expected, operator, message, diff));
       } else {
         super(String(message));
       }
@@ -362,12 +616,12 @@ class AssertionError extends Error {
         ReflectHas(expected, "stack") &&
         ObjectPrototypeIsPrototypeOf(ErrorPrototype, expected)
       ) {
-        actual = copyError(actual);
-        expected = copyError(expected);
+        actual = copyError(actual, usesMyersDiff);
+        expected = copyError(expected, usesMyersDiff);
       }
 
-      if (ArrayPrototypeIncludes(kMethodsWithCustomMessageDiff, operator)) {
-        super(createErrDiff(actual, expected, operator, message, diff));
+      if (ArrayPrototypeIncludes(methodsWithCustomMessageDiff, operator)) {
+        super(createDiff(actual, expected, operator, message, diff));
       } else if (
         operator === "notDeepStrictEqual" ||
         operator === "notStrictEqual"
@@ -467,7 +721,9 @@ class AssertionError extends Error {
     this.stack; // eslint-disable-line no-unused-expressions
     // Reset the name.
     this.name = "AssertionError";
-    this.diff = diff;
+    if (usesMyersDiff) {
+      this.diff = diff;
+    }
   }
 
   toString() {

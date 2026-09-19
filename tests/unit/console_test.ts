@@ -2490,6 +2490,44 @@ Deno.test(function inspectProxy() {
     )),
     "Proxy [ [Function: fn], { get: [Function: get] } ]",
   );
+  // The target and the handler are separate entries, so `showHidden` shows
+  // no `[length]` for the pair (Node.js `formatProxy`).
+  assertEquals(
+    stripAnsiCode(Deno.inspect(
+      new Proxy([1, 2], {}),
+      { showProxy: true, showHidden: true },
+    )),
+    "Proxy [ [ 1, 2, [length]: 2 ], {} ]",
+  );
+  assertEquals(
+    Deno.inspect(new Proxy([1, 2], {}), {
+      showProxy: true,
+      depth: -1,
+      colors: true,
+    }),
+    "\x1b[36mProxy [Array]\x1b[39m",
+  );
+  assertEquals(
+    stripAnsiCode(Deno.inspect(
+      new Proxy([1, 2], {}),
+      { showProxy: true, depth: 0 },
+    )),
+    "Proxy [ [Array], {} ]",
+  );
+
+  // Node.js prints a marker for a revoked proxy instead of throwing, with and
+  // without `showProxy` (test/parallel/test-console-issue-43095.js).
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  assertEquals(stripAnsiCode(Deno.inspect(revoked.proxy)), "<Revoked Proxy>");
+  assertEquals(
+    stripAnsiCode(Deno.inspect(revoked.proxy, { showProxy: true })),
+    "<Revoked Proxy>",
+  );
+  assertEquals(
+    stripAnsiCode(Deno.inspect(revoked)),
+    "{ proxy: <Revoked Proxy>, revoke: [Function (anonymous)] }",
+  );
 
   // Issue: https://github.com/denoland/deno/issues/30229
   assertEquals(

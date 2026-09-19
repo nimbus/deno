@@ -6,6 +6,7 @@ import * as path from "@std/path";
 import * as http from "node:http";
 import * as dns from "node:dns";
 import * as dnsPromises from "node:dns/promises";
+import process from "node:process";
 import util from "node:util";
 import console from "node:console";
 import { createRequire } from "node:module";
@@ -122,6 +123,26 @@ Deno.test("[node/net] the port is available immediately after close callback", a
     httpServer.close(() => deferred.resolve());
   });
   await deferred.promise;
+});
+
+Deno.test("[node/net] a 'close' listener drains its nextTick queue before its microtasks", async () => {
+  // Node.js runs each handle close callback through MakeCallback, which drains
+  // the nextTick queue and then the microtask queue when the callback returns.
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const order: string[] = [];
+  const server = net.createServer((conn) => conn.destroy());
+  server.listen(0, () => {
+    // deno-lint-ignore no-explicit-any
+    const { port } = server.address() as any;
+    const client = net.connect(port, "127.0.0.1", () => client.destroy());
+    client.on("close", () => {
+      Promise.resolve().then(() => order.push("microtask"));
+      process.nextTick(() => order.push("tick"));
+      setTimeout(() => server.close(() => resolve()), 0);
+    });
+  });
+  await promise;
+  assertEquals(order, ["tick", "microtask"]);
 });
 
 Deno.test("[node/net] net.connect().unref() works", async () => {
