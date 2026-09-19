@@ -22,6 +22,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_node_events_options_require_object } = core.ops;
 const {
   ArrayPrototypeIndexOf,
   ArrayPrototypeJoin,
@@ -930,11 +931,14 @@ function getEventListeners(emitterOrTarget, type) {
  */
 // deno-lint-ignore require-await
 async function once(emitter, name, options = kEmptyObject) {
-  validateObject(options, "options");
+  // Node.js 20 reads `options?.signal` without validating `options`.
+  if (op_node_events_options_require_object()) {
+    validateObject(options, "options");
+  }
   const signal = options?.signal;
   validateAbortSignal(signal, "options.signal");
   if (signal?.aborted) {
-    throw new AbortError();
+    throw new AbortError(undefined, { cause: signal.reason });
   }
 
   if (signal) {
@@ -969,7 +973,7 @@ async function once(emitter, name, options = kEmptyObject) {
     function abortListener() {
       eventTargetAgnosticRemoveListener(emitter, name, resolver);
       eventTargetAgnosticRemoveListener(emitter, "error", errorListener);
-      reject(new AbortError());
+      reject(new AbortError(undefined, { cause: signal?.reason }));
     }
     if (signal != null) {
       eventTargetAgnosticAddListener(
@@ -1043,11 +1047,15 @@ const kEventsGetter = {
  * @returns {AsyncIterator}
  */
 function on(emitter, event, options = kEmptyObject) {
-  validateObject(options, "options");
-  const signal = options?.signal;
+  // Node.js 20 reads `options.signal` without validating `options`, so a
+  // `null` options value throws a plain TypeError there.
+  if (op_node_events_options_require_object()) {
+    validateObject(options, "options");
+  }
+  const signal = options.signal;
   validateAbortSignal(signal, "options.signal");
   if (signal?.aborted) {
-    throw new AbortError();
+    throw new AbortError(undefined, { cause: signal.reason });
   }
 
   if (signal) {
@@ -1165,7 +1173,7 @@ function on(emitter, event, options = kEmptyObject) {
   return iterator;
 
   function abortListener() {
-    errorHandler(new AbortError());
+    errorHandler(new AbortError(undefined, { cause: signal?.reason }));
   }
 
   function eventHandler(value) {

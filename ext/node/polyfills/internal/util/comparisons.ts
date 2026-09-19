@@ -33,7 +33,7 @@ const {
   isWeakMap,
   isWeakSet,
 } = core.loadExtScript("ext:deno_node/internal/util/types.ts");
-const { CryptoKey } = core.ops;
+const { CryptoKey, op_node_deep_equal_stops_at_either_cycle } = core.ops;
 const { isError } = core.loadExtScript("ext:deno_node/internal/util.mjs");
 const lazyUrl = () => core.loadExtScript("ext:deno_node/internal/url.ts");
 
@@ -97,6 +97,10 @@ type Memo = {
   c: unknown;
   d: unknown;
   deep: boolean;
+  // Node.js 24 and later (nodejs/node#57622) stop the recursion when either
+  // side reaches a circular reference. Node.js 22 and earlier stop only when
+  // both sides reach one.
+  stopsAtEitherCycle: boolean;
 };
 
 enum valueType {
@@ -609,17 +613,22 @@ function handleCycles(
       c: undefined,
       d: undefined,
       deep: false,
+      stopsAtEitherCycle: op_node_deep_equal_stops_at_either_cycle(),
     };
     return objEquiv(val1, val2, mode, keys1, keys2, memos, iterationType);
   }
 
   if (memos.set === undefined) {
     if (memos.deep === false) {
-      if (memos.a === val1) {
-        return memos.b === val2;
-      }
-      if (memos.b === val2) {
-        return false;
+      if (memos.stopsAtEitherCycle) {
+        if (memos.a === val1) {
+          return memos.b === val2;
+        }
+        if (memos.b === val2) {
+          return false;
+        }
+      } else if (memos.a === val1 && memos.b === val2) {
+        return true;
       }
       memos.c = val1;
       memos.d = val2;
@@ -634,6 +643,12 @@ function handleCycles(
         iterationType,
       );
       memos.deep = false;
+      // Remove the nested entries that the comparison added, so that a later
+      // sibling comparison does not see them as a cycle (nodejs/node#62509).
+      if (memos.set !== undefined) {
+        memos.set.delete(memos.c);
+        memos.set.delete(memos.d);
+      }
       return result;
     }
     memos.set = new SafeSet();
@@ -648,8 +663,12 @@ function handleCycles(
   const originalSize = set.size;
   set.add(val1);
   set.add(val2);
-  if (originalSize !== set.size - 2) {
-    return originalSize === set.size;
+  if (memos.stopsAtEitherCycle) {
+    if (originalSize !== set.size - 2) {
+      return originalSize === set.size;
+    }
+  } else if (originalSize === set.size) {
+    return true;
   }
 
   const areEq = objEquiv(val1, val2, mode, keys1, keys2, memos, iterationType);
@@ -1041,12 +1060,19 @@ function mapObjectEquiv(
   let start = 0;
   let end = array.length - 1;
   const comparator = mode !== kLoose ? objectComparisonStart : innerDeepEqual;
-  const extraChecks = mode === kLoose || array.length !== a.size;
 
   for (const { 0: key1, 1: item1 } of a) {
-    if (extraChecks && (typeof key1 !== "object" || key1 === null)) {
-      if (b.has(key1) && innerDeepEqual(item1, b.get(key1), mode, memo)) {
-        continue;
+    // Primitive and `null` keys can never match an object key collected in
+    // `array`, so resolve them directly against `b`. `null` is `typeof
+    // 'object'`, so without this it would reach the object comparator, which
+    // reads `key1.constructor` and throws a `TypeError` (nodejs/node#64441).
+    if (typeof key1 !== "object" || key1 === null) {
+      if (b.has(key1)) {
+        if (
+          mode !== kLoose || innerDeepEqual(item1, b.get(key1), mode, memo)
+        ) {
+          continue;
+        }
       } else if (mode !== kLoose) {
         return false;
       }

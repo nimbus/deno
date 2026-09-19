@@ -11,10 +11,14 @@ const listenPort2 = 4504;
 Deno.test("[node/dgram] default lookup follows Node DNS routing", async () => {
   const originalLookup = dns.lookup;
   let lookupCalls = 0;
-  dns.lookup = ((_hostname, _family, callback) => {
+  dns.lookup = ((
+    _hostname: string,
+    _family: number,
+    callback: (err: Error | null, address: string, family: number) => void,
+  ) => {
     lookupCalls++;
     queueMicrotask(() => callback(null, "127.0.0.1", 4));
-  }) as typeof dns.lookup;
+  }) as unknown as typeof dns.lookup;
 
   const hostnameSocket = createSocket("udp4");
   const literalSocket = createSocket("udp4");
@@ -45,6 +49,31 @@ Deno.test("[node/dgram] default lookup follows Node DNS routing", async () => {
         : Promise.resolve(),
     ]);
   }
+});
+
+Deno.test("[node/dgram] close() releases the port synchronously", async () => {
+  // Node.js frees the UDP fd in uv_close(), so the port is free when close()
+  // returns, even while a recv is pending.
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const first = createSocket("udp4");
+  first.bind(0, "127.0.0.1", () => {
+    const { port } = first.address();
+    first.close();
+    const second = createSocket("udp4");
+    second.on("error", reject);
+    second.bind(port, "127.0.0.1", () => second.close(resolve));
+  });
+  await promise;
+});
+
+Deno.test("[node/dgram] a close started from a 'close' listener completes", async () => {
+  // The second close starts from the first socket's 'close' event, when
+  // nothing else keeps the event loop alive. libuv keeps the loop alive while
+  // a handle closes, so the second 'close' event must still fire.
+  const first = createSocket("udp4");
+  await first[Symbol.asyncDispose]();
+  const second = createSocket("udp4");
+  await second[Symbol.asyncDispose]();
 });
 
 Deno.test("[node/dgram] udp ref and unref", {

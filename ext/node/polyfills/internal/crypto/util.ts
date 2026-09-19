@@ -10,6 +10,7 @@ const {
   MapPrototypeSet,
   SafeArrayIterator,
   SafeMap,
+  StringPrototypeToLowerCase,
 } = primordials;
 const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
@@ -166,12 +167,70 @@ const cipherInfoTable: CipherInfoResult[] = [
     mode: "gcm",
   },
   {
+    name: "id-aes128-ccm",
+    nid: 896,
+    blockSize: 1,
+    ivLength: 12,
+    keyLength: 16,
+    mode: "ccm",
+  },
+  {
+    name: "id-aes192-ccm",
+    nid: 899,
+    blockSize: 1,
+    ivLength: 12,
+    keyLength: 24,
+    mode: "ccm",
+  },
+  {
+    name: "id-aes256-ccm",
+    nid: 902,
+    blockSize: 1,
+    ivLength: 12,
+    keyLength: 32,
+    mode: "ccm",
+  },
+  {
+    name: "aes-128-ocb",
+    nid: 958,
+    blockSize: 16,
+    ivLength: 12,
+    keyLength: 16,
+    mode: "ocb",
+  },
+  {
+    name: "aes-192-ocb",
+    nid: 959,
+    blockSize: 16,
+    ivLength: 12,
+    keyLength: 24,
+    mode: "ocb",
+  },
+  {
+    name: "aes-256-ocb",
+    nid: 960,
+    blockSize: 16,
+    ivLength: 12,
+    keyLength: 32,
+    mode: "ocb",
+  },
+  {
     name: "des-ede3-cbc",
     nid: 44,
     blockSize: 8,
     ivLength: 8,
     keyLength: 24,
     mode: "cbc",
+  },
+  // Triple-DES key wrap (RFC 3217): NID_id_smime_alg_CMS3DESwrap = 246.
+  // The cipher has no IV.
+  {
+    name: "id-smime-alg-cms3deswrap",
+    nid: 246,
+    blockSize: 8,
+    ivLength: 0,
+    keyLength: 24,
+    mode: "wrap",
   },
   {
     name: "aes-128-ctr",
@@ -274,6 +333,18 @@ for (const info of new SafeArrayIterator(cipherInfoTable)) {
 }
 
 // Aliases
+for (const bits of new SafeArrayIterator(["128", "192", "256"])) {
+  MapPrototypeSet(
+    cipherInfoByName,
+    `aes-${bits}-ccm`,
+    MapPrototypeGet(cipherInfoByName, `id-aes${bits}-ccm`)!,
+  );
+}
+MapPrototypeSet(
+  cipherInfoByName,
+  "des3-wrap",
+  MapPrototypeGet(cipherInfoByName, "id-smime-alg-cms3deswrap")!,
+);
 MapPrototypeSet(
   cipherInfoByName,
   "aes128",
@@ -294,15 +365,22 @@ MapPrototypeSet(
 // Must be kept in sorted (lexicographic) order - Node.js validates this.
 const supportedCiphers = [
   "aes-128-cbc",
+  "aes-128-ccm",
   "aes-128-ctr",
   "aes-128-ecb",
   "aes-128-gcm",
+  "aes-128-ocb",
+  "aes-192-ccm",
   "aes-192-ctr",
   "aes-192-ecb",
+  "aes-192-gcm",
+  "aes-192-ocb",
   "aes-256-cbc",
+  "aes-256-ccm",
   "aes-256-ctr",
   "aes-256-ecb",
   "aes-256-gcm",
+  "aes-256-ocb",
   "aes128",
   "aes128-wrap",
   "aes192-wrap",
@@ -311,6 +389,7 @@ const supportedCiphers = [
   "chacha20",
   "chacha20-poly1305",
   "des-ede3-cbc",
+  "des3-wrap",
   "id-aes128-wrap-pad",
   "id-aes192-wrap-pad",
   "id-aes256-wrap-pad",
@@ -349,6 +428,19 @@ function getHashBlockSize(algorithm: string): number {
   return blockSize;
 }
 
+// Node.js `GetCipherInfo` accepts any IV length that the mode accepts:
+// 7 to 13 bytes for CCM and 1 to 15 bytes for OCB.
+function isValidIvLength(info: CipherInfoResult, ivLength: number): boolean {
+  switch (info.mode) {
+    case "ccm":
+      return ivLength >= 7 && ivLength <= 13;
+    case "ocb":
+      return ivLength >= 1 && ivLength <= 15;
+    default:
+      return info.ivLength === ivLength;
+  }
+}
+
 function getCipherInfo(
   nameOrNid: string | number,
   options?: { keyLength?: number; ivLength?: number },
@@ -383,7 +475,7 @@ function getCipherInfo(
 
   const info = typeof nameOrNid === "number"
     ? MapPrototypeGet(cipherInfoByNid, nameOrNid)
-    : MapPrototypeGet(cipherInfoByName, nameOrNid);
+    : MapPrototypeGet(cipherInfoByName, StringPrototypeToLowerCase(nameOrNid));
 
   if (info === undefined) {
     return undefined;
@@ -393,11 +485,14 @@ function getCipherInfo(
     return undefined;
   }
 
-  if (ivLength !== undefined && info.ivLength !== ivLength) {
+  if (ivLength !== undefined && !isValidIvLength(info, ivLength)) {
     return undefined;
   }
 
-  return { ...info };
+  // Node.js omits `ivLength` for a cipher that has no IV.
+  const { ivLength: defaultIvLength, ...result } = info;
+  ivLength ??= defaultIvLength;
+  return ivLength === 0 ? result : { ...result, ivLength };
 }
 
 let defaultEncoding = "buffer";

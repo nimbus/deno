@@ -3590,6 +3590,85 @@ Deno.test(async function argon2DeriveBitsRfcVectors() {
   }
 });
 
+// Node.js 24 and 26 validate each `Argon2Params` member during
+// `normalizeAlgorithm`, in member order, and reject with `OperationError`
+// before the key usage check.
+Deno.test(async function argon2ParamsRejectLikeNode() {
+  const base = {
+    name: "Argon2id",
+    memory: 32,
+    passes: 3,
+    parallelism: 4,
+    nonce: new Uint8Array(16).fill(0x02),
+  };
+  const key = await crypto.subtle.importKey(
+    "raw-secret" as AnyAlg,
+    new Uint8Array(32).fill(0x01),
+    "Argon2id",
+    false,
+    ["deriveBits"],
+  );
+  const cases: [Record<string, unknown>, number | null, string][] = [
+    [{ passes: 0 }, 256, "passes must be > 0"],
+    [{ parallelism: 0 }, 256, "parallelism must be > 0 and <= 16777215"],
+    [
+      { memory: 31 },
+      256,
+      "memory must be at least 8 times the degree of parallelism",
+    ],
+    // `memory` sorts before `parallelism`, so its validator runs first.
+    [
+      { parallelism: 2 ** 24 },
+      256,
+      "memory must be at least 8 times the degree of parallelism",
+    ],
+    [{ nonce: new Uint8Array(7) }, 256, "nonce must be at least 8 bytes"],
+    [{ version: 0x10 }, 256, "16 is not a valid Argon2 version"],
+    [{}, 7, "length must be a multiple of 8"],
+    [{}, 0, "length must be >= 32"],
+    [{}, null, "length cannot be null"],
+  ];
+  for (const [override, length, message] of cases) {
+    await assertRejects(
+      () =>
+        crypto.subtle.deriveBits(
+          { ...base, ...override } as AnyAlg,
+          key,
+          length as number,
+        ),
+      DOMException,
+      message,
+    );
+  }
+  assertEquals(
+    (await crypto.subtle.deriveBits(
+      { ...base, version: 0x13 } as AnyAlg,
+      key,
+      256,
+    )).byteLength,
+    32,
+  );
+
+  // A parameter error wins over a missing `deriveBits` usage.
+  const deriveKeyOnly = await crypto.subtle.importKey(
+    "raw-secret" as AnyAlg,
+    new Uint8Array(32).fill(0x01),
+    "Argon2id",
+    false,
+    ["deriveKey"],
+  );
+  await assertRejects(
+    () =>
+      crypto.subtle.deriveBits(
+        { ...base, passes: 0 } as AnyAlg,
+        deriveKeyOnly,
+        256,
+      ),
+    DOMException,
+    "passes must be > 0",
+  );
+});
+
 Deno.test(async function shakeFamilyRequiresOutputLength() {
   // The modern WebCrypto algorithms spec renamed the output length dictionary
   // member from `length` to `outputLength`. Passing the legacy `length` member

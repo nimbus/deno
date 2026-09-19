@@ -12,11 +12,15 @@ export const {
   INSPECT_MAX_BYTES,
   isAscii,
   isUtf8,
-  kMaxLength,
   kStringMaxLength,
   resolveObjectURL,
   SlowBuffer,
   transcode,
 } = __buffer;
+// The embedder can change the limit after a startup snapshot.
+export let kMaxLength = __buffer.kMaxLength;
+__buffer.bindMaxLengthExport((value) => {
+  kMaxLength = value;
+});
 const _default = __buffer.default;
 export { _default as default };

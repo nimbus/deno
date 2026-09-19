@@ -11,6 +11,17 @@ import { strictEqual } from "node:assert";
 
 const { MAX_STRING_LENGTH } = constants;
 
+Deno.test("[node/buffer] kMaxLength matches the current Node.js limit", async () => {
+  // Node.js 22 and later limit a Buffer to Number.MAX_SAFE_INTEGER bytes.
+  const buffer = await import("node:buffer");
+  assertEquals(buffer.kMaxLength, Number.MAX_SAFE_INTEGER);
+  assertEquals(constants.MAX_LENGTH, Number.MAX_SAFE_INTEGER);
+  assertThrows(
+    () => Buffer.alloc(Number.MAX_SAFE_INTEGER + 1),
+    RangeError,
+  );
+});
+
 Deno.test({
   name: "[node/buffer] alloc fails if size is not a number",
   fn() {

@@ -41,7 +41,7 @@ const {
 const {
   createSecretKey,
 } = core.loadExtScript("ext:deno_node/internal/crypto/keys.ts");
-const { kMaxLength } = core.loadExtScript(
+const bufferInternals = core.loadExtScript(
   "ext:deno_node/internal/buffer.mjs",
 );
 const {
@@ -80,7 +80,8 @@ const validateParameters = hideStackFrames(
     salt = toRawBytes(toBuf(salt));
     info = toRawBytes(toBuf(info));
 
-    validateInteger(length, "length", 0, kMaxLength);
+    // The embedder can change the Buffer limit after a startup snapshot.
+    validateInteger(length, "length", 0, bufferInternals.kMaxLength);
 
     if (TypedArrayPrototypeGetByteLength(info) > 1024) {
       throw new ERR_OUT_OF_RANGE(

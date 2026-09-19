@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 import * as assert from "node:assert";
+import * as strictAssert from "node:assert/strict";
 
 Deno.test("[node/assert] .throws() compares Error instance", () => {
   assert.throws(
@@ -140,5 +141,54 @@ Deno.test("[node/assert] doesNotReject with 3 parameters", async () => {
     async () => {},
     TypeError,
     "custom message",
+  );
+});
+
+Deno.test("[node/assert] exports the versioned classes and functions", () => {
+  // The bundled Node.js types do not declare `Assert`.
+  const names = ["Assert", "CallTracker", "partialDeepStrictEqual"];
+  const defaultExport = assert.default as unknown as Record<string, unknown>;
+  for (
+    const namespace of [assert, strictAssert] as unknown as Record<
+      string,
+      unknown
+    >[]
+  ) {
+    for (const name of names) {
+      assert.strictEqual(typeof namespace[name], "function", name);
+      assert.strictEqual(namespace[name], defaultExport[name], name);
+    }
+  }
+});
+
+Deno.test("[node/assert] deepStrictEqual reuses an expected element after a nested comparison", () => {
+  // nodejs/node#62509: the first comparison must not leave `shared` in the
+  // cycle memo. A circular comparison makes all later comparisons use the
+  // memo.
+  const circularA: Record<string, unknown> = {};
+  circularA.self = circularA;
+  const circularB: Record<string, unknown> = {};
+  circularB.self = circularB;
+  assert.deepStrictEqual(circularA, circularB);
+
+  const shared = { outer: { inner: 0 } };
+  assert.deepStrictEqual(
+    [{ outer: { inner: 0 } }, { outer: { inner: 0 } }],
+    [shared, shared],
+  );
+});
+
+Deno.test("[node/assert] deep equality compares a Map null key with object keys", () => {
+  // nodejs/node#64441: a `null` key must not reach the object key comparator.
+  const actual = new Map<unknown, unknown>([[null, { v: 1 }], [{ a: 1 }, 1]]);
+  const other = new Map<unknown, unknown>([[{ b: 2 }, { v: 1 }], [
+    { a: 1 },
+    1,
+  ]]);
+  assert.notDeepStrictEqual(actual, other);
+  assert.notDeepEqual(actual, other);
+  assert.deepStrictEqual(
+    actual,
+    new Map<unknown, unknown>([[null, { v: 1 }], [{ a: 1 }, 1]]),
   );
 });

@@ -4,10 +4,18 @@ import events, {
   addAbortListener,
   errorMonitor,
   EventEmitter,
+  on,
+  once,
 } from "node:events";
 import * as eventsNs from "node:events";
 import { createRequire } from "node:module";
-import { assert, assertEquals, assertStrictEquals } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStrictEquals,
+  assertThrows,
+} from "@std/assert";
 
 EventEmitter.captureRejections = true;
 
@@ -159,4 +167,54 @@ Deno.test("EventEmitter works if Object.setPrototypeOf is deleted", () => {
   } finally {
     Object.setPrototypeOf = ObjectSetPrototypeOf;
   }
+});
+
+Deno.test("events.once and events.on reject non-object options", async () => {
+  const emitter = new EventEmitter();
+  for (const options of [1, "hi", null, false, () => {}, Symbol(), 1n]) {
+    const error = await assertRejects(() =>
+      // deno-lint-ignore no-explicit-any
+      once(emitter, "event", options as any)
+    );
+    assertStrictEquals(
+      (error as { code?: string }).code,
+      "ERR_INVALID_ARG_TYPE",
+    );
+    const onError = assertThrows(() =>
+      // deno-lint-ignore no-explicit-any
+      on(emitter, "event", options as any)
+    );
+    assertStrictEquals(
+      (onError as { code?: string }).code,
+      "ERR_INVALID_ARG_TYPE",
+    );
+  }
+});
+
+Deno.test("events.once and events.on abort with the signal reason as cause", async () => {
+  const emitter = new EventEmitter();
+  const reason = new Error("stop");
+
+  const preAborted = AbortSignal.abort(reason);
+  const early = await assertRejects(() =>
+    once(emitter, "event", { signal: preAborted })
+  );
+  assertStrictEquals((early as Error).name, "AbortError");
+  assertStrictEquals((early as Error).cause, reason);
+  const earlyOn = assertThrows(() =>
+    on(emitter, "event", { signal: preAborted })
+  );
+  assertStrictEquals((earlyOn as Error).cause, reason);
+
+  const controller = new AbortController();
+  const pending = once(emitter, "event", { signal: controller.signal });
+  const iterator = on(emitter, "event", { signal: controller.signal });
+  const next = iterator.next();
+  controller.abort(reason);
+  const late = await assertRejects(() => pending);
+  assertStrictEquals((late as Error).name, "AbortError");
+  assertStrictEquals((late as Error).cause, reason);
+  const lateOn = await assertRejects(() => next);
+  assertStrictEquals((lateOn as Error).name, "AbortError");
+  assertStrictEquals((lateOn as Error).cause, reason);
 });

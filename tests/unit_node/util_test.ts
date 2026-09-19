@@ -70,6 +70,94 @@ Deno.test({
 });
 
 Deno.test({
+  name: "[util] format on Proxy doesn't invoke traps",
+  fn() {
+    const handler = {
+      get() {
+        throw new Error("get");
+      },
+      getPrototypeOf() {
+        throw new Error("getPrototypeOf");
+      },
+      getOwnPropertyDescriptor() {
+        throw new Error("getOwnPropertyDescriptor");
+      },
+      has() {
+        throw new Error("has");
+      },
+      ownKeys() {
+        throw new Error("ownKeys");
+      },
+    };
+    const proxy = new Proxy({}, handler);
+    const nested = new Proxy(new Proxy({}, handler), {});
+    for (const value of [proxy, nested]) {
+      util.format("%s%o%O%c", value, value, value, value);
+      assertEquals(util.format("%s", value), "{}");
+    }
+
+    const revocable = Proxy.revocable({}, handler);
+    revocable.revoke();
+    assertEquals(util.format("%s", revocable.proxy), "<Revoked Proxy>");
+    // Without `Proxy(...)` annotation (Node.js 20 to 24), a revoked inner
+    // proxy has no target to show. The error comes from inspection, not from
+    // a trap.
+    assertThrows(
+      () => util.format("%s", new Proxy(revocable.proxy, {})),
+      TypeError,
+      "revoked",
+    );
+  },
+});
+
+Deno.test({
+  name: "[util] inspect showProxy formats the proxy before custom inspect",
+  fn() {
+    let self: unknown;
+    const target = {
+      [util.inspect.custom]() {
+        self = this;
+        return [1, 2, 3];
+      },
+    };
+    const proxy = new Proxy(target, {
+      getPrototypeOf() {
+        throw new Error("getPrototypeOf");
+      },
+      get() {
+        throw new Error("get");
+      },
+    });
+    assertEquals(
+      util.inspect(proxy, { showProxy: true }),
+      "Proxy [\n" +
+        "  [ 1, 2, 3 ],\n" +
+        "  { getPrototypeOf: [Function: getPrototypeOf], get: [Function: get] }\n" +
+        "]",
+    );
+    assertEquals(util.inspect(proxy), "[ 1, 2, 3 ]");
+    assertStrictEquals(self, proxy);
+  },
+});
+
+Deno.test({
+  name: "[util] format %s uses a user-defined Symbol.toPrimitive",
+  fn() {
+    assertEquals(
+      util.format("%s", { [Symbol.toPrimitive]: () => "own" }),
+      "own",
+    );
+    class Inherited {
+      [Symbol.toPrimitive]() {
+        return "inherited";
+      }
+    }
+    assertEquals(util.format("%s", new Inherited()), "inherited");
+    assertEquals(util.format("%s", { a: 1 }), "{ a: 1 }");
+  },
+});
+
+Deno.test({
   name: "[util] types.isTypedArray",
   fn() {
     assert(util.types.isTypedArray(new Buffer(4)));

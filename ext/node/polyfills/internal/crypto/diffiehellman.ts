@@ -26,6 +26,7 @@ const {
 const {
   op_node_dh_check,
   op_node_dh_compute_secret,
+  op_node_dh_compute_secret_checked,
   op_node_dh_keys_generate_and_export,
   op_node_diffie_hellman,
   op_node_ecdh_compute_public_key,
@@ -263,27 +264,16 @@ class DiffieHellmanImpl {
     outputEncoding?: any,
   ): Buffer | string {
     const buf = getArrayBufferOrView(otherPublicKey, "key", inputEncoding);
-    if (buf.length === 0) {
-      throw new NodeError(
-        "ERR_CRYPTO_INVALID_KEYLEN",
-        "Unspecified validation error",
-      );
-    }
 
-    const sharedSecret = op_node_dh_compute_secret(
+    // The op validates the key as the target Node.js release does, and
+    // zero-pads the secret to the length of the prime (RFC 4346).
+    const sharedSecret = op_node_dh_compute_secret_checked(
       this.#prime,
+      this.#generator,
       this.#privateKey,
       buf,
     );
-
-    // Zero-pad the shared secret to the length of the prime, per RFC 4346
-    let secretBuf = Buffer.from(TypedArrayPrototypeGetBuffer(sharedSecret));
-    const primeLen = this.#prime.length;
-    if (secretBuf.length < primeLen) {
-      const padded = Buffer.alloc(primeLen);
-      secretBuf.copy(padded, primeLen - secretBuf.length);
-      secretBuf = padded;
-    }
+    const secretBuf = Buffer.from(TypedArrayPrototypeGetBuffer(sharedSecret));
 
     if (outputEncoding == undefined || outputEncoding == "buffer") {
       return secretBuf;

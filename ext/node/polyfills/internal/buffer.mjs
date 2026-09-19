@@ -91,6 +91,7 @@ const {
   op_mark_as_untransferable,
   op_node_buffer_compare,
   op_node_buffer_compare_offset,
+  op_node_buffer_max_length,
   op_node_call_is_from_dependency,
   op_node_encoding_slice,
   op_transcode,
@@ -165,7 +166,11 @@ float32Array[0] = -1; // 0xBF800000
 // check this with `os.endianness()` because that is determined at compile time.
 const bigEndian = uInt8Float32Array[3] === 0;
 
-const kMaxLength = NumberMAX_SAFE_INTEGER;
+// Node.js 20 limits a Buffer to 2^32 bytes. Node.js 22 and later limit it to
+// `Number.MAX_SAFE_INTEGER`. The runtime selects the limit. An embedder can
+// evaluate this module into a startup snapshot and then run it with a
+// different limit, so `refreshMaxLength()` reads the limit again.
+let kMaxLength = op_node_buffer_max_length();
 const kStringMaxLength = 536870888;
 const MAX_UINT32 = 2 ** 32;
 
@@ -3392,6 +3397,20 @@ const mod = {
 // for `INSPECT_MAX_BYTES` work correctly - using `as "module.exports"` ensures
 // that `require`ing this module does that.
 
+// The `node:buffer` ESM module binds its `kMaxLength` export here.
+let updateMaxLengthExport = null;
+
+function bindMaxLengthExport(update) {
+  updateMaxLengthExport = update;
+}
+
+function refreshMaxLength() {
+  kMaxLength = op_node_buffer_max_length();
+  constants.MAX_LENGTH = kMaxLength;
+  mod.kMaxLength = kMaxLength;
+  updateMaxLengthExport?.(kMaxLength);
+}
+
 return {
   atob,
   Blob,
@@ -3449,11 +3468,15 @@ return {
   resolveObjectURL,
   FastBuffer,
   bigEndian,
-  kMaxLength,
+  get kMaxLength() {
+    return kMaxLength;
+  },
   kStringMaxLength,
   INSPECT_MAX_BYTES,
   constants,
   encodingsMap,
   encodingOps,
+  bindMaxLengthExport,
+  refreshMaxLength,
 };
 })();

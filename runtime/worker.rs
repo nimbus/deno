@@ -617,6 +617,7 @@ impl MainWorker {
           true,
           services.broadcast_channel.clone(),
           deno_web::UrlSearchParamsNullPolicy::default(),
+          deno_web::ProxyInspectPolicy::default(),
         ),
         deno_fetch::deno_fetch::args(deno_fetch::Options {
           user_agent: options.bootstrap.user_agent.clone(),
@@ -683,6 +684,15 @@ impl MainWorker {
           deno_node::AesGcmImplicitShortTagPolicy::Deny,
           deno_node::DgramDefaultLookupPolicy::BypassIpLiterals,
           deno_node::ClosedReadableAdapterPolicy::PropagateError,
+          deno_node::CipherAuthTagPolicy::RequireComputedTag,
+          deno_node::PasswordCipherApiPolicy::Removed,
+          deno_node::EventsOptionsPolicy::RequireObject,
+          deno_node::DhComputeSecretPolicy::CheckRangeThenCompute,
+          deno_node::ReadableReadPolicy::OneBufferAtATime,
+          deno_node::BufferMaxLengthPolicy::SafeInteger,
+          deno_node::AssertionErrorDiffPolicy::Myers,
+          deno_node::DeepEqualCyclePolicy::EitherSide,
+          deno_node::AssertApiPolicy::AssertClassAndCallTracker,
         ),
         ops::runtime::deno_runtime::args(main_module.clone()),
         ops::worker_host::deno_worker_host::args(
