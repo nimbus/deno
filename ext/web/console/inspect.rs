@@ -198,6 +198,9 @@ pub struct Ctx<'s> {
   pub colors: bool,
   pub custom_inspect: bool,
   pub show_proxy: bool,
+  /// Show a proxy target in `Proxy(...)` when `show_proxy` is off
+  /// (`ProxyInspectPolicy::AnnotateTarget`).
+  pub annotate_proxy_target: bool,
   pub max_array_length: f64,
   pub max_string_length: f64,
   pub break_length: f64,
@@ -592,40 +595,42 @@ pub fn format_value<'s, 'i>(
   // Memorize the context for custom inspection on proxies.
   let context = value;
   let mut value = value;
-  let mut proxy_details: Option<(
-    v8::Local<'s, v8::Value>,
-    v8::Local<'s, v8::Value>,
-  )> = None;
+  // The number of proxy layers unwrapped because `show_proxy` is off.
+  let mut proxies = 0;
   if let Ok(proxy) = v8::Local::<v8::Proxy>::try_from(value) {
     let target = proxy.get_target(scope);
     let handler = proxy.get_handler(scope);
     // A revoked proxy has null target/handler. Proceeding would feed `null`
-    // into `format_raw` (which expects an object) and abort the process; the
-    // old JS threw a catchable TypeError instead.
+    // into `format_raw` (which expects an object) and abort the process.
+    // Node.js prints the same marker with and without `showProxy`.
     if target.is_null() || handler.is_null() {
-      return Err(type_err(
-        scope,
-        "Cannot inspect a proxy that has been revoked",
-      ));
+      return ctx.stylize(scope, "<Revoked Proxy>", "special");
     }
-    if !ctx.show_proxy {
-      // Inspect the underlying target directly. Unwrap nested proxies fully so
-      // downstream type checks (array/typed-array/map/...) see through a proxy
-      // chain, matching the old console's `ArrayIsArray`/prototype probes which
-      // pierce proxies (`new Proxy(new Proxy([1, 2], {}), {})` -> `[ 1, 2 ]`).
-      value = target;
-      while let Ok(inner) = v8::Local::<v8::Proxy>::try_from(value) {
-        let inner_target = inner.get_target(scope);
-        if inner_target.is_null() || inner.get_handler(scope).is_null() {
-          return Err(type_err(
-            scope,
-            "Cannot inspect a proxy that has been revoked",
-          ));
+    if ctx.show_proxy {
+      // Node.js formats the proxy before the custom inspect hook and before
+      // any other access, so no trap runs.
+      return format_proxy(scope, intr, ctx, target, handler, recurse_times);
+    }
+    // Inspect the underlying target directly. Unwrap nested proxies fully so
+    // downstream type checks (array/typed-array/map/...) see through a proxy
+    // chain, matching the old console's `ArrayIsArray`/prototype probes which
+    // pierce proxies (`new Proxy(new Proxy([1, 2], {}), {})` -> `[ 1, 2 ]`).
+    value = target;
+    proxies = 1;
+    while let Ok(inner) = v8::Local::<v8::Proxy>::try_from(value) {
+      let inner_target = inner.get_target(scope);
+      if inner_target.is_null() || inner.get_handler(scope).is_null() {
+        if ctx.annotate_proxy_target {
+          let revoked = ctx.stylize(scope, "<Revoked Proxy>", "special")?;
+          return annotate_proxy_target(scope, ctx, revoked, proxies);
         }
-        value = inner_target;
+        return Err(type_err(
+          scope,
+          "Cannot inspect a proxy that has been revoked",
+        ));
       }
-    } else {
-      proxy_details = Some((target, handler));
+      value = inner_target;
+      proxies += 1;
     }
   }
 
@@ -637,7 +642,7 @@ pub fn format_value<'s, 'i>(
       ctx,
       context,
       value,
-      proxy_details,
+      proxies != 0,
       recurse_times,
     )? {
       return Ok(result);
@@ -662,15 +667,27 @@ pub fn format_value<'s, 'i>(
     return ctx.stylize(scope, &format!("[Circular *{index}]"), "special");
   }
 
-  format_raw(
-    scope,
-    intr,
-    ctx,
-    value,
-    recurse_times,
-    typed_array,
-    proxy_details,
-  )
+  let formatted =
+    format_raw(scope, intr, ctx, value, recurse_times, typed_array)?;
+  if ctx.annotate_proxy_target {
+    return annotate_proxy_target(scope, ctx, formatted, proxies);
+  }
+  Ok(formatted)
+}
+
+/// Wraps `formatted` in one `Proxy(...)` for each unwrapped proxy layer.
+fn annotate_proxy_target<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  ctx: &mut Ctx<'s>,
+  mut formatted: String,
+  proxies: usize,
+) -> R<String> {
+  for _ in 0..proxies {
+    let open = ctx.stylize(scope, "Proxy(", "special")?;
+    let close = ctx.stylize(scope, ")", "special")?;
+    formatted = format!("{open}{formatted}{close}");
+  }
+  Ok(formatted)
 }
 
 /// Returns `Ok(Some(string))` when a custom-inspect hook produced output.
@@ -680,18 +697,9 @@ fn try_custom_inspect<'s, 'i>(
   ctx: &mut Ctx<'s>,
   context: v8::Local<'s, v8::Value>,
   value: v8::Local<'s, v8::Value>,
-  proxy_details: Option<(v8::Local<'s, v8::Value>, v8::Local<'s, v8::Value>)>,
+  is_proxy: bool,
   recurse_times: f64,
 ) -> R<Option<String>> {
-  let inspect_target = match proxy_details {
-    Some((target, _)) => target,
-    None => value,
-  };
-  let Ok(inspect_target_obj) =
-    v8::Local::<v8::Object>::try_from(inspect_target)
-  else {
-    return Ok(None);
-  };
   let Ok(value_obj) = v8::Local::<v8::Object>::try_from(value) else {
     return Ok(None);
   };
@@ -705,10 +713,10 @@ fn try_custom_inspect<'s, 'i>(
     // ReflectHas walks the prototype chain.
     let has = {
       v8::tc_scope!(tc, scope);
-      inspect_target_obj.has(tc, sym.into()).unwrap_or(false)
+      value_obj.has(tc, sym.into()).unwrap_or(false)
     };
     if has {
-      let func = js_get(scope, inspect_target_obj, sym.into())?;
+      let func = js_get(scope, value_obj, sym.into())?;
       if let Ok(func) = v8::Local::<v8::Function>::try_from(func) {
         // return String(value[customInspect](inspect, ctx));
         let ctx_obj = materialize_ctx(scope, intr, ctx)?;
@@ -737,7 +745,7 @@ fn try_custom_inspect<'s, 'i>(
   let node_sym = symbol_for(scope, "nodejs.util.inspect.custom");
   let maybe_custom = {
     v8::tc_scope!(tc, scope);
-    inspect_target_obj.get(tc, node_sym.into())
+    value_obj.get(tc, node_sym.into())
   };
   let Some(maybe_custom) = maybe_custom else {
     return Ok(None);
@@ -775,8 +783,9 @@ fn try_custom_inspect<'s, 'i>(
     Some(d) => v8::Number::new(scope, d - recurse_times).into(),
   };
   let object_prototype = intr.object_prototype(scope);
+  // A proxy is cross-context without a `getPrototypeOf` trap call.
   let is_cross_context =
-    !is_prototype_of(scope, object_prototype.into(), context);
+    is_proxy || !is_prototype_of(scope, object_prototype.into(), context);
   let user_options = get_user_options(scope, intr, ctx, is_cross_context)?;
   let ctx_inspect: v8::Local<v8::Value> = match ctx.ctx_inspect_fn {
     Some(f) => f,
@@ -1845,6 +1854,7 @@ fn fork_ctx<'s>(ctx: &Ctx<'s>) -> Ctx<'s> {
     colors: ctx.colors,
     custom_inspect: ctx.custom_inspect,
     show_proxy: ctx.show_proxy,
+    annotate_proxy_target: ctx.annotate_proxy_target,
     max_array_length: ctx.max_array_length,
     max_string_length: ctx.max_string_length,
     break_length: ctx.break_length,
@@ -1916,6 +1926,38 @@ fn well_known_symbol_iterator<'s>(
   v8::Symbol::get_iterator(scope)
 }
 
+/// formatProxy(ctx, proxy, recurseTimes). The target and the handler are
+/// separate entries, so `showHidden` does not show a `[length]`.
+fn format_proxy<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  intr: &Intrinsics<'_>,
+  ctx: &mut Ctx<'s>,
+  target: v8::Local<'s, v8::Value>,
+  handler: v8::Local<'s, v8::Value>,
+  recurse_times: f64,
+) -> R<String> {
+  if ctx.depth.is_some_and(|depth| recurse_times > depth) {
+    return ctx.stylize(scope, "Proxy [Array]", "special");
+  }
+  let recurse_times = recurse_times + 1.0;
+  ctx.indentation_lvl += 2;
+  let output = vec![
+    format_value(scope, intr, ctx, target, recurse_times, false)?,
+    format_value(scope, intr, ctx, handler, recurse_times, false)?,
+  ];
+  ctx.indentation_lvl -= 2;
+  reduce_to_single_string(
+    scope,
+    ctx,
+    output,
+    "",
+    &("Proxy [".to_string(), "]".to_string()),
+    K_ARRAY_EXTRAS_TYPE,
+    recurse_times,
+    None,
+  )
+}
+
 #[allow(clippy::too_many_arguments, reason = "formatting context")]
 fn format_raw<'s, 'i>(
   scope: &mut v8::PinScope<'s, 'i>,
@@ -1924,7 +1966,6 @@ fn format_raw<'s, 'i>(
   value: v8::Local<'s, v8::Value>,
   recurse_times: f64,
   typed_array_marker: bool,
-  proxy_details: Option<(v8::Local<'s, v8::Value>, v8::Local<'s, v8::Value>)>,
 ) -> R<String> {
   let value_obj = v8::Local::<v8::Object>::try_from(value)
     .expect("format_raw requires an object");
@@ -1954,13 +1995,11 @@ fn format_raw<'s, 'i>(
   }
 
   let mut tag = String::new();
-  if proxy_details.is_none() {
-    let tag_symbol = v8::Symbol::get_to_string_tag(scope);
-    let tag_value = try_get(scope, value_obj, tag_symbol.into());
-    if let Some(tag_value) = tag_value {
-      if tag_value.is_string() {
-        tag = tag_value.to_rust_string_lossy(scope);
-      }
+  let tag_symbol = v8::Symbol::get_to_string_tag(scope);
+  let tag_value = try_get(scope, value_obj, tag_symbol.into());
+  if let Some(tag_value) = tag_value {
+    if tag_value.is_string() {
+      tag = tag_value.to_rust_string_lossy(scope);
     }
   }
 
@@ -1974,15 +2013,6 @@ fn format_raw<'s, 'i>(
   let mut keys: Vec<v8::Local<'s, v8::Value>> = Vec::new();
   let mut extras_type = K_OBJECT_TYPE;
   let only_enumerable = !ctx.show_hidden;
-
-  if proxy_details.is_some() && ctx.show_proxy {
-    // `Proxy ` + formatValue(ctx, proxyDetails, recurseTimes)
-    let (target, handler) = proxy_details.unwrap();
-    let arr = v8::Array::new_with_elements(scope, &[target, handler]);
-    let inner =
-      format_value(scope, intr, ctx, arr.into(), recurse_times, false)?;
-    return Ok(format!("Proxy {inner}"));
-  }
 
   // Iterators and the rest are split to reduce checks.
   let mut no_iterator = true;

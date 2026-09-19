@@ -10,6 +10,10 @@ const {
   SafeArrayIterator,
   StringPrototypeToLowerCase,
 } = primordials;
+const {
+  op_node_password_cipher_api_exposed,
+  op_node_password_cipher_classes_exported_as_undefined,
+} = core.ops;
 const { ERR_CRYPTO_FIPS_FORCED } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -66,7 +70,9 @@ const {
   ECDH,
 } = core.loadExtScript("ext:deno_node/internal/crypto/diffiehellman.ts");
 const {
+  Cipher,
   Cipheriv,
+  Decipher,
   Decipheriv,
   privateDecrypt,
   privateEncrypt,
@@ -301,6 +307,22 @@ function createDecipheriv(
   return Decipheriv(algorithm, key, iv, options);
 }
 
+function createCipher(
+  cipher: string,
+  password: string | ArrayBuffer | ArrayBufferView,
+  options?: TransformOptions,
+): Cipher {
+  return new Cipher(cipher, password, options);
+}
+
+function createDecipher(
+  cipher: string,
+  password: string | ArrayBuffer | ArrayBufferView,
+  options?: TransformOptions,
+): Decipher {
+  return new Decipher(cipher, password, options);
+}
+
 function createDiffieHellman(
   primeLength: number,
   generator?: number | ArrayBufferView,
@@ -391,6 +413,7 @@ const defaultExport = {
   Certificate,
   checkPrime,
   checkPrimeSync,
+  Cipher,
   Cipheriv,
   constants,
   createCipheriv,
@@ -406,6 +429,7 @@ const defaultExport = {
   createSign,
   createVerify,
   decapsulate,
+  Decipher,
   Decipheriv,
   DiffieHellman,
   diffieHellman,
@@ -493,6 +517,36 @@ for (
   const key of new SafeArrayIterator(["pseudoRandomBytes", "prng", "rng"])
 ) {
   defineRandomBytesAlias(defaultExport, key);
+}
+
+// Node.js 20 keeps the password-based cipher API (DEP0106). Node.js 22 removed
+// it (nodejs/node#50973) but still exports `Cipher` and `Decipher` as
+// `undefined`. Node.js 24 removed those keys too (nodejs/node#57266).
+if (op_node_password_cipher_api_exposed()) {
+  ObjectDefineProperty(defaultExport, "createCipher", {
+    __proto__: null,
+    enumerable: false,
+    value: deprecate(
+      createCipher,
+      "crypto.createCipher is deprecated.",
+      "DEP0106",
+    ),
+  });
+  ObjectDefineProperty(defaultExport, "createDecipher", {
+    __proto__: null,
+    enumerable: false,
+    value: deprecate(
+      createDecipher,
+      "crypto.createDecipher is deprecated.",
+      "DEP0106",
+    ),
+  });
+} else if (op_node_password_cipher_classes_exported_as_undefined()) {
+  defaultExport.Cipher = undefined;
+  defaultExport.Decipher = undefined;
+} else {
+  delete defaultExport.Cipher;
+  delete defaultExport.Decipher;
 }
 
 return {

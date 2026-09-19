@@ -2825,16 +2825,14 @@ impl JsRuntime {
         .drain_v8_close_callbacks();
       for cb in v8_cbs {
         (cb.callback)(scope);
+        // Node.js runs each close callback through MakeCallback, whose
+        // InternalCallbackScope drains the nextTick queue and then the
+        // microtask queue before the next callback runs.
+        Self::drain_next_tick_and_macrotasks(scope, context_state)?;
       }
     }
     // libuv close callbacks may call into JS; flush microtasks if present.
-    if has_uv
-      || !context_state
-        .event_loop_phases
-        .borrow()
-        .v8_close_callbacks
-        .is_empty()
-    {
+    if has_uv {
       scope.perform_microtask_checkpoint();
     }
 
@@ -2907,6 +2905,7 @@ impl JsRuntime {
         || pending_state.has_outstanding_immediates
         || context_state.immediate_info[IMM_IDX_REF_COUNT] > 0
         || pending_state.has_pending_promise_events
+        || pending_state.has_pending_close_callbacks
         || uv_did_io
       {
         self.inner.state.waker.wake();
@@ -2929,6 +2928,7 @@ impl JsRuntime {
         || pending_state.has_tick_scheduled
         || pending_state.has_pending_timers
         || pending_state.has_uv_alive_handles
+        || pending_state.has_pending_close_callbacks
       {
         // pass, will be polled again
       } else {
@@ -2986,6 +2986,7 @@ impl JsRuntime {
         || pending_state.has_tick_scheduled
         || pending_state.has_pending_timers
         || pending_state.has_uv_alive_handles
+        || pending_state.has_pending_close_callbacks
       {
         // pass, will be polled again
       } else if realm.modules_idle() {
@@ -3264,6 +3265,7 @@ pub(crate) struct EventLoopPendingState {
   has_outstanding_immediates: bool,
   has_pending_timers: bool,
   has_uv_alive_handles: bool,
+  has_pending_close_callbacks: bool,
 }
 
 impl EventLoopPendingState {
@@ -3305,6 +3307,15 @@ impl EventLoopPendingState {
       } else {
         false
       };
+    // libuv keeps the loop alive while a handle is closing (uv_loop_alive
+    // checks `closing_handles`). A close queued during Phase 6, for example
+    // from a nextTick that a close callback scheduled, runs in the next
+    // iteration.
+    let has_pending_close_callbacks = {
+      let phases = state.event_loop_phases.borrow();
+      !phases.close_callbacks.is_empty()
+        || !phases.v8_close_callbacks.is_empty()
+    };
     EventLoopPendingState {
       has_pending_ops: has_pending_refed_ops || (num_pending_ops > 0),
       has_pending_refed_ops,
@@ -3318,6 +3329,7 @@ impl EventLoopPendingState {
       has_outstanding_immediates,
       has_pending_timers,
       has_uv_alive_handles,
+      has_pending_close_callbacks,
     }
   }
 
@@ -3338,6 +3350,7 @@ impl EventLoopPendingState {
       || self.has_pending_promise_events
       || self.has_pending_external_ops
       || self.has_uv_alive_handles
+      || self.has_pending_close_callbacks
   }
 
   /// Return true only when no event-loop state can cross a warm lease.
@@ -3354,6 +3367,7 @@ impl EventLoopPendingState {
       && !self.has_outstanding_immediates
       && !self.has_pending_timers
       && !self.has_uv_alive_handles
+      && !self.has_pending_close_callbacks
   }
 }
 

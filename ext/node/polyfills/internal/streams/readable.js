@@ -3,6 +3,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_node_readable_read_one_buffer_at_a_time } = core.ops;
 const lazyProcess = core.createLazyLoader("node:process");
 const process = lazyProcess().default;
 const { EventEmitter: EE } = core.loadExtScript("ext:deno_node/_events.mjs");
@@ -697,8 +698,12 @@ function howMuchToRead(n, state) {
     if ((state[kState] & kFlowing) !== 0 && state.length) {
       return state.buffer[state.bufferIndex].length;
     }
-    // Fast path for buffers.
-    if ((state[kState] & kDecoder) === 0 && state.length) {
+    // Fast path for buffers. Node.js 24 and earlier return all buffered
+    // data instead (nodejs/node#60441).
+    if (
+      (state[kState] & kDecoder) === 0 && state.length &&
+      op_node_readable_read_one_buffer_at_a_time()
+    ) {
       return state.buffer[state.bufferIndex].length;
     }
     return state.length;

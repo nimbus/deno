@@ -23,9 +23,11 @@ type Tag = Option<Vec<u8>>;
 pub enum AesWrapError {
   #[class(range)]
   #[error("Invalid key length")]
+  #[property("code" = "ERR_CRYPTO_INVALID_KEYLEN")]
   InvalidKeyLength,
   #[class(type)]
   #[error("Invalid initialization vector")]
+  #[property("code" = "ERR_CRYPTO_INVALID_IV")]
   InvalidIv,
   #[class(range)]
   #[error("Invalid input length")]
@@ -36,6 +38,31 @@ pub enum AesWrapError {
   #[class(type)]
   #[error("AES unwrap failed")]
   UnwrapFailed,
+}
+
+/// Checks the IV and key for an AES key wrap cipher, in the order that
+/// Node.js `CipherBase::InitIv` and `EVP_CipherInit_ex` check them. The IV
+/// length is exact: 8 bytes for RFC 3394 and 4 bytes for RFC 5649.
+pub fn aes_wrap_check_params(
+  algorithm: &str,
+  key: &[u8],
+  iv: &[u8],
+) -> Result<(), AesWrapError> {
+  let iv_len = if algorithm.ends_with("-pad") { 4 } else { 8 };
+  if iv.len() != iv_len {
+    return Err(AesWrapError::InvalidIv);
+  }
+  let key_len = if algorithm.contains("128") {
+    16
+  } else if algorithm.contains("192") {
+    24
+  } else {
+    32
+  };
+  if key.len() != key_len {
+    return Err(AesWrapError::InvalidKeyLength);
+  }
+  Ok(())
 }
 
 /// AES Key Wrap (RFC 3394) with optional custom IV.
@@ -75,14 +102,15 @@ pub fn aes_wrap_key(
   let aes_key = unsafe { aes_key.assume_init() };
 
   let is_pad = algorithm.ends_with("-pad");
+  // OpenSSL's wrap cipher gives no output for an empty update.
+  if data.is_empty() {
+    return Ok(Vec::new());
+  }
 
   if is_pad {
     // Padded wrap (RFC 5649). iv must be 4 bytes (the constant part of AIV).
     if iv.len() != 4 {
       return Err(AesWrapError::InvalidIv);
-    }
-    if data.is_empty() {
-      return Err(AesWrapError::InvalidInputLength);
     }
     let mli = data.len() as u32;
 
@@ -221,6 +249,10 @@ pub fn aes_unwrap_key(
   let aes_key = unsafe { aes_key.assume_init() };
 
   let is_pad = algorithm.ends_with("-pad");
+  // OpenSSL's wrap cipher gives no output for an empty update.
+  if data.is_empty() {
+    return Ok(Vec::new());
+  }
 
   if is_pad {
     // Padded unwrap (RFC 5649). iv is the 4-byte AIV constant.
@@ -299,6 +331,7 @@ pub fn aes_unwrap_key(
 }
 
 type Aes128Gcm = aead_gcm_stream::AesGcm<aes::Aes128>;
+type Aes192Gcm = aead_gcm_stream::AesGcm<aes::Aes192>;
 type Aes256Gcm = aead_gcm_stream::AesGcm<aes::Aes256>;
 
 enum CipherInitError {
@@ -630,6 +663,7 @@ enum Cipher {
   Aes192Ecb(Box<ecb::Encryptor<aes::Aes192>>),
   Aes256Ecb(Box<ecb::Encryptor<aes::Aes256>>),
   Aes128Gcm(Box<Aes128Gcm>, Option<usize>),
+  Aes192Gcm(Box<Aes192Gcm>, Option<usize>),
   Aes256Gcm(Box<Aes256Gcm>, Option<usize>),
   Aes256Cbc(Box<cbc::Encryptor<aes::Aes256>>),
   Aes128Ctr(Box<ctr::Ctr128BE<aes::Aes128>>),
@@ -647,6 +681,7 @@ enum Decipher {
   Aes192Ecb(Box<ecb::Decryptor<aes::Aes192>>),
   Aes256Ecb(Box<ecb::Decryptor<aes::Aes256>>),
   Aes128Gcm(Box<Aes128Gcm>, Option<usize>),
+  Aes192Gcm(Box<Aes192Gcm>, Option<usize>),
   Aes256Gcm(Box<Aes256Gcm>, Option<usize>),
   Aes256Cbc(Box<cbc::Decryptor<aes::Aes256>>),
   Aes128Ctr(Box<ctr::Ctr128BE<aes::Aes128>>),
@@ -803,9 +838,11 @@ pub enum CipherError {
   InvalidIvLength,
   #[class(range)]
   #[error("Invalid key length")]
+  #[property("code" = "ERR_CRYPTO_INVALID_KEYLEN")]
   InvalidKeyLength,
   #[class(type)]
   #[error("Invalid initialization vector")]
+  #[property("code" = "ERR_CRYPTO_INVALID_IV")]
   InvalidInitializationVector,
   #[class(type)]
   #[error("bad decrypt")]
@@ -815,6 +852,7 @@ pub enum CipherError {
   UnknownCipher(String),
   #[class(type)]
   #[error("Invalid authentication tag length: {0}")]
+  #[property("code" = "ERR_CRYPTO_INVALID_AUTH_TAG")]
   InvalidAuthTag(usize),
 }
 
@@ -885,6 +923,25 @@ impl Cipher {
           aead_gcm_stream::AesGcm::<aes::Aes128>::new(key.into(), iv);
 
         Aes128Gcm(Box::new(cipher), auth_tag_length)
+      }
+      "aes-192-gcm" => {
+        if key.len() != aes::Aes192::key_size() {
+          return Err(CipherError::InvalidKeyLength);
+        }
+        if iv.is_empty() {
+          return Err(CipherError::InvalidInitializationVector);
+        }
+
+        if let Some(tag_len) = auth_tag_length
+          && !is_valid_gcm_tag_length(tag_len)
+        {
+          return Err(CipherError::InvalidAuthTag(tag_len));
+        }
+
+        let cipher =
+          aead_gcm_stream::AesGcm::<aes::Aes192>::new(key.into(), iv);
+
+        Aes192Gcm(Box::new(cipher), auth_tag_length)
       }
       "aes-256-gcm" => {
         if key.len() != aes::Aes256::key_size() {
@@ -992,6 +1049,9 @@ impl Cipher {
       Aes128Gcm(cipher, _) => {
         cipher.set_aad(aad);
       }
+      Aes192Gcm(cipher, _) => {
+        cipher.set_aad(aad);
+      }
       Aes256Gcm(cipher, _) => {
         cipher.set_aad(aad);
       }
@@ -1031,6 +1091,10 @@ impl Cipher {
         }
       }
       Aes128Gcm(cipher, _) => {
+        output[..input.len()].copy_from_slice(input);
+        cipher.encrypt(output);
+      }
+      Aes192Gcm(cipher, _) => {
         output[..input.len()].copy_from_slice(input);
         cipher.encrypt(output);
       }
@@ -1136,6 +1200,13 @@ impl Cipher {
         }
         Ok(Some(tag))
       }
+      (Aes192Gcm(cipher, auth_tag_length), _) => {
+        let mut tag = cipher.finish().to_vec();
+        if let Some(tag_len) = auth_tag_length {
+          tag.truncate(tag_len);
+        }
+        Ok(Some(tag))
+      }
       (Aes256Gcm(cipher, auth_tag_length), _) => {
         let mut tag = cipher.finish().to_vec();
         if let Some(tag_len) = auth_tag_length {
@@ -1181,6 +1252,13 @@ impl Cipher {
     use Cipher::*;
     match self {
       Aes128Gcm(cipher, auth_tag_length) => {
+        let mut tag = cipher.finish().to_vec();
+        if let Some(tag_len) = auth_tag_length {
+          tag.truncate(tag_len);
+        }
+        Some(tag)
+      }
+      Aes192Gcm(cipher, auth_tag_length) => {
         let mut tag = cipher.finish().to_vec();
         if let Some(tag_len) = auth_tag_length {
           tag.truncate(tag_len);
@@ -1240,9 +1318,12 @@ impl DecipherError {
       Self::InvalidIvLength => {
         deno_error::PropertyValue::String("ERR_CRYPTO_INVALID_IV_LENGTH".into())
       }
-      Self::InvalidKeyLength => deno_error::PropertyValue::String(
-        "ERR_CRYPTO_INVALID_KEY_LENGTH".into(),
-      ),
+      Self::InvalidKeyLength => {
+        deno_error::PropertyValue::String("ERR_CRYPTO_INVALID_KEYLEN".into())
+      }
+      Self::InvalidInitializationVector => {
+        deno_error::PropertyValue::String("ERR_CRYPTO_INVALID_IV".into())
+      }
       Self::InvalidAuthTag(_) => {
         deno_error::PropertyValue::String("ERR_CRYPTO_INVALID_AUTH_TAG".into())
       }
@@ -1341,6 +1422,25 @@ impl Decipher {
           aead_gcm_stream::AesGcm::<aes::Aes128>::new(key.into(), iv);
 
         Aes128Gcm(Box::new(decipher), auth_tag_length)
+      }
+      "aes-192-gcm" => {
+        if key.len() != aes::Aes192::key_size() {
+          return Err(DecipherError::InvalidKeyLength);
+        }
+        if iv.is_empty() {
+          return Err(DecipherError::InvalidInitializationVector);
+        }
+
+        if let Some(tag_len) = auth_tag_length
+          && !is_valid_gcm_tag_length(tag_len)
+        {
+          return Err(DecipherError::InvalidAuthTag(tag_len));
+        }
+
+        let decipher =
+          aead_gcm_stream::AesGcm::<aes::Aes192>::new(key.into(), iv);
+
+        Aes192Gcm(Box::new(decipher), auth_tag_length)
       }
       "aes-256-gcm" => {
         if key.len() != aes::Aes256::key_size() {
@@ -1450,12 +1550,15 @@ impl Decipher {
   fn validate_auth_tag(&self, length: usize) -> Result<(), DecipherError> {
     match self {
       Decipher::Aes128Gcm(_, Some(tag_len))
+      | Decipher::Aes192Gcm(_, Some(tag_len))
       | Decipher::Aes256Gcm(_, Some(tag_len))
         if *tag_len != length =>
       {
         return Err(DecipherError::InvalidAuthTag(length));
       }
-      Decipher::Aes128Gcm(_, None) | Decipher::Aes256Gcm(_, None)
+      Decipher::Aes128Gcm(_, None)
+      | Decipher::Aes192Gcm(_, None)
+      | Decipher::Aes256Gcm(_, None)
         if !is_valid_gcm_tag_length(length) =>
       {
         return Err(DecipherError::InvalidAuthTag(length));
@@ -1476,6 +1579,9 @@ impl Decipher {
     use Decipher::*;
     match self {
       Aes128Gcm(decipher, _) => {
+        decipher.set_aad(aad);
+      }
+      Aes192Gcm(decipher, _) => {
         decipher.set_aad(aad);
       }
       Aes256Gcm(decipher, _) => {
@@ -1517,6 +1623,10 @@ impl Decipher {
         }
       }
       Aes128Gcm(decipher, _) => {
+        output[..input.len()].copy_from_slice(input);
+        decipher.decrypt(output);
+      }
+      Aes192Gcm(decipher, _) => {
         output[..input.len()].copy_from_slice(input);
         decipher.decrypt(output);
       }
@@ -1571,6 +1681,7 @@ impl Decipher {
           | Aes192Ecb(..)
           | Aes256Ecb(..)
           | Aes128Gcm(..)
+          | Aes192Gcm(..)
           | Aes256Gcm(..)
           | ChaCha20Poly1305(..)
       )
@@ -1648,6 +1759,20 @@ impl Decipher {
         Ok(())
       }
       (Aes128Gcm(decipher, auth_tag_length), _) => {
+        let tag = decipher.finish();
+        let tag_slice = tag.as_slice();
+        let truncated_tag = if let Some(len) = auth_tag_length {
+          &tag_slice[..len]
+        } else {
+          tag_slice
+        };
+        if truncated_tag.ct_eq(auth_tag).into() {
+          Ok(())
+        } else {
+          Err(DecipherError::DataAuthenticationFailed)
+        }
+      }
+      (Aes192Gcm(decipher, auth_tag_length), _) => {
         let tag = decipher.finish();
         let tag_slice = tag.as_slice();
         let truncated_tag = if let Some(len) = auth_tag_length {

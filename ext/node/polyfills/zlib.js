@@ -73,9 +73,10 @@ const { crc32: crc32Native } = binding;
 const assert = core.loadExtScript(
   "ext:deno_node/internal/assert.mjs",
 );
-const { Buffer, kMaxLength } = core.loadExtScript(
+const bufferInternals = core.loadExtScript(
   "ext:deno_node/internal/buffer.mjs",
 );
+const { Buffer } = bufferInternals;
 const { ownerSymbol: owner_symbol } = core.loadExtScript(
   "ext:deno_node/internal_binding/symbols.ts",
 );
@@ -270,6 +271,8 @@ const FLUSH_BOUND_IDX_ZSTD = 2;
 
 // The base class for all Zlib-style streams.
 function ZlibBase(opts, mode, handle, { flush, finishFlush, fullFlush }) {
+  // The embedder can change the Buffer limit after a startup snapshot.
+  const { kMaxLength } = bufferInternals;
   let chunkSize = Z_DEFAULT_CHUNK;
   let maxOutputLength = kMaxLength;
   // The ZlibBase class is not exported to user land, the mode should only be

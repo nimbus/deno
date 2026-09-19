@@ -413,7 +413,9 @@ Deno.test({
     assertEquals(crypto.getCiphers().includes("aes-256-ctr"), true);
 
     const getZeroKey = (cipher: string) => {
-      if (cipher === "des-ede3-cbc") return zeros(24);
+      if (cipher === "des-ede3-cbc" || cipher === "des3-wrap") {
+        return zeros(24);
+      }
       if (cipher === "chacha20" || cipher === "chacha20-poly1305") {
         return zeros(32);
       }
@@ -424,17 +426,32 @@ Deno.test({
       if (cipher.includes("ecb")) {
         return zeros(0);
       }
-      if (cipher.includes("gcm")) {
+      if (/gcm|ccm|ocb/.test(cipher)) {
         return zeros(12);
       }
+      // Triple-DES key wrap has no IV.
+      if (cipher === "des3-wrap") return zeros(0);
+      if (cipher.endsWith("wrap")) return zeros(8);
+      if (cipher.endsWith("wrap-pad")) return zeros(4);
       if (cipher === "chacha20-poly1305") return zeros(12);
       if (cipher.includes("des")) return zeros(8);
       return zeros(16);
     };
 
     for (const cipher of crypto.getCiphers()) {
-      crypto.createCipheriv(cipher, getZeroKey(cipher), getZeroIv(cipher))
-        .final();
+      // CCM and OCB require an explicit tag length. CCM also requires an
+      // update() call, which sets the message length, before final().
+      const options = /ccm|ocb/.test(cipher)
+        ? { authTagLength: 16 }
+        : undefined;
+      const c = crypto.createCipheriv(
+        cipher,
+        getZeroKey(cipher),
+        getZeroIv(cipher),
+        options as crypto.CipherCCMOptions,
+      );
+      c.update(Buffer.alloc(0));
+      c.final();
     }
   },
 });
@@ -531,7 +548,15 @@ Deno.test({
       "Cannot change encoding",
     );
 
-    cipher.final();
+    // Node.js releases the cipher context on every final() call, including
+    // one that throws.
+    assertThrows(
+      () => {
+        cipher.final();
+      },
+      Error,
+      "Invalid state",
+    );
   },
 });
 
@@ -552,7 +577,48 @@ Deno.test({
       "Cannot change encoding",
     );
 
-    decipher.final();
+    // Node.js releases the cipher context on every final() call, including
+    // one that throws.
+    assertThrows(
+      () => {
+        decipher.final();
+      },
+      Error,
+      "Invalid state",
+    );
+  },
+});
+
+Deno.test({
+  name: "Decipheriv - authentication error wins over an encoding change",
+  fn() {
+    const key = new Uint8Array(16);
+    const iv = new Uint8Array(12);
+    const cipher = crypto.createCipheriv("aes-128-gcm", key, iv);
+    const ciphertext = Buffer.concat([
+      cipher.update("some plaintext"),
+      cipher.final(),
+    ]);
+    const tag = cipher.getAuthTag();
+    tag[0] ^= 1;
+
+    const decipher = crypto.createDecipheriv("aes-128-gcm", key, iv);
+    decipher.setAuthTag(tag);
+    decipher.update(ciphertext, undefined, "ascii");
+    assertThrows(
+      () => {
+        decipher.final("hex");
+      },
+      Error,
+      "Unsupported state or unable to authenticate data",
+    );
+    assertThrows(
+      () => {
+        decipher.final("ascii");
+      },
+      Error,
+      "Invalid state",
+    );
   },
 });
 
@@ -632,7 +698,7 @@ Deno.test({
         cipher.update("test data");
       },
       Error,
-      "Invalid state for operation update",
+      "Trying to add data in unsupported state",
     );
 
     assertThrows(
@@ -640,7 +706,7 @@ Deno.test({
         cipher.final();
       },
       Error,
-      "Invalid state for operation final",
+      "Invalid state",
     );
   },
 });
@@ -666,7 +732,7 @@ Deno.test({
         decipher.update(encrypted);
       },
       Error,
-      "Invalid state for operation update",
+      "Trying to add data in unsupported state",
     );
 
     assertThrows(
@@ -674,7 +740,7 @@ Deno.test({
         decipher.final();
       },
       Error,
-      "Invalid state for operation final",
+      "Invalid state",
     );
   },
 });
@@ -1471,5 +1537,272 @@ Deno.test({
       Error,
       "Unknown encoding",
     );
+  },
+});
+
+// Node.js v20, v22, v24 and v26 give the same results.
+Deno.test({
+  name: "Cipheriv/Decipheriv AES key wrap parameters and input lengths",
+  fn() {
+    const kek = Buffer.alloc(16, 1);
+    const wrapIv = Buffer.alloc(8, 0xa6);
+    const padIv = Buffer.alloc(4, 0xa6);
+
+    // The IV length is exact, and Node.js checks it before the key length.
+    for (
+      const [name, iv] of [
+        ["aes128-wrap", Buffer.alloc(16)],
+        ["aes128-wrap", Buffer.alloc(0)],
+        ["aes128-wrap", null],
+        ["id-aes128-wrap-pad", Buffer.alloc(8)],
+      ] as const
+    ) {
+      for (const create of [crypto.createCipheriv, crypto.createDecipheriv]) {
+        const err = assertThrows(
+          () => create(name, Buffer.alloc(15), iv),
+          TypeError,
+          "Invalid initialization vector",
+        ) as { code?: string };
+        assertEquals(err.code, "ERR_CRYPTO_INVALID_IV");
+      }
+    }
+    for (const key of [Buffer.alloc(15), Buffer.alloc(32)]) {
+      const err = assertThrows(
+        () => crypto.createCipheriv("aes128-wrap", key, wrapIv),
+        RangeError,
+        "Invalid key length",
+      ) as { code?: string };
+      assertEquals(err.code, "ERR_CRYPTO_INVALID_KEYLEN");
+    }
+
+    // An empty update gives no output.
+    for (
+      const [name, iv] of [["aes128-wrap", wrapIv], [
+        "id-aes128-wrap-pad",
+        padIv,
+      ]] as const
+    ) {
+      const cipher = crypto.createCipheriv(name, kek, iv);
+      assertEquals(cipher.update(Buffer.alloc(0)).length, 0);
+      assertEquals(cipher.update(Buffer.alloc(0), undefined, "hex"), "");
+      assertEquals(cipher.final().length, 0);
+      const decipher = crypto.createDecipheriv(name, kek, iv);
+      assertEquals(decipher.update(Buffer.alloc(0)).length, 0);
+      assertEquals(decipher.final().length, 0);
+    }
+
+    // A bad input length or a failed integrity check throws the
+    // EVP_CipherUpdate error, and the cipher stays usable.
+    const cipher = crypto.createCipheriv("aes128-wrap", kek, wrapIv);
+    for (const length of [1, 8, 15]) {
+      assertThrows(
+        () => cipher.update(Buffer.alloc(length)),
+        Error,
+        "Trying to add data in unsupported state",
+      );
+    }
+    assertEquals(
+      cipher.update(Buffer.alloc(16, 2)).toString("hex"),
+      "2152937994459ab9fb05db73e66f546291eb5389bc8aa7cc",
+    );
+    assertEquals(cipher.final().length, 0);
+
+    const padCipher = crypto.createCipheriv("id-aes128-wrap-pad", kek, padIv);
+    assertEquals(
+      padCipher.update(Buffer.alloc(5, 2)).toString("hex"),
+      "813cfc0a3d80556a1616c4aa479479cb",
+    );
+
+    for (
+      const [name, iv, input] of [
+        ["aes128-wrap", wrapIv, Buffer.alloc(16)],
+        ["aes128-wrap", wrapIv, Buffer.alloc(24)],
+        ["aes128-wrap", wrapIv, Buffer.alloc(25)],
+        ["id-aes128-wrap-pad", padIv, Buffer.alloc(8)],
+        ["id-aes128-wrap-pad", padIv, Buffer.alloc(16)],
+      ] as const
+    ) {
+      const decipher = crypto.createDecipheriv(name, kek, iv);
+      assertThrows(
+        () => decipher.update(input),
+        Error,
+        "Trying to add data in unsupported state",
+      );
+    }
+  },
+});
+
+// Triple-DES key wrap (RFC 3217). The vectors are the output of
+// `createCipheriv("des3-wrap", key, Buffer.alloc(0)).update(Buffer.alloc(16))`
+// on Node.js 20.20.2, 22.23.2, 24.21.0 and 26.9.0. Each wrap uses a random
+// inner IV, so each vector is different.
+Deno.test({
+  name: "Cipheriv/Decipheriv Triple-DES key wrap",
+  fn() {
+    const key = Buffer.alloc(24, 9);
+    const noIv = Buffer.alloc(0);
+    for (
+      const vector of [
+        "8f8fd29424a5712fbdab7b0aa91b05d85b4580876e7ed929ac439d3fbf84152c",
+        "0b080f62d0a0cce2e48d30a0ec4f8a6b99773f1095154e448bc5ff3b826b14cd",
+        "13213929aa36ccd16b347ecfa63198ad340e1a6ae3d2db4464bababa6f1acd84",
+        "d91c69e005db785e9d04fb4f98cc4f71fff71ccc633c794c7a582df4c6101bdb",
+      ]
+    ) {
+      const decipher = crypto.createDecipheriv("des3-wrap", key, noIv);
+      assertEquals(
+        decipher.update(Buffer.from(vector, "hex")),
+        Buffer.alloc(16),
+      );
+      assertEquals(decipher.final().length, 0);
+    }
+
+    // The output is 16 bytes longer than the input, and each wrap is
+    // different. The cipher name is not case-sensitive and has an alias.
+    const plaintext = Buffer.from("0123456789abcdef0123456789abcdef");
+    const wrapped = [];
+    for (const name of ["des3-wrap", "DES3-WRAP", "id-smime-alg-CMS3DESwrap"]) {
+      const cipher = crypto.createCipheriv(name, key, null);
+      const output = cipher.update(plaintext);
+      assertEquals(output.length, plaintext.length + 16);
+      assertEquals(cipher.final().length, 0);
+      const decipher = crypto.createDecipheriv(name, key, noIv);
+      assertEquals(decipher.update(output), plaintext);
+      wrapped.push(output.toString("hex"));
+    }
+    assertEquals(new Set(wrapped).size, wrapped.length);
+
+    // Node.js checks the IV before the key length.
+    for (const create of [crypto.createCipheriv, crypto.createDecipheriv]) {
+      const ivErr = assertThrows(
+        () => create("des3-wrap", Buffer.alloc(16), Buffer.alloc(8)),
+        TypeError,
+        "Invalid initialization vector",
+      ) as { code?: string };
+      assertEquals(ivErr.code, "ERR_CRYPTO_INVALID_IV");
+      const keyErr = assertThrows(
+        () => create("des3-wrap", Buffer.alloc(16), noIv),
+        RangeError,
+        "Invalid key length",
+      ) as { code?: string };
+      assertEquals(keyErr.code, "ERR_CRYPTO_INVALID_KEYLEN");
+    }
+
+    // An empty update gives no output.
+    const empty = crypto.createCipheriv("des3-wrap", key, noIv);
+    assertEquals(empty.update(Buffer.alloc(0)).length, 0);
+    assertEquals(empty.final().length, 0);
+
+    // A bad input length or a failed integrity check throws the
+    // EVP_CipherUpdate error.
+    const tampered = Buffer.from(wrapped[0], "hex");
+    tampered[5] ^= 1;
+    for (
+      const [create, input] of [
+        [crypto.createCipheriv, Buffer.alloc(5)],
+        [crypto.createCipheriv, Buffer.alloc(12)],
+        [crypto.createDecipheriv, Buffer.alloc(16)],
+        [crypto.createDecipheriv, Buffer.alloc(28)],
+        [crypto.createDecipheriv, tampered],
+      ] as const
+    ) {
+      const c = create("des3-wrap", key, noIv);
+      assertThrows(
+        () => c.update(input),
+        Error,
+        "Trying to add data in unsupported state",
+      );
+    }
+
+    assert(crypto.getCiphers().includes("des3-wrap"));
+    const info: crypto.CipherInfo = {
+      name: "id-smime-alg-cms3deswrap",
+      nid: 246,
+      blockSize: 8,
+      keyLength: 24,
+      mode: "wrap",
+    };
+    assertEquals(crypto.getCipherInfo("des3-wrap"), info);
+    assertEquals(crypto.getCipherInfo(246), info);
+    assertEquals(crypto.getCipherInfo("des3-wrap", { ivLength: 0 }), info);
+    assertEquals(crypto.getCipherInfo("des3-wrap", { ivLength: 8 }), undefined);
+    // Node.js omits `ivLength` for every cipher that has no IV.
+    assertEquals("ivLength" in crypto.getCipherInfo("aes-128-ecb")!, false);
+  },
+});
+
+// Node.js 24 and later have no password-based cipher API (nodejs/node#50973,
+// nodejs/node#57266). The Node.js 20 and 22 lanes select it by policy.
+Deno.test({
+  name: "password-based cipher API is absent on the default lane",
+  fn() {
+    const exports = crypto as unknown as Record<string, unknown>;
+    assertEquals(typeof exports.createCipher, "undefined");
+    assertEquals(typeof exports.createDecipher, "undefined");
+    assert(!("createCipher" in crypto));
+    assert(!("createDecipher" in crypto));
+    assert(!("Cipher" in crypto));
+    assert(!("Decipher" in crypto));
+  },
+});
+
+// Codes from Node.js 20, 22, 24 and 26, which agree.
+Deno.test({
+  name: "cipheriv and decipheriv init errors carry the Node.js codes",
+  fn() {
+    const zeroTagLength = { authTagLength: 0 };
+    const cases: [() => unknown, ErrorConstructor, string, string][] = [
+      [
+        () => crypto.createCipheriv("aes-128-cbc", zeros(15), zeros(16)),
+        RangeError,
+        "ERR_CRYPTO_INVALID_KEYLEN",
+        "Invalid key length",
+      ],
+      [
+        () => crypto.createCipheriv("aes-128-cbc", zeros(16), zeros(15)),
+        TypeError,
+        "ERR_CRYPTO_INVALID_IV",
+        "Invalid initialization vector",
+      ],
+      [
+        () =>
+          crypto.createCipheriv(
+            "chacha20-poly1305",
+            zeros(32),
+            zeros(12),
+            zeroTagLength,
+          ),
+        TypeError,
+        "ERR_CRYPTO_INVALID_AUTH_TAG",
+        "Invalid authentication tag length: 0",
+      ],
+      [
+        () =>
+          crypto.createCipheriv("aes-128-gcm", zeros(16), zeros(12), {
+            authTagLength: 3,
+          }),
+        TypeError,
+        "ERR_CRYPTO_INVALID_AUTH_TAG",
+        "Invalid authentication tag length: 3",
+      ],
+      [
+        () => crypto.createDecipheriv("aes-128-cbc", zeros(15), zeros(16)),
+        RangeError,
+        "ERR_CRYPTO_INVALID_KEYLEN",
+        "Invalid key length",
+      ],
+      [
+        () => crypto.createDecipheriv("aes-128-gcm", zeros(16), zeros(0)),
+        TypeError,
+        "ERR_CRYPTO_INVALID_IV",
+        "Invalid initialization vector",
+      ],
+    ];
+    for (const [create, errorClass, code, message] of cases) {
+      const error = assertThrows(create, errorClass, message) as Error & {
+        code?: string;
+      };
+      assertEquals(error.code, code);
+    }
   },
 });

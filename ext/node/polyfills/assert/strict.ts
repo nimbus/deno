@@ -2,6 +2,7 @@
 import { core } from "ext:core/mod.js";
 const {
   AssertionError,
+  bindVersionedExports,
   deepEqual,
   deepStrictEqual,
   doesNotMatch,
@@ -16,12 +17,21 @@ const {
   notEqual,
   notStrictEqual,
   ok,
-  partialDeepStrictEqual,
   rejects,
   strict,
   strictEqual,
   throws,
 } = core.loadExtScript("ext:deno_node/assert.ts");
+
+// The embedder can change the target after a startup snapshot.
+export let Assert;
+export let CallTracker;
+export let partialDeepStrictEqual;
+bindVersionedExports((exports) => {
+  Assert = exports.Assert;
+  CallTracker = exports.CallTracker;
+  partialDeepStrictEqual = exports.partialDeepStrictEqual;
+});
 
 export {
   AssertionError,
@@ -39,7 +49,6 @@ export {
   notEqual,
   notStrictEqual,
   ok,
-  partialDeepStrictEqual,
   rejects,
   strict,
   strictEqual,

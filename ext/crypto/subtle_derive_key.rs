@@ -83,6 +83,10 @@ pub fn check_base_key(
   params: &SubtleDeriveBitsParams,
   base_key: &SubtleKey,
 ) -> Result<(), CryptoError> {
+  // `normalizeAlgorithm` runs before the key checks.
+  if let Some(error) = params.normalization_error() {
+    return Err(error);
+  }
   if params.canonical_name() != base_key.algorithm_name {
     return Err(CryptoError::Other(JsErrorBox::new(
       "DOMExceptionInvalidAccessError",

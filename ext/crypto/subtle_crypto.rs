@@ -227,6 +227,10 @@ impl SubtleCrypto {
     #[webidl] base_key: SubtleKey,
     #[webidl(options(enforce_range = true))] length: Option<u32>,
   ) -> Result<Vec<u8>, CryptoError> {
+    // `normalizeAlgorithm` runs before the key usage check.
+    if let Some(error) = algorithm.normalization_error() {
+      return Err(error);
+    }
     if !base_key.has_usage("deriveBits") {
       return Err(CryptoError::Other(deno_error::JsErrorBox::new(
         "DOMExceptionInvalidAccessError",

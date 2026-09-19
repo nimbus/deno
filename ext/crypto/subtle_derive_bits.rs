@@ -66,6 +66,13 @@ pub enum SubtleDeriveBitsParams {
     public: Box<SubtleKey>,
   },
   Unknown(String),
+  /// A dictionary member failed its Node.js validator during
+  /// `normalizeAlgorithm`. The operation rejects with this
+  /// `OperationError` message.
+  Invalid {
+    name: &'static str,
+    message: String,
+  },
 }
 
 impl SubtleDeriveBitsParams {
@@ -78,6 +85,19 @@ impl SubtleDeriveBitsParams {
       Self::X25519 { .. } => "X25519",
       Self::X448 { .. } => "X448",
       Self::Unknown(n) => n,
+      Self::Invalid { name, .. } => name,
+    }
+  }
+  /// The error that `normalizeAlgorithm` raises for these parameters.
+  /// Callers report it before the key usage and algorithm checks, as
+  /// Node.js does.
+  pub fn normalization_error(&self) -> Option<CryptoError> {
+    match self {
+      Self::Unknown(name) => Some(not_supported(format!(
+        "Algorithm '{name}' is not supported"
+      ))),
+      Self::Invalid { message, .. } => Some(op_error(message.clone())),
+      _ => None,
     }
   }
 }
@@ -158,47 +178,7 @@ impl<'a> WebIdlConverter<'a> for SubtleDeriveBitsParams {
         })
       }
       "Argon2i" | "Argon2d" | "Argon2id" => {
-        let memory =
-          read_required_u32(scope, obj, "memory", prefix.clone(), &context)?;
-        let passes =
-          read_required_u32(scope, obj, "passes", prefix.clone(), &context)?;
-        let parallelism = read_required_u32(
-          scope,
-          obj,
-          "parallelism",
-          prefix.clone(),
-          &context,
-        )?;
-        let nonce = read_required_buffer_source(
-          scope,
-          obj,
-          "nonce",
-          prefix.clone(),
-          &context,
-        )?;
-        let secret_value = read_optional_buffer_source(
-          scope,
-          obj,
-          "secretValue",
-          prefix.clone(),
-          &context,
-        )?;
-        let associated_data = read_optional_buffer_source(
-          scope,
-          obj,
-          "associatedData",
-          prefix.clone(),
-          &context,
-        )?;
-        Ok(Self::Argon2 {
-          name: canonical,
-          memory,
-          passes,
-          parallelism,
-          nonce,
-          secret_value,
-          associated_data,
-        })
+        read_argon2_params(scope, obj, canonical, prefix, &context)
       }
       "ECDH" => {
         let public = read_required_public_key(
@@ -239,6 +219,122 @@ impl<'a> WebIdlConverter<'a> for SubtleDeriveBitsParams {
       _ => unreachable!(),
     }
   }
+}
+
+/// Converts an `Argon2Params` dictionary as Node.js does. Node.js converts
+/// the members in lexicographic order and runs each member validator after
+/// its conversion. The first validator failure stops the conversion and
+/// becomes the `OperationError` of the operation. A conversion failure stays
+/// a `TypeError`.
+fn read_argon2_params<'a, 'b>(
+  scope: &mut v8::PinScope<'a, '_>,
+  obj: v8::Local<'a, v8::Object>,
+  name: &'static str,
+  prefix: Cow<'static, str>,
+  context: &ContextFn<'b>,
+) -> Result<SubtleDeriveBitsParams, WebIdlError> {
+  let invalid =
+    |message: String| SubtleDeriveBitsParams::Invalid { name, message };
+
+  let associated_data = read_optional_buffer_source(
+    scope,
+    obj,
+    "associatedData",
+    prefix.clone(),
+    context,
+  )?;
+
+  let memory =
+    read_required_u32(scope, obj, "memory", prefix.clone(), context)?;
+  // The Node.js validator reads the unconverted `parallelism` member.
+  let parallelism_key = v8_str(scope, "parallelism");
+  let raw_parallelism = obj
+    .get(scope, parallelism_key.into())
+    .and_then(|value| value.number_value(scope))
+    .unwrap_or(f64::NAN);
+  if f64::from(memory) < 8.0 * raw_parallelism {
+    return Ok(invalid(
+      "memory must be at least 8 times the degree of parallelism".to_string(),
+    ));
+  }
+
+  let nonce =
+    read_required_buffer_source(scope, obj, "nonce", prefix.clone(), context)?;
+  if nonce.len() < 8 {
+    return Ok(invalid("nonce must be at least 8 bytes".to_string()));
+  }
+
+  let parallelism =
+    read_required_u32(scope, obj, "parallelism", prefix.clone(), context)?;
+  if parallelism == 0 || parallelism > MAX_ARGON2_PARALLELISM {
+    return Ok(invalid(format!(
+      "parallelism must be > 0 and <= {MAX_ARGON2_PARALLELISM}"
+    )));
+  }
+
+  let passes =
+    read_required_u32(scope, obj, "passes", prefix.clone(), context)?;
+  if passes == 0 {
+    return Ok(invalid("passes must be > 0".to_string()));
+  }
+
+  let secret_value = read_optional_buffer_source(
+    scope,
+    obj,
+    "secretValue",
+    prefix.clone(),
+    context,
+  )?;
+
+  if let Some(version) =
+    read_optional_octet(scope, obj, "version", prefix, context)?
+    && version != ARGON2_VERSION_0X13
+  {
+    return Ok(invalid(format!("{version} is not a valid Argon2 version")));
+  }
+
+  Ok(SubtleDeriveBitsParams::Argon2 {
+    name,
+    memory,
+    passes,
+    parallelism,
+    nonce,
+    secret_value,
+    associated_data,
+  })
+}
+
+/// The largest Argon2 degree of parallelism (RFC 9106, 2^24 - 1).
+const MAX_ARGON2_PARALLELISM: u32 = (1 << 24) - 1;
+
+/// The only Argon2 version that Web Crypto accepts (RFC 9106).
+const ARGON2_VERSION_0X13: u8 = 0x13;
+
+/// Reads an optional `[EnforceRange] octet` member. Only `undefined` means
+/// absent: WebIDL converts `null` to 0.
+fn read_optional_octet<'a, 'b>(
+  scope: &mut v8::PinScope<'a, '_>,
+  obj: v8::Local<'a, v8::Object>,
+  field: &'static str,
+  prefix: Cow<'static, str>,
+  context: &ContextFn<'b>,
+) -> Result<Option<u8>, WebIdlError> {
+  let key = v8_str(scope, field);
+  let val = obj
+    .get(scope, key.into())
+    .unwrap_or_else(|| v8::undefined(scope).into());
+  if val.is_undefined() {
+    return Ok(None);
+  }
+  let n = val.number_value(scope).unwrap_or(f64::NAN);
+  if !n.is_finite() || n.trunc() < 0.0 || n.trunc() > f64::from(u8::MAX) {
+    return Err(WebIdlError::other(
+      prefix,
+      context.borrowed(),
+      JsErrorBox::type_error(format!("'{field}' is outside the octet range")),
+    ));
+  }
+  Ok(Some(n.trunc() as u8))
 }
 
 fn canonical_derive_name(name: &str) -> Option<&'static str> {
@@ -423,10 +519,8 @@ pub fn run(
   // `NotSupportedError` BEFORE the algorithm/key match. Match the spec order
   // so a stray Kelvin-sign `"H<U+212A>DF"` (or any other unregistered name)
   // produces `NotSupportedError`, not `InvalidAccessError`.
-  if let SubtleDeriveBitsParams::Unknown(name) = &params {
-    return Err(not_supported(format!(
-      "Algorithm '{name}' is not supported"
-    )));
+  if let Some(error) = params.normalization_error() {
+    return Err(error);
   }
   // Spec step 7 (algorithm name match on baseKey). The `deriveBits`
   // usage check is the caller's responsibility -- the cppgc method
@@ -514,10 +608,14 @@ pub fn run(
       secret_value,
       associated_data,
     } => {
-      let length =
-        length_u32.ok_or_else(|| op_error("Invalid length".to_string()))?;
-      if length == 0 || length % 8 != 0 {
-        return Err(op_error("Invalid length".to_string()));
+      // Node.js `validateArgon2DeriveBitsLength`.
+      let length = length_u32
+        .ok_or_else(|| op_error("length cannot be null".to_string()))?;
+      if length % 8 != 0 {
+        return Err(op_error("length must be a multiple of 8".to_string()));
+      }
+      if length < 32 {
+        return Err(op_error("length must be >= 32".to_string()));
       }
       let mut builder = ParamsBuilder::new();
       builder
@@ -632,7 +730,8 @@ pub fn run(
     }
     // `Unknown` is rejected with `NotSupportedError` above before we even
     // check the key-algorithm match (matches the spec normalize step).
-    SubtleDeriveBitsParams::Unknown(_) => unreachable!(),
+    SubtleDeriveBitsParams::Unknown(_)
+    | SubtleDeriveBitsParams::Invalid { .. } => unreachable!(),
   }
 }
 

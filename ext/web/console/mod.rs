@@ -26,6 +26,8 @@ use deno_core::v8;
 use inspect::*;
 pub use preview::op_preview_entries;
 
+use crate::ProxyInspectPolicy;
+
 const DEFAULT_INDENT: &str = "  "; // Default indent string
 // Upper bound on repeated-indent / pre-allocation counts derived from
 // caller-controlled values, to avoid usize-saturation panics and multi-GB
@@ -197,13 +199,24 @@ fn detect_stylize<'s>(
   }
 }
 
-fn default_ctx<'s>() -> Ctx<'s> {
+fn annotates_proxy_target(state: &OpState) -> bool {
+  matches!(
+    state.try_borrow::<ProxyInspectPolicy>(),
+    Some(ProxyInspectPolicy::AnnotateTarget)
+  )
+}
+
+fn default_ctx<'s>(scope: &v8::Isolate) -> Ctx<'s> {
+  let annotate_proxy_target = deno_core::JsRuntime::op_state_from(scope)
+    .try_borrow()
+    .is_ok_and(|state| annotates_proxy_target(&state));
   Ctx {
     show_hidden: false,
     depth: Some(4.0),
     colors: false,
     custom_inspect: true,
     show_proxy: false,
+    annotate_proxy_target,
     max_array_length: 100.0,
     max_string_length: 10_000.0,
     break_length: 80.0,
@@ -846,7 +859,7 @@ pub fn op_console_inspect_args<'s>(
     }
   };
   let intr = Intrinsics::new(&cached);
-  let mut ctx = default_ctx();
+  let mut ctx = default_ctx(scope);
   let options_obj = v8::Local::<v8::Object>::try_from(options).ok();
   if let Some(options_obj) = options_obj {
     apply_options(scope, &intr, &mut ctx, options_obj);
@@ -880,7 +893,7 @@ pub fn op_console_inspect<'s>(
     }
   };
   let intr = Intrinsics::new(&cached);
-  let mut ctx = default_ctx();
+  let mut ctx = default_ctx(scope);
   let options_obj = v8::Local::<v8::Object>::try_from(options).ok();
   if let Some(options_obj) = options_obj {
     apply_options(scope, &intr, &mut ctx, options_obj);
@@ -914,7 +927,7 @@ pub fn op_console_format_value<'s>(
     }
   };
   let intr = Intrinsics::new(&cached);
-  let mut ctx = default_ctx();
+  let mut ctx = default_ctx(scope);
   if let Ok(ctx_o) = v8::Local::<v8::Object>::try_from(ctx_obj) {
     apply_options(scope, &intr, &mut ctx, ctx_o);
   }
@@ -1067,7 +1080,7 @@ impl Console {
     stderr: bool,
   ) -> Ctx<'s> {
     let no_color = self.no_color(scope, stderr);
-    let mut ctx = default_ctx();
+    let mut ctx = default_ctx(scope);
     ctx.colors = !no_color;
     ctx.indent_level = self.indent_level.get();
     if ctx.colors {
@@ -1459,7 +1472,7 @@ impl Console {
 
     // stringifyValue: inspectValueWithQuotes with depth 1, compact, no break.
     let no_color = self.no_color(scope, false);
-    let mut sctx = default_ctx();
+    let mut sctx = default_ctx(scope);
     sctx.colors = !no_color;
     if sctx.colors {
       sctx.stylize = StylizeKind::Theme {
@@ -1812,4 +1825,21 @@ fn simple_error<'s>(scope: &mut v8::PinScope<'s, '_>, msg: &str) -> JsErr {
   let msg = v8_str(scope, msg);
   let exc = v8::Exception::type_error(scope, msg);
   JsErr(v8::Global::new(scope, exc))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn proxy_inspect_policy_defaults_to_target_only() {
+    let mut state = OpState::new(None);
+    assert!(!annotates_proxy_target(&state));
+
+    state.put(ProxyInspectPolicy::AnnotateTarget);
+    assert!(annotates_proxy_target(&state));
+
+    state.put(ProxyInspectPolicy::TargetOnly);
+    assert!(!annotates_proxy_target(&state));
+  }
 }

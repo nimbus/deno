@@ -26,6 +26,7 @@ const {
   StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
   SymbolSpecies,
+  TypedArrayPrototypeSubarray,
   TypeError,
   TypeErrorPrototype,
   TypedArrayPrototypeAt,
@@ -35,8 +36,15 @@ const {
   Uint8Array,
 } = primordials;
 const {
+  op_node_aead_mode_create,
+  op_node_aead_mode_final,
+  op_node_aead_mode_set_aad,
+  op_node_aead_mode_set_auth_tag,
+  op_node_aead_mode_update,
   op_node_aes_unwrap_key,
+  op_node_aes_wrap_check_params,
   op_node_aes_wrap_key,
+  op_node_cipher_auth_tag_requires_computed,
   op_node_cipheriv_encrypt,
   op_node_cipheriv_final,
   op_node_cipheriv_set_aad,
@@ -48,10 +56,14 @@ const {
   op_node_decipheriv_decrypt,
   op_node_decipheriv_final,
   op_node_decipheriv_set_aad,
+  op_node_des3_unwrap_key,
+  op_node_des3_wrap_check_params,
+  op_node_des3_wrap_key,
   op_node_export_private_key_pem,
   op_node_export_secret_key,
   op_node_gcm_implicit_short_tag_allowed,
   op_node_gcm_implicit_short_tag_warns_unconditionally,
+  op_node_password_cipher_key_iv,
   op_node_private_decrypt,
   op_node_private_encrypt,
   op_node_public_decrypt,
@@ -78,8 +90,11 @@ const { isKeyObject } = core.loadExtScript(
 const { kHandle } = core.loadExtScript(
   "ext:deno_node/internal/crypto/constants.ts",
 );
-const { getDefaultEncoding } = core.loadExtScript(
+const { getCipherInfo, getDefaultEncoding } = core.loadExtScript(
   "ext:deno_node/internal/crypto/util.ts",
+);
+const { validateString } = core.loadExtScript(
+  "ext:deno_node/internal/validators.mjs",
 );
 const {
   ERR_INVALID_ARG_TYPE,
@@ -152,6 +167,77 @@ function isAesWrap(cipher: string): boolean {
     cipher === "id-aes192-wrap-pad" || cipher === "id-aes256-wrap-pad";
 }
 
+// Triple-DES key wrap (RFC 3217). Node.js looks up cipher names without
+// regard to case (`EVP_get_cipherbyname`).
+function isDes3Wrap(cipher: string): boolean {
+  const name = StringPrototypeToLowerCase(cipher);
+  return name === "des3-wrap" || name === "id-smime-alg-cms3deswrap";
+}
+
+// Starts a key wrap cipher (AES or Triple-DES). A key wrap cipher wraps or
+// unwraps the input of each `update` call on its own.
+function initKeyWrap(self, cipher: string, key, iv) {
+  self._keyWrapAlgorithm = cipher;
+  self._keyWrapKey = toU8(key);
+  self._keyWrapIv = toU8(iv);
+  if (self._isDes3Wrap) {
+    op_node_des3_wrap_check_params(self._keyWrapKey, self._keyWrapIv);
+  } else {
+    op_node_aes_wrap_check_params(cipher, self._keyWrapKey, self._keyWrapIv);
+  }
+  self._context = 1; // non-zero sentinel; not used for wrap ops
+}
+
+function keyWrapUpdate(self, data: Buffer, wrap: boolean): Buffer {
+  try {
+    if (self._isDes3Wrap) {
+      return Buffer.from(
+        wrap
+          ? op_node_des3_wrap_key(self._keyWrapKey, data)
+          : op_node_des3_unwrap_key(self._keyWrapKey, data),
+      );
+    }
+    const op = wrap ? op_node_aes_wrap_key : op_node_aes_unwrap_key;
+    return Buffer.from(
+      op(self._keyWrapAlgorithm, self._keyWrapKey, self._keyWrapIv, data),
+    );
+  } catch {
+    // OpenSSL rejects a bad input length or a failed integrity check in
+    // EVP_CipherUpdate; Node.js reports both with this error.
+    throw updateStateError();
+  }
+}
+
+// The CCM and OCB ciphers. Node.js looks up cipher names without regard to
+// case (`EVP_get_cipherbyname`).
+const AEAD_MODE_CIPHERS = new SafeSet([
+  "aes-128-ccm",
+  "aes-192-ccm",
+  "aes-256-ccm",
+  "id-aes128-ccm",
+  "id-aes192-ccm",
+  "id-aes256-ccm",
+  "aes-128-ocb",
+  "aes-192-ocb",
+  "aes-256-ocb",
+]);
+
+function isAeadMode(cipher: unknown): boolean {
+  return typeof cipher === "string" &&
+    SetPrototypeHas(AEAD_MODE_CIPHERS, StringPrototypeToLowerCase(cipher));
+}
+
+// `CipherBase::Final` throws this when the native context is already
+// released. It has no operation name, unlike the JavaScript-layer errors.
+function finalInvalidStateError(): NodeError {
+  return new NodeError("ERR_CRYPTO_INVALID_STATE", "Invalid state");
+}
+
+// `CipherBase::Update` reports a released context with this message.
+function updateStateError(): Error {
+  return new Error("Trying to add data in unsupported state");
+}
+
 function isStringOrBuffer(
   val: unknown,
 ): val is string | Buffer | ArrayBuffer | ArrayBufferView {
@@ -197,10 +283,20 @@ function Cipheriv(
   if (!ObjectPrototypeIsPrototypeOf(Cipheriv.prototype, this)) {
     return new Cipheriv(cipher, key, iv, options);
   }
+  initCipher(this, cipher, key, iv, options);
+}
 
+// The shared body of the `Cipheriv` and password-based `Cipher` constructors.
+function initCipher(
+  self: any,
+  cipher: string,
+  key: any,
+  iv: any,
+  options?: any,
+) {
   const authTagLength = getUIntOption(options, "authTagLength");
 
-  FunctionPrototypeCall(getTransform(), this, {
+  FunctionPrototypeCall(getTransform(), self, {
     transform(chunk, encoding, cb) {
       // deno-lint-ignore deno-internal/prefer-primordials -- `this` is a Transform stream
       this.push(this.update(chunk, encoding));
@@ -214,18 +310,26 @@ function Cipheriv(
     ...options,
   });
 
-  this._blockSize = getBlockSize(cipher);
-  this._cache = new BlockModeCache(false, this._blockSize);
-  this._isAesWrap = isAesWrap(cipher);
+  self._blockSize = getBlockSize(cipher);
+  self._cache = new BlockModeCache(false, self._blockSize);
+  self._isDes3Wrap = isDes3Wrap(cipher);
+  self._isKeyWrap = self._isDes3Wrap || isAesWrap(cipher);
+  self._aeadMode = isAeadMode(cipher);
 
-  if (this._isAesWrap) {
-    this._aesWrapAlgorithm = cipher;
-    this._aesWrapKey = toU8(key);
-    this._aesWrapIv = toU8(iv);
-    this._context = 1; // non-zero sentinel; not used for wrap ops
+  if (self._aeadMode) {
+    self._context = op_node_aead_mode_create(
+      cipher,
+      toU8(key),
+      toU8(iv),
+      authTagLength,
+      true,
+    );
+    self._authTagLength = authTagLength;
+  } else if (self._isKeyWrap) {
+    initKeyWrap(self, cipher, key, iv);
   } else {
     try {
-      this._context = op_node_create_cipheriv(
+      self._context = op_node_create_cipheriv(
         cipher,
         toU8(key),
         toU8(iv),
@@ -242,20 +346,17 @@ function Cipheriv(
       }
       throw e;
     }
-    if (this._context == 0) {
+    if (self._context == 0) {
       throw new ERR_CRYPTO_UNKNOWN_CIPHER();
     }
   }
 
-  this._needsBlockCache = !this._isAesWrap &&
-    !(cipher == "aes-128-gcm" || cipher == "aes-256-gcm" ||
-      cipher == "aes-128-ctr" || cipher == "aes-192-ctr" ||
-      cipher == "aes-256-ctr" || cipher == "chacha20" ||
-      cipher == "chacha20-poly1305");
-  this._authTag = undefined;
-  this._autoPadding = true;
-  this._finalized = false;
-  this._decoder = undefined;
+  self._needsBlockCache = !self._isKeyWrap && !self._aeadMode &&
+    !isStreamCipher(cipher);
+  self._authTag = undefined;
+  self._autoPadding = true;
+  self._finalized = false;
+  self._decoder = undefined;
 }
 
 ObjectSetPrototypeOf(Cipheriv.prototype, getTransform().prototype);
@@ -265,14 +366,36 @@ Cipheriv.prototype.final = function (
   encoding: string = getDefaultEncoding(),
 ): Buffer | string {
   if (this._finalized) {
-    throw new ERR_CRYPTO_INVALID_STATE("final");
+    throw finalInvalidStateError();
+  }
+  // Node.js releases the native cipher context on every final() call, so the
+  // cipher is finalized even when final() throws.
+  this._finalized = true;
+
+  if (this._aeadMode) {
+    const tag = new FastBuffer(this._authTagLength);
+    let output;
+    try {
+      output = op_node_aead_mode_final(this._context, tag);
+    } catch (e) {
+      // Node.js 20 and 22 keep a zero-filled tag after a failed final.
+      // Node.js 24.2 and later keep no tag, so getAuthTag() throws.
+      if (!op_node_cipher_auth_tag_requires_computed()) {
+        this._authTag = tag;
+      }
+      throw e;
+    }
+    this._authTag = tag;
+    return finalOutput(
+      this,
+      encoding,
+      toFastBufferView(output),
+      _lazyInitCipherDecoder,
+    );
   }
 
-  _lazyInitCipherDecoder(this, encoding);
-
-  if (this._isAesWrap) {
-    this._finalized = true;
-    return encoding === "buffer" ? Buffer.from([]) : this._decoder!.end();
+  if (this._isKeyWrap) {
+    return finalOutput(this, encoding, Buffer.from([]), _lazyInitCipherDecoder);
   }
 
   const bs = this._blockSize;
@@ -284,8 +407,7 @@ Cipheriv.prototype.final = function (
   if (hasNoBufferedData && !shouldPadEmptyBlock) {
     const maybeTag = op_node_cipheriv_take(this._context);
     if (maybeTag) this._authTag = Buffer.from(maybeTag);
-    this._finalized = true;
-    return encoding === "buffer" ? Buffer.from([]) : this._decoder!.end();
+    return finalOutput(this, encoding, Buffer.from([]), _lazyInitCipherDecoder);
   }
 
   if (
@@ -305,16 +427,10 @@ Cipheriv.prototype.final = function (
   );
   if (maybeTag) {
     this._authTag = Buffer.from(maybeTag);
-    this._finalized = true;
-    return encoding === "buffer" ? Buffer.from([]) : this._decoder!.end();
+    return finalOutput(this, encoding, Buffer.from([]), _lazyInitCipherDecoder);
   }
 
-  this._finalized = true;
-  if (encoding !== "buffer") {
-    return this._decoder!.end(buf);
-  }
-
-  return buf;
+  return finalOutput(this, encoding, buf, _lazyInitCipherDecoder);
 };
 
 Cipheriv.prototype.getAuthTag = function (): Buffer {
@@ -326,10 +442,14 @@ Cipheriv.prototype.getAuthTag = function (): Buffer {
 
 Cipheriv.prototype.setAAD = function (
   buffer: ArrayBufferView,
-  _options?: {
-    plaintextLength: number;
+  options?: {
+    plaintextLength?: number;
+    encoding?: string;
   },
 ) {
+  if (this._aeadMode) {
+    return aeadModeSetAAD(this, buffer, options);
+  }
   if (this._finalized) {
     throw new ERR_CRYPTO_INVALID_STATE("setAAD");
   }
@@ -338,6 +458,9 @@ Cipheriv.prototype.setAAD = function (
 };
 
 Cipheriv.prototype.setAutoPadding = function (autoPadding?: boolean) {
+  if (this._finalized) {
+    throw new ERR_CRYPTO_INVALID_STATE("setAutoPadding");
+  }
   this._autoPadding = !!autoPadding;
   return this;
 };
@@ -347,11 +470,11 @@ Cipheriv.prototype.update = function (
   inputEncoding?: any,
   outputEncoding: any = getDefaultEncoding(),
 ): Buffer | string {
-  if (this._finalized) {
-    throw new ERR_CRYPTO_INVALID_STATE("update");
-  }
-
   validateCipherUpdateData(data);
+
+  if (this._finalized) {
+    throw updateStateError();
+  }
 
   let buf = data;
   if (typeof data === "string") {
@@ -368,15 +491,12 @@ Cipheriv.prototype.update = function (
 
   _lazyInitCipherDecoder(this, outputEncoding);
 
-  if (this._isAesWrap) {
-    const output = Buffer.from(
-      op_node_aes_wrap_key(
-        this._aesWrapAlgorithm,
-        this._aesWrapKey,
-        this._aesWrapIv,
-        buf,
-      ),
-    );
+  if (this._aeadMode) {
+    return aeadModeUpdate(this, buf, outputEncoding);
+  }
+
+  if (this._isKeyWrap) {
+    const output = keyWrapUpdate(this, buf, true);
     if (outputEncoding !== "buffer") {
       return this._decoder!.write(output);
     }
@@ -415,6 +535,54 @@ Cipheriv.prototype.update = function (
 
   return output;
 };
+
+// Node.js finalizes the native cipher before it selects the output decoder
+// (lib/internal/crypto/cipher.js `final`), so a final-block or authentication
+// error wins over an encoding change.
+function finalOutput(
+  self: any,
+  encoding: string,
+  output: Buffer,
+  initDecoder: (self: any, encoding: string) => void,
+): Buffer | string {
+  if (encoding === "buffer") {
+    return output;
+  }
+  initDecoder(self, encoding);
+  return self._decoder!.end(output);
+}
+
+// CCM and OCB (`CipherBase` with an OpenSSL AEAD mode). The native
+// resource holds the Node.js state machine; see ext/node_crypto/aead_mode.
+function aeadModeUpdate(
+  self: any,
+  input: Buffer,
+  outputEncoding: string,
+): Buffer | string {
+  const output = toFastBufferView(
+    op_node_aead_mode_update(self._context, input),
+  );
+  if (outputEncoding !== "buffer") {
+    return self._decoder!.write(output);
+  }
+  return output;
+}
+
+function aeadModeSetAAD(
+  self: any,
+  buffer: ArrayBufferView | string,
+  options?: { plaintextLength?: number; encoding?: string },
+) {
+  const plaintextLength = getUIntOption(options, "plaintextLength");
+  const aad = getArrayBufferOrView(buffer, "aadbuf", options?.encoding);
+  if (
+    self._finalized ||
+    !op_node_aead_mode_set_aad(self._context, aad, plaintextLength)
+  ) {
+    throw new ERR_CRYPTO_INVALID_STATE("setAAD");
+  }
+  return self;
+}
 
 function _lazyInitCipherDecoder(self: any, encoding: string) {
   if (encoding === "buffer") {
@@ -481,6 +649,14 @@ class BlockModeCache {
   }
 }
 
+// Ciphers whose update output has the same length as its input.
+function isStreamCipher(cipher: string): boolean {
+  return cipher == "aes-128-gcm" || cipher == "aes-192-gcm" ||
+    cipher == "aes-256-gcm" || cipher == "aes-128-ctr" ||
+    cipher == "aes-192-ctr" || cipher == "aes-256-ctr" ||
+    cipher == "chacha20" || cipher == "chacha20-poly1305";
+}
+
 function getBlockSize(cipher: string): number {
   if (StringPrototypeStartsWith(cipher, "des")) {
     return 8;
@@ -508,10 +684,21 @@ function Decipheriv(
   if (!ObjectPrototypeIsPrototypeOf(Decipheriv.prototype, this)) {
     return new Decipheriv(cipher, key, iv, options);
   }
+  initDecipher(this, cipher, key, iv, options);
+}
 
+// The shared body of the `Decipheriv` and password-based `Decipher`
+// constructors.
+function initDecipher(
+  self: any,
+  cipher: string,
+  key: any,
+  iv: any,
+  options?: any,
+) {
   const authTagLength = getUIntOption(options, "authTagLength");
 
-  FunctionPrototypeCall(getTransform(), this, {
+  FunctionPrototypeCall(getTransform(), self, {
     transform(chunk, encoding, cb) {
       // deno-lint-ignore deno-internal/prefer-primordials -- `this` is a Transform stream
       this.push(this.update(chunk, encoding));
@@ -525,19 +712,26 @@ function Decipheriv(
     ...options,
   });
 
-  this._autoPadding = true;
-  this._blockSize = getBlockSize(cipher);
-  this._cache = new BlockModeCache(this._autoPadding, this._blockSize);
-  this._isAesWrap = isAesWrap(cipher);
+  self._autoPadding = true;
+  self._blockSize = getBlockSize(cipher);
+  self._cache = new BlockModeCache(self._autoPadding, self._blockSize);
+  self._isDes3Wrap = isDes3Wrap(cipher);
+  self._isKeyWrap = self._isDes3Wrap || isAesWrap(cipher);
+  self._aeadMode = isAeadMode(cipher);
 
-  if (this._isAesWrap) {
-    this._aesWrapAlgorithm = cipher;
-    this._aesWrapKey = toU8(key);
-    this._aesWrapIv = toU8(iv);
-    this._context = 1; // non-zero sentinel; not used for wrap ops
+  if (self._aeadMode) {
+    self._context = op_node_aead_mode_create(
+      cipher,
+      toU8(key),
+      toU8(iv),
+      authTagLength,
+      false,
+    );
+  } else if (self._isKeyWrap) {
+    initKeyWrap(self, cipher, key, iv);
   } else {
     try {
-      this._context = op_node_create_decipheriv(
+      self._context = op_node_create_decipheriv(
         cipher,
         toU8(key),
         toU8(iv),
@@ -554,22 +748,19 @@ function Decipheriv(
       }
       throw e;
     }
-    if (this._context == 0) {
+    if (self._context == 0) {
       throw new ERR_CRYPTO_UNKNOWN_CIPHER();
     }
   }
 
-  this._needsBlockCache = !this._isAesWrap &&
-    !(cipher == "aes-128-gcm" || cipher == "aes-256-gcm" ||
-      cipher == "aes-128-ctr" || cipher == "aes-192-ctr" ||
-      cipher == "aes-256-ctr" || cipher == "chacha20" ||
-      cipher == "chacha20-poly1305");
-  this._isGcmMode = cipher == "aes-128-gcm" || cipher == "aes-192-gcm" ||
+  self._needsBlockCache = !self._isKeyWrap && !self._aeadMode &&
+    !isStreamCipher(cipher);
+  self._isGcmMode = cipher == "aes-128-gcm" || cipher == "aes-192-gcm" ||
     cipher == "aes-256-gcm";
-  this._authTagLength = authTagLength;
-  this._authTag = undefined;
-  this._finalized = false;
-  this._decoder = undefined;
+  self._authTagLength = authTagLength;
+  self._authTag = undefined;
+  self._finalized = false;
+  self._decoder = undefined;
 }
 
 ObjectSetPrototypeOf(Decipheriv.prototype, getTransform().prototype);
@@ -579,14 +770,28 @@ Decipheriv.prototype.final = function (
   encoding: string = getDefaultEncoding(),
 ): Buffer | string {
   if (this._finalized) {
-    throw new ERR_CRYPTO_INVALID_STATE("final");
+    throw finalInvalidStateError();
+  }
+  // Node.js releases the native cipher context on every final() call, so the
+  // cipher is finalized even when final() throws.
+  this._finalized = true;
+
+  if (this._aeadMode) {
+    return finalOutput(
+      this,
+      encoding,
+      toFastBufferView(op_node_aead_mode_final(this._context, NO_TAG)),
+      _lazyInitDecipherDecoder,
+    );
   }
 
-  _lazyInitDecipherDecoder(this, encoding);
-
-  if (this._isAesWrap) {
-    this._finalized = true;
-    return encoding === "buffer" ? Buffer.from([]) : this._decoder!.end();
+  if (this._isKeyWrap) {
+    return finalOutput(
+      this,
+      encoding,
+      Buffer.from([]),
+      _lazyInitDecipherDecoder,
+    );
   }
 
   const bs = this._blockSize;
@@ -603,8 +808,12 @@ Decipheriv.prototype.final = function (
     !this._needsBlockCache ||
     TypedArrayPrototypeGetByteLength(this._cache.cache) === 0
   ) {
-    this._finalized = true;
-    return encoding === "buffer" ? Buffer.from([]) : this._decoder!.end();
+    return finalOutput(
+      this,
+      encoding,
+      Buffer.from([]),
+      _lazyInitDecipherDecoder,
+    );
   }
   if (TypedArrayPrototypeGetByteLength(this._cache.cache) != bs) {
     throw opensslError(
@@ -623,20 +832,19 @@ Decipheriv.prototype.final = function (
     }
     buf = buf.subarray(0, bs - padLen); // Padded in Pkcs7 mode
   }
-  this._finalized = true;
-  if (encoding !== "buffer") {
-    return this._decoder!.end(buf);
-  }
-
-  return buf;
+  return finalOutput(this, encoding, buf, _lazyInitDecipherDecoder);
 };
 
 Decipheriv.prototype.setAAD = function (
   buffer: ArrayBufferView,
-  _options?: {
-    plaintextLength: number;
+  options?: {
+    plaintextLength?: number;
+    encoding?: string;
   },
 ) {
+  if (this._aeadMode) {
+    return aeadModeSetAAD(this, buffer, options);
+  }
   if (this._finalized) {
     throw new ERR_CRYPTO_INVALID_STATE("setAAD");
   }
@@ -648,9 +856,18 @@ let gcmShortTagDeprecationEmitted = false;
 
 Decipheriv.prototype.setAuthTag = function (
   buffer: any,
-  _encoding?: string,
+  encoding?: string,
 ) {
-  if (this._authTag) {
+  if (this._aeadMode) {
+    const tag = getArrayBufferOrView(buffer, "buffer", encoding);
+    if (
+      this._finalized || !op_node_aead_mode_set_auth_tag(this._context, tag)
+    ) {
+      throw new ERR_CRYPTO_INVALID_STATE("setAuthTag");
+    }
+    return this;
+  }
+  if (this._finalized || this._authTag) {
     throw new ERR_CRYPTO_INVALID_STATE("setAuthTag");
   }
   // deno-lint-ignore deno-internal/prefer-primordials -- `buffer` may be Buffer/TypedArray/DataView
@@ -686,6 +903,9 @@ Decipheriv.prototype.setAuthTag = function (
 };
 
 Decipheriv.prototype.setAutoPadding = function (autoPadding?: boolean) {
+  if (this._finalized) {
+    throw new ERR_CRYPTO_INVALID_STATE("setAutoPadding");
+  }
   this._autoPadding = Boolean(autoPadding);
   this._cache.lastChunkIsNonZero = this._autoPadding;
   return this;
@@ -696,11 +916,11 @@ Decipheriv.prototype.update = function (
   inputEncoding?: any,
   outputEncoding: any = getDefaultEncoding(),
 ): Buffer | string {
-  if (this._finalized) {
-    throw new ERR_CRYPTO_INVALID_STATE("update");
-  }
-
   validateCipherUpdateData(data);
+
+  if (this._finalized) {
+    throw updateStateError();
+  }
 
   let buf = data;
   if (typeof data === "string") {
@@ -717,15 +937,12 @@ Decipheriv.prototype.update = function (
 
   _lazyInitDecipherDecoder(this, outputEncoding);
 
-  if (this._isAesWrap) {
-    const output = Buffer.from(
-      op_node_aes_unwrap_key(
-        this._aesWrapAlgorithm,
-        this._aesWrapKey,
-        this._aesWrapIv,
-        buf,
-      ),
-    );
+  if (this._aeadMode) {
+    return aeadModeUpdate(this, buf, outputEncoding);
+  }
+
+  if (this._isKeyWrap) {
+    const output = keyWrapUpdate(this, buf, false);
     if (outputEncoding !== "buffer") {
       return this._decoder!.write(output);
     }
@@ -975,9 +1192,90 @@ function publicDecrypt(
   return Buffer.from(op_node_public_decrypt(data, buffer, padding));
 }
 
+// The password-based `Cipher` and `Decipher` of Node.js 20 (DEP0106). Node.js
+// 22 removed them; `crypto.ts` exposes them only on lanes that keep the API.
+//
+// Node.js 20 `createCipher()` validates the cipher name, the password and the
+// `authTagLength` option in that order. `CipherBase::Init` then derives the key
+// and IV with `EVP_BytesToKey(cipher, EVP_md5(), nullptr, password, 1)`, and
+// warns before `CommonInit` when a Cipher uses a counter mode.
+function deriveLegacyKeyAndIv(
+  cipher: unknown,
+  password: unknown,
+  options: unknown,
+  isEncrypt: boolean,
+): { key: Uint8Array; iv: Uint8Array } {
+  validateString(cipher, "cipher");
+  const passwordBytes = getArrayBufferOrView(password, "password");
+  getUIntOption(options, "authTagLength");
+
+  const info = getCipherInfo(cipher);
+  if (info === undefined) {
+    throw new ERR_CRYPTO_UNKNOWN_CIPHER();
+  }
+  const ivLength = info.ivLength ?? 0;
+  const keyAndIv = op_node_password_cipher_key_iv(
+    toFastBufferView(passwordBytes),
+    info.keyLength,
+    ivLength,
+  );
+
+  if (
+    isEncrypt &&
+    (info.mode === "ctr" || info.mode === "gcm" || info.mode === "ccm")
+  ) {
+    lazyProcess().default.emitWarning(
+      `Use Cipheriv for counter mode of ${cipher}`,
+    );
+  }
+
+  return {
+    key: TypedArrayPrototypeSubarray(keyAndIv, 0, info.keyLength),
+    iv: TypedArrayPrototypeSubarray(
+      keyAndIv,
+      info.keyLength,
+      info.keyLength + ivLength,
+    ),
+  };
+}
+
+function Cipher(cipher: string, password: any, options?: any) {
+  if (!ObjectPrototypeIsPrototypeOf(Cipher.prototype, this)) {
+    return new Cipher(cipher, password, options);
+  }
+  const { key, iv } = deriveLegacyKeyAndIv(cipher, password, options, true);
+  initCipher(this, cipher, key, iv, options);
+}
+
+ObjectSetPrototypeOf(Cipher.prototype, getTransform().prototype);
+ObjectSetPrototypeOf(Cipher, getTransform());
+Cipher.prototype.update = Cipheriv.prototype.update;
+Cipher.prototype.final = Cipheriv.prototype.final;
+Cipher.prototype.setAutoPadding = Cipheriv.prototype.setAutoPadding;
+Cipher.prototype.getAuthTag = Cipheriv.prototype.getAuthTag;
+Cipher.prototype.setAAD = Cipheriv.prototype.setAAD;
+
+function Decipher(cipher: string, password: any, options?: any) {
+  if (!ObjectPrototypeIsPrototypeOf(Decipher.prototype, this)) {
+    return new Decipher(cipher, password, options);
+  }
+  const { key, iv } = deriveLegacyKeyAndIv(cipher, password, options, false);
+  initDecipher(this, cipher, key, iv, options);
+}
+
+ObjectSetPrototypeOf(Decipher.prototype, getTransform().prototype);
+ObjectSetPrototypeOf(Decipher, getTransform());
+Decipher.prototype.update = Decipheriv.prototype.update;
+Decipher.prototype.final = Decipheriv.prototype.final;
+Decipher.prototype.setAutoPadding = Decipheriv.prototype.setAutoPadding;
+Decipher.prototype.setAuthTag = Decipheriv.prototype.setAuthTag;
+Decipher.prototype.setAAD = Decipheriv.prototype.setAAD;
+
 return {
   isStringOrBuffer,
+  Cipher,
   Cipheriv,
+  Decipher,
   Decipheriv,
   privateEncrypt,
   privateDecrypt,
