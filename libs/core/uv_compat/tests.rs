@@ -2148,6 +2148,23 @@ async fn tcp_close_cancels_pending_writes() {
 
 // ========== TTY tests ==========
 
+// `uv_tty_reset_mode` restores one process-global termios slot. Following
+// libuv, `uv_tty_set_mode` claims that slot for the first fd that leaves
+// normal mode, and only the close of that fd releases it. Tests that claim
+// the slot must therefore not overlap: cargo runs each test on its own
+// thread, so a second test either reads `UV_EBUSY` from the spinlock or
+// silently fails to save its own termios. Each such test holds this lock
+// for its whole body.
+#[cfg(unix)]
+fn global_termios_lock() -> std::sync::MutexGuard<'static, ()> {
+  static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+  // A test that panics while it holds the slot poisons the lock. Recover,
+  // because a poison panic here would hide the failure that caused it.
+  LOCK
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Helper: create a PTY pair and return (master_fd, slave_fd).
 /// The slave fd is a real TTY that `isatty()` returns true for.
 #[cfg(unix)]
@@ -2445,6 +2462,7 @@ async fn tty_get_winsize() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_set_mode_raw_and_back() {
+  let _termios = global_termios_lock();
   run_test(async |_runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2475,6 +2493,7 @@ async fn tty_set_mode_raw_and_back() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_set_mode_io() {
+  let _termios = global_termios_lock();
   run_test(async |_runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2807,6 +2826,7 @@ fn new_tty_constructor() {
 #[cfg(unix)]
 #[test]
 fn tty_reset_mode_when_no_tty_modified() {
+  let _termios = global_termios_lock();
   // Should succeed (no-op) when no TTY has entered raw mode.
   assert_ok(uv_tty_reset_mode());
 }
@@ -2814,6 +2834,7 @@ fn tty_reset_mode_when_no_tty_modified() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_reset_mode_restores_termios() {
+  let _termios = global_termios_lock();
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2866,6 +2887,7 @@ async fn tty_reset_mode_restores_termios() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_reset_mode_preserves_errno() {
+  let _termios = global_termios_lock();
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
