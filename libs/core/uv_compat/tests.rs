@@ -2156,13 +2156,12 @@ async fn tcp_close_cancels_pending_writes() {
 // silently fails to save its own termios. Each such test holds this lock
 // for its whole body.
 #[cfg(unix)]
-fn global_termios_lock() -> std::sync::MutexGuard<'static, ()> {
-  static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-  // A test that panics while it holds the slot poisons the lock. Recover,
-  // because a poison panic here would hide the failure that caused it.
-  LOCK
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner)
+async fn global_termios_lock() -> tokio::sync::MutexGuard<'static, ()> {
+  static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+  // The guard is held across the `.await` of the test body, so the lock has
+  // to be the async one. `tokio::sync::Mutex` also does not poison, so a test
+  // that panics while it holds the slot leaves the lock usable for the next.
+  LOCK.lock().await
 }
 
 /// Helper: create a PTY pair and return (master_fd, slave_fd).
@@ -2462,7 +2461,7 @@ async fn tty_get_winsize() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_set_mode_raw_and_back() {
-  let _termios = global_termios_lock();
+  let _termios = global_termios_lock().await;
   run_test(async |_runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2493,7 +2492,7 @@ async fn tty_set_mode_raw_and_back() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_set_mode_io() {
-  let _termios = global_termios_lock();
+  let _termios = global_termios_lock().await;
   run_test(async |_runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2824,9 +2823,9 @@ fn new_tty_constructor() {
 }
 
 #[cfg(unix)]
-#[test]
-fn tty_reset_mode_when_no_tty_modified() {
-  let _termios = global_termios_lock();
+#[tokio::test(flavor = "current_thread")]
+async fn tty_reset_mode_when_no_tty_modified() {
+  let _termios = global_termios_lock().await;
   // Should succeed (no-op) when no TTY has entered raw mode.
   assert_ok(uv_tty_reset_mode());
 }
@@ -2834,7 +2833,7 @@ fn tty_reset_mode_when_no_tty_modified() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_reset_mode_restores_termios() {
-  let _termios = global_termios_lock();
+  let _termios = global_termios_lock().await;
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2887,7 +2886,7 @@ async fn tty_reset_mode_restores_termios() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_reset_mode_preserves_errno() {
-  let _termios = global_termios_lock();
+  let _termios = global_termios_lock().await;
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
