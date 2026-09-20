@@ -25,6 +25,7 @@ import {
   closeSync,
   constants,
   copyFileSync,
+  cpSync,
   createReadStream,
   createWriteStream,
   existsSync,
@@ -56,6 +57,7 @@ import {
   rmSync,
   Stats,
   statSync,
+  symlinkSync,
   unlink,
   unlinkSync,
   watch,
@@ -284,6 +286,69 @@ Deno.test(
 
     const dataRead = readFileSync(dest, "utf8");
     assert(dataRead === "Hello");
+  },
+);
+
+// `cp` replaces the destination it was given, so `force` must unlink a
+// destination symlink and leave its target alone. When the removal resolved the
+// link instead, it deleted the target directory and left the link in place, and
+// two links sharing one target raced: whichever copy removed the target first
+// made the other fail with ENOENT.
+//
+// These two tests name their permissions on purpose. `check_open` returns the
+// path unresolved when every permission is granted, so under the default `-A`
+// the resolving removal never ran and the defect was invisible.
+Deno.test(
+  {
+    name:
+      "[node/fs cpSync] dereference:false replaces the dest symlink, not its target",
+    permissions: { read: true, write: true, env: true },
+  },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-deref-"));
+    const src = join(dir, "a");
+    const target = join(dir, "b");
+    const link = join(dir, "c");
+
+    writeFileSync(src, "file a");
+    mkdirSync(target);
+    symlinkSync(target, link, "dir");
+
+    cpSync(src, link, { dereference: false });
+
+    assert(lstatSync(link).isFile(), "dest symlink should become a file");
+    assert(statSync(target).isDirectory(), "link target should survive");
+    assertEquals(readFileSync(link, "utf8"), "file a");
+  },
+);
+
+// Two symlinks to one directory, copied over concurrently. Both copies must
+// act on their own link, so neither can remove the other's destination.
+Deno.test(
+  {
+    name:
+      "[node/fs cp] dereference:false copies over sibling symlinks independently",
+    permissions: { read: true, write: true, env: true },
+  },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-deref-"));
+    const src = join(dir, "a");
+    const target = join(dir, "b");
+    const first = join(dir, "c");
+    const second = join(dir, "d");
+
+    writeFileSync(src, "file a");
+    mkdirSync(target);
+    symlinkSync(target, first, "dir");
+    symlinkSync(target, second, "dir");
+
+    const pending = cp(src, second, { dereference: false });
+    cpSync(src, first, { dereference: false });
+    await pending;
+
+    assert(lstatSync(first).isFile(), "first dest should become a file");
+    assert(lstatSync(second).isFile(), "second dest should become a file");
+    assert(statSync(target).isDirectory(), "shared target should survive");
   },
 );
 
