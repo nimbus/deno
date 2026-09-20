@@ -5399,6 +5399,7 @@
     "parallel/test-vm-module-evaluate-source-text-module.js": {},
     "parallel/test-vm-module-evaluate-synthethic-module-rejection.js": {},
     "parallel/test-vm-module-evaluate-synthethic-module.js": {},
+    "parallel/test-vm-module-evaluate-while-evaluating.js": {},
     "parallel/test-vm-module-link-shared-deps.js": {},
     "parallel/test-vm-module-reevaluate.js": {},
     "parallel/test-vm-run-in-new-context.js": {},
