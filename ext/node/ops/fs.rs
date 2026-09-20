@@ -2919,8 +2919,15 @@ pub async fn op_node_cp_on_file(
 
   if dest_exists {
     if force {
-      // Remove dest, then copy
-      let dest_path = check_cp_path(&state, &dest, OpenAccessKind::Write)?;
+      // Remove dest, then copy. `cp` replaces the destination it was given,
+      // so the removal must not resolve a destination symlink. A resolving
+      // removal deletes the link target instead, which leaves the link in
+      // place and lets two links that share one target race: whichever copy
+      // removes the target first makes the other fail with ENOENT against a
+      // path that still exists. Node removes with `std::filesystem::remove`,
+      // which never follows the link.
+      let dest_path =
+        check_cp_path(&state, &dest, OpenAccessKind::WriteNoFollow)?;
       fs.remove_async(dest_path, false).await.map_err(|err| {
         map_fs_error_to_node_fs_error(
           err,
@@ -3015,11 +3022,12 @@ fn op_node_cp_on_file_sync(
 ) -> Result<(), FsError> {
   if stat_info.is_dest_exists {
     if opts.force {
-      // Remove dest, then copy.
+      // Remove dest, then copy. The removal must not resolve a destination
+      // symlink; see `op_node_cp_on_file`.
       let dest_path = check_cp_path_with_permissions(
         permissions,
         dest,
-        OpenAccessKind::Write,
+        OpenAccessKind::WriteNoFollow,
       )?;
       fs.remove_sync(&dest_path.as_checked_path(), false)
         .map_err(|err| {
