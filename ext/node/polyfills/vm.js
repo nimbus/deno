@@ -698,8 +698,12 @@ class Module {
     try {
       validateObject(options, "options");
       const status = op_vm_module_get_status(this[kWrap]);
-      // Allow evaluate from linked (2), evaluating (3), evaluated (4), errored (5).
-      if (status < 2) {
+      // Allow evaluate from linked (2), evaluated (4) and errored (5) only.
+      // V8 asserts that the module is linked, evaluating-async or evaluated,
+      // and it aborts the process when the assert fails. A module that is
+      // still evaluating (3) reaches this method when its own evaluation
+      // steps call evaluate() again, so it must throw here.
+      if (status !== 2 && status !== 4 && status !== 5) {
         throw new ERR_VM_MODULE_STATUS(
           "must be one of linked, evaluated, or errored",
         );
