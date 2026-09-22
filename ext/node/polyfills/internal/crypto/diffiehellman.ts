@@ -22,6 +22,9 @@ const {
   TypedArrayPrototypeGetBuffer,
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
+  TypedArrayPrototypeSet,
+  Uint8Array,
+  Uint8ArrayPrototype,
 } = primordials;
 const {
   op_node_dh_check,
@@ -288,7 +291,7 @@ class DiffieHellmanImpl {
 
     if (this.#privateKey && this.#publicKey && !this.#publicKeyNeedsUpdate) {
       // Both keys already exist and are up to date, no-op
-      return this.#publicKey;
+      return this.#copyKey(this.#publicKey);
     }
 
     if (this.#privateKey) {
@@ -312,7 +315,7 @@ class DiffieHellmanImpl {
       this.#publicKeyNeedsUpdate = false;
     }
 
-    return this.#publicKey;
+    return this.#copyKey(this.#publicKey);
   }
 
   getGenerator(encoding?: any): Buffer | string {
@@ -339,7 +342,7 @@ class DiffieHellmanImpl {
       return this.#privateKey.toString(encoding);
     }
 
-    return this.#privateKey;
+    return this.#copyKey(this.#privateKey);
   }
 
   getPublicKey(encoding?: any): Buffer | string {
@@ -348,18 +351,57 @@ class DiffieHellmanImpl {
       return this.#publicKey.toString(encoding);
     }
 
-    return this.#publicKey;
+    return this.#copyKey(this.#publicKey);
+  }
+
+  // Node holds a DH key as an OpenSSL BIGNUM. A setter reads the raw bytes of
+  // its argument into that BIGNUM, and a getter renders a fresh buffer out of
+  // it, so a setter allocates nothing and a caller never holds the stored key.
+  // Mirror both halves. The stored buffers stay private to the instance, which
+  // is what lets a setter overwrite one in place instead of allocating on
+  // every call.
+  #copyKey(key: Buffer): Buffer {
+    // A key that was never set stays unset. Reporting it as `undefined` is
+    // what this class has always done before `generateKeys()` runs.
+    return key ? Buffer.from(key) : key;
+  }
+
+  #storeKey(
+    current: Buffer | undefined,
+    key: ArrayBufferView | string,
+    encoding?: any,
+  ): Buffer {
+    if (
+      current !== undefined &&
+      ObjectPrototypeIsPrototypeOf(Uint8ArrayPrototype, key) &&
+      TypedArrayPrototypeGetByteLength(key as Uint8Array) ===
+        TypedArrayPrototypeGetByteLength(current)
+    ) {
+      // The hot path. A same-size byte view overwrites the stored key with no
+      // intermediate allocation at all.
+      TypedArrayPrototypeSet(current, key as Uint8Array, 0);
+      return current;
+    }
+    const view = getArrayBufferOrView(key, "key", encoding) as ArrayBufferView;
+    const parts = getViewParts(view);
+    const bytes = new Uint8Array(parts.ab, parts.off, parts.len);
+    if (
+      current !== undefined &&
+      TypedArrayPrototypeGetByteLength(current) === parts.len
+    ) {
+      TypedArrayPrototypeSet(current, bytes, 0);
+      return current;
+    }
+    const stored = Buffer.alloc(parts.len);
+    TypedArrayPrototypeSet(stored, bytes, 0);
+    return stored;
   }
 
   setPrivateKey(
     privateKey: ArrayBufferView | string,
     encoding?: any,
   ) {
-    if (encoding == undefined || encoding == "buffer") {
-      this.#privateKey = Buffer.from(privateKey);
-    } else {
-      this.#privateKey = Buffer.from(privateKey, encoding);
-    }
+    this.#privateKey = this.#storeKey(this.#privateKey, privateKey, encoding);
     // Mark public key as needing regeneration
     this.#publicKeyNeedsUpdate = true;
   }
@@ -368,11 +410,7 @@ class DiffieHellmanImpl {
     publicKey: ArrayBufferView | string,
     encoding?: any,
   ) {
-    if (encoding == undefined || encoding == "buffer") {
-      this.#publicKey = Buffer.from(publicKey);
-    } else {
-      this.#publicKey = Buffer.from(publicKey, encoding);
-    }
+    this.#publicKey = this.#storeKey(this.#publicKey, publicKey, encoding);
   }
 }
 
