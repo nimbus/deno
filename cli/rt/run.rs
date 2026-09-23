@@ -1537,7 +1537,7 @@ pub async fn run_with_options(
   let has_node_modules_dir = npm_resolver.root_node_modules_path().is_some();
   let node_resolver = Arc::new(NodeResolver::new(
     in_npm_pkg_checker.clone(),
-    DenoIsBuiltInNodeModuleChecker,
+    DenoIsBuiltInNodeModuleChecker::from_env(&sys),
     npm_resolver.clone(),
     pkg_json_resolver.clone(),
     node_resolution_sys,

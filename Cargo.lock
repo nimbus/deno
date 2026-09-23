@@ -7085,6 +7085,7 @@ dependencies = [
  "futures",
  "lazy-regex",
  "log",
+ "node_shim",
  "once_cell",
  "path-clean",
  "percent-encoding",

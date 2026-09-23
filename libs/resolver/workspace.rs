@@ -2126,7 +2126,7 @@ mod test {
       new_rc(PackageJsonResolver::new(sys.clone(), None));
     NodeResolver::new(
       DenoInNpmPackageChecker::new(CreateInNpmPkgCheckerOptions::Byonm),
-      DenoIsBuiltInNodeModuleChecker,
+      DenoIsBuiltInNodeModuleChecker::default(),
       TestNpmPackageFolderResolver,
       package_json_resolver,
       NodeResolutionSys::new(sys.clone(), None),

@@ -120,6 +120,16 @@ pub enum RequireErrorKind {
 #[class(inherit)]
 pub struct UnableToGetCwdError(#[source] pub std::io::Error);
 
+/// Node's experimental built-in modules with the flag that enables each one.
+/// `node_resolver` owns the table, so `require`, the ESM builtin gate, and
+/// the ESM resolver cannot drift apart.
+#[op2]
+#[serde]
+pub fn op_require_experimental_builtin_modules()
+-> Vec<(&'static str, &'static str)> {
+  node_resolver::EXPERIMENTAL_BUILTIN_NODE_MODULES.to_vec()
+}
+
 #[op2]
 pub fn op_require_init_paths() -> Vec<String> {
   // todo(dsherret): this code is node compat mode specific and

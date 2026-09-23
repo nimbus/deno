@@ -218,7 +218,7 @@ mod buffer_max_length_policy_tests {
 pub const NODE_VERSION: &str = "26.3.0";
 
 pub fn is_builtin_node_module(module_name: &str) -> bool {
-  DenoIsBuiltInNodeModuleChecker.is_builtin_node_module(module_name)
+  DenoIsBuiltInNodeModuleChecker::default().is_builtin_node_module(module_name)
 }
 
 #[allow(clippy::disallowed_types, reason = "definition")]
@@ -647,6 +647,7 @@ deno_core::extension!(deno_node,
     op_node_load_env_file,
     ops::module::op_node_strip_typescript_types,
     ops::require::op_require_can_parse_as_esm,
+    ops::require::op_require_experimental_builtin_modules,
     ops::require::op_require_init_paths,
     ops::require::op_require_node_module_paths<TSys>,
     ops::require::op_require_proxy_path,

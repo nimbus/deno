@@ -2,3 +2,9 @@ dynamic stream/iter Error ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: n
 dynamic zlib/iter Error ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: node:zlib/iter
 dynamic stream/iter again Error ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: node:stream/iter
 static stream/iter Error ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: node:stream/iter
+dynamic bare stream/iter ERR_MODULE_NOT_FOUND
+dynamic bare zlib/iter ERR_MODULE_NOT_FOUND
+static bare ERR_MODULE_NOT_FOUND
+resolve node:stream/iter node:stream/iter
+resolve stream/iter threw
+resolve zlib/iter threw
