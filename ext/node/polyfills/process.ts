@@ -169,7 +169,9 @@ const {
   ObjectEntries,
   ObjectFreeze,
   ObjectKeys,
+  ObjectPrototypeHasOwnProperty,
   ObjectPrototypeIsPrototypeOf,
+  ObjectPrototypeToString,
   Proxy,
   RangeError,
   ReflectApply,
@@ -1621,19 +1623,243 @@ export const removeListener = process.removeListener;
 export const removeAllListeners = process.removeAllListeners;
 
 let unhandledRejectionListenerCount = 0;
-let rejectionHandledListenerCount = 0;
 let uncaughtExceptionListenerCount = 0;
 let uncaughtExceptionMonitorListenerCount = 0;
 let beforeExitListenerCount = 0;
 let exitListenerCount = 0;
 
+// `--unhandled-rejections` support, modelled on Node's
+// lib/internal/process/promises.js. Every reported rejection gets an id in
+// every mode; a handler attached after the report emits 'rejectionHandled'
+// or, without listeners, PromiseRejectionHandledWarning.
+type UnhandledRejectionsMode =
+  | "none"
+  | "strict"
+  | "throw"
+  | "warn"
+  | "warn-with-error-code";
+
+let lastUnhandledRejectionId = 0;
+const reportedUnhandledRejections = new SafeWeakMap<
+  Promise<unknown>,
+  number
+>();
+
+function getUnhandledRejectionsMode(): UnhandledRejectionsMode {
+  switch (getOptionValue("--unhandled-rejections")) {
+    case "none":
+      return "none";
+    case "strict":
+      return "strict";
+    case "warn":
+      return "warn";
+    case "warn-with-error-code":
+      return "warn-with-error-code";
+    default:
+      return "throw";
+  }
+}
+
+// Node treats any object with an own `stack` property as an error, so a
+// hand-rolled error-like class that called Error.captureStackTrace keeps its
+// identity instead of being wrapped in ERR_UNHANDLED_REJECTION.
+// deno-lint-ignore no-explicit-any
+function isErrorLike(value: any): boolean {
+  return typeof value === "object" && value !== null &&
+    ObjectPrototypeHasOwnProperty(value, "stack");
+}
+
+// Node renders reasons with a side-effect-free string conversion. A reason
+// whose conversion throws must not turn the report into a second failure.
+// deno-lint-ignore no-explicit-any
+function rejectionReasonToString(reason: any): string {
+  try {
+    return String(reason);
+  } catch {
+    return ObjectPrototypeToString(reason);
+  }
+}
+
+// deno-lint-ignore no-explicit-any
+function createUnhandledRejectionError(reason: any): Error {
+  const message = "This error originated either by throwing " +
+    "inside of an async function without a catch block, or by rejecting a " +
+    "promise which was not handled with .catch(). The promise rejected with the" +
+    ` reason "${rejectionReasonToString(reason)}".`;
+  const err = new Error(message);
+  // deno-lint-ignore no-explicit-any
+  (err as any).code = "ERR_UNHANDLED_REJECTION";
+  // deno-lint-ignore no-explicit-any
+  (err as any).reason = reason;
+  ObjectDefineProperty(err, "name", {
+    __proto__: null,
+    value: "UnhandledPromiseRejection",
+    writable: true,
+    configurable: true,
+  });
+  return err;
+}
+
+const kUnhandledPromiseRejectionWarning = "UnhandledPromiseRejectionWarning";
+
+// deno-lint-ignore no-explicit-any
+function emitUnhandledRejectionWarning(reason: any, id: number) {
+  const warning = new Error(
+    "Unhandled promise rejection. This error originated either by " +
+      "throwing inside of an async function without a catch block, " +
+      "or by rejecting a promise which was not handled with .catch(). " +
+      "To terminate the node process on unhandled promise " +
+      "rejection, use the CLI flag `--unhandled-rejections=strict` (see " +
+      "https://nodejs.org/api/cli.html#cli_unhandled_rejections_mode). " +
+      `(rejection id: ${id})`,
+  );
+  warning.name = kUnhandledPromiseRejectionWarning;
+  try {
+    if (isErrorLike(reason)) {
+      warning.stack = reason.stack;
+      process.emitWarning(reason.stack, kUnhandledPromiseRejectionWarning);
+    } else {
+      process.emitWarning(
+        rejectionReasonToString(reason),
+        kUnhandledPromiseRejectionWarning,
+      );
+    }
+  } catch {
+    try {
+      process.emitWarning(
+        rejectionReasonToString(reason),
+        kUnhandledPromiseRejectionWarning,
+      );
+    } catch {
+      // Ignore.
+    }
+  }
+  process.emitWarning(warning);
+}
+
+function emitUnhandledRejection(event: PromiseRejectionEvent): boolean {
+  return process.emit("unhandledRejection", event.reason, event.promise);
+}
+
+function nodeProcessUnhandledRejection(event: PromiseRejectionEvent) {
+  const id = ++lastUnhandledRejectionId;
+  reportedUnhandledRejections.set(event.promise, id);
+
+  switch (getUnhandledRejectionsMode()) {
+    case "none":
+      event.preventDefault();
+      emitUnhandledRejection(event);
+      return;
+    case "warn":
+      event.preventDefault();
+      emitUnhandledRejection(event);
+      emitUnhandledRejectionWarning(event.reason, id);
+      return;
+    case "warn-with-error-code":
+      event.preventDefault();
+      if (!emitUnhandledRejection(event)) {
+        emitUnhandledRejectionWarning(event.reason, id);
+        process.exitCode = 1;
+      }
+      return;
+    case "strict": {
+      const reason = event.reason;
+      if (
+        reason !== null && typeof reason === "object" &&
+        _dispatchedFatalErrors.has(reason)
+      ) {
+        return;
+      }
+      // Node raises the uncaught exception first. When nothing consumes it
+      // the runtime terminates, so 'unhandledRejection' is only emitted for
+      // a rejection the process survived.
+      const err = isErrorLike(reason)
+        ? reason
+        : createUnhandledRejectionError(reason);
+      if (!uncaughtExceptionHandler(err, "unhandledRejection")) {
+        return;
+      }
+      event.preventDefault();
+      if (!emitUnhandledRejection(event)) {
+        emitUnhandledRejectionWarning(reason, id);
+      }
+      return;
+    }
+    case "throw":
+    default:
+      break;
+  }
+
+  if (process.listenerCount("unhandledRejection") === 0) {
+    // The Node.js default behavior is to raise an uncaught exception if
+    // an unhandled rejection occurs and there are no unhandledRejection
+    // listeners.
+
+    let reason = event.reason;
+
+    // The synchronous Module._load path in 01_require.js already invoked
+    // process._fatalException for this error. Re-firing here would
+    // double-emit 'uncaughtExceptionMonitor' (and 'uncaughtException')
+    // for the same value. Skip and let Deno's default unhandled-rejection
+    // handling print the error and terminate the runtime.
+    if (
+      reason !== null && typeof reason === "object" &&
+      _dispatchedFatalErrors.has(reason)
+    ) {
+      return;
+    }
+
+    // If the rejection reason is not an Error, wrap it in an
+    // ERR_UNHANDLED_REJECTION error, matching Node.js behavior.
+    if (!isErrorLike(reason)) {
+      reason = createUnhandledRejectionError(reason);
+    }
+
+    // Only preventDefault if a registered handler (uncaughtException
+    // listener or capture callback) actually consumed the error.
+    // Otherwise we want the runtime to terminate normally.
+    if (uncaughtExceptionHandler(reason, "unhandledRejection")) {
+      event.preventDefault();
+    }
+    return;
+  }
+
+  event.preventDefault();
+  emitUnhandledRejection(event);
+}
+
+function nodeProcessRejectionHandled(event: PromiseRejectionEvent) {
+  const id = reportedUnhandledRejections.get(event.promise);
+  if (id === undefined) {
+    return;
+  }
+  reportedUnhandledRejections.delete(event.promise);
+  let handled = false;
+  try {
+    handled = process.emit("rejectionHandled", event.promise);
+  } catch (err) {
+    // A throwing 'rejectionHandled' listener is an uncaught exception, not a
+    // failure of the `.catch()` call that attached the late handler.
+    if (!uncaughtExceptionHandler(err, "uncaughtException")) {
+      throw err;
+    }
+    handled = true;
+  }
+  if (!handled) {
+    const warning = new Error(
+      `Promise rejection was handled asynchronously (rejection id: ${id})`,
+    );
+    warning.name = "PromiseRejectionHandledWarning";
+    // deno-lint-ignore no-explicit-any
+    (warning as any).id = id;
+    process.emitWarning(warning);
+  }
+}
+
 process.on("newListener", (event: string) => {
   switch (event) {
     case "unhandledRejection":
       unhandledRejectionListenerCount++;
-      break;
-    case "rejectionHandled":
-      rejectionHandledListenerCount++;
       break;
     case "uncaughtException":
       uncaughtExceptionListenerCount++;
@@ -1657,9 +1883,6 @@ process.on("removeListener", (event: string) => {
   switch (event) {
     case "unhandledRejection":
       unhandledRejectionListenerCount--;
-      break;
-    case "rejectionHandled":
-      rejectionHandledListenerCount--;
       break;
     case "uncaughtException":
       uncaughtExceptionListenerCount--;
@@ -1717,79 +1940,25 @@ function dispatchProcessExitEvent() {
 
 function synchronizeListeners() {
   // Install special "unhandledrejection" handler, that will be called
-  // last.
+  // last. Every mode other than Node's default `throw` changes what happens
+  // to a rejection nobody listens for, so those modes always install it.
   if (
+    getUnhandledRejectionsMode() !== "throw" ||
     unhandledRejectionListenerCount > 0 ||
     uncaughtExceptionListenerCount > 0 ||
     uncaughtExceptionMonitorListenerCount > 0 ||
     _uncaughtExceptionCaptureFn !== null
   ) {
-    internals.nodeProcessUnhandledRejectionCallback = (event) => {
-      if (process.listenerCount("unhandledRejection") === 0) {
-        // The Node.js default behavior is to raise an uncaught exception if
-        // an unhandled rejection occurs and there are no unhandledRejection
-        // listeners.
-
-        let reason = event.reason;
-
-        // The synchronous Module._load path in 01_require.js already invoked
-        // process._fatalException for this error. Re-firing here would
-        // double-emit 'uncaughtExceptionMonitor' (and 'uncaughtException')
-        // for the same value. Skip and let Deno's default unhandled-rejection
-        // handling print the error and terminate the runtime.
-        if (
-          reason !== null && typeof reason === "object" &&
-          _dispatchedFatalErrors.has(reason)
-        ) {
-          return;
-        }
-
-        // If the rejection reason is not an Error, wrap it in an
-        // ERR_UNHANDLED_REJECTION error, matching Node.js behavior.
-        if (!ObjectPrototypeIsPrototypeOf(ErrorPrototype, reason)) {
-          const message = "This error originated either by throwing " +
-            "inside of an async function without a catch block, or by rejecting a " +
-            "promise which was not handled with .catch(). The promise rejected with the" +
-            ` reason "${reason}".`;
-          const err = new Error(message);
-          // deno-lint-ignore no-explicit-any
-          (err as any).code = "ERR_UNHANDLED_REJECTION";
-          // deno-lint-ignore no-explicit-any
-          (err as any).reason = event.reason;
-          ObjectDefineProperty(err, "name", {
-            __proto__: null,
-            value: "UnhandledPromiseRejection",
-            writable: true,
-            configurable: true,
-          });
-          reason = err;
-        }
-
-        // Only preventDefault if a registered handler (uncaughtException
-        // listener or capture callback) actually consumed the error.
-        // Otherwise we want the runtime to terminate normally.
-        if (uncaughtExceptionHandler(reason, "unhandledRejection")) {
-          event.preventDefault();
-        }
-        return;
-      }
-
-      event.preventDefault();
-      process.emit("unhandledRejection", event.reason, event.promise);
-    };
+    internals.nodeProcessUnhandledRejectionCallback =
+      nodeProcessUnhandledRejection;
   } else {
     internals.nodeProcessUnhandledRejectionCallback = undefined;
   }
 
   // Install special "handledrejection" handler, that will be called
-  // last.
-  if (rejectionHandledListenerCount > 0) {
-    internals.nodeProcessRejectionHandledCallback = (event) => {
-      process.emit("rejectionHandled", event.reason, event.promise);
-    };
-  } else {
-    internals.nodeProcessRejectionHandledCallback = undefined;
-  }
+  // last. It only acts on promises the handler above reported, so it is
+  // always installed.
+  internals.nodeProcessRejectionHandledCallback = nodeProcessRejectionHandled;
 
   if (
     uncaughtExceptionListenerCount > 0 ||
@@ -1947,6 +2116,10 @@ internals.__bootstrapNodeProcess = function (
     if (getOptionValue("--warnings")) {
       process.on("warning", onWarning);
     }
+
+    // `--unhandled-rejections` is readable only now that the options map is
+    // live, and a non-default mode needs its handler even without listeners.
+    synchronizeListeners();
 
     // Match Node's pre_execution.js: when --pending-deprecation is set, wrap
     // `process.binding` with a DEP0111 warning, and wrap the `uv` binding's
