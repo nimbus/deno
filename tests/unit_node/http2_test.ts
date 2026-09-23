@@ -1243,3 +1243,65 @@ Deno.test("[node/http2] allowHTTP1 fallback handles HTTP/1.1 clients", async () 
 
   await promise;
 });
+
+// A server stream that nghttp2 has already closed (both sides ended) can still
+// hold request data in its paused readable side. A graceful GOAWAY exchange
+// must not destroy that stream before the application drains it: Node's
+// `MaybeNotifyGracefulCloseComplete` only notifies JS, which keeps the session
+// alive while `session.streams` is non-empty.
+Deno.test(
+  "[node/http2] graceful GOAWAY keeps a draining server stream alive",
+  async () => {
+    const body = new Uint8Array(16 * 1024).fill(0x61);
+    const received = Promise.withResolvers<number>();
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const server = http2.createServer();
+    server.on("stream", (stream) => {
+      stream.pause();
+      let bytes = 0;
+      stream.on("data", (chunk: Uint8Array) => {
+        bytes += chunk.length;
+      });
+      stream.on("end", () => received.resolve(bytes));
+      stream.on("error", (err) => received.reject(err));
+      stream.on("close", () => {
+        // Give a racing 'end' one tick; a close without 'end' is the defect.
+        timers.push(setTimeout(
+          () =>
+            received.reject(
+              new Error(`stream closed before end (bytes=${bytes})`),
+            ),
+          10,
+        ));
+      });
+      stream.respond({ ":status": 200 });
+      stream.end();
+      timers.push(setTimeout(() => stream.resume(), 50));
+    });
+
+    let client: http2.ClientHttp2Session | undefined;
+    try {
+      const port = await new Promise<number>((resolve) => {
+        server.listen(0, "127.0.0.1", () => {
+          resolve((server.address() as net.AddressInfo).port);
+        });
+      });
+      client = http2.connect(`http://127.0.0.1:${port}`);
+      client.on("error", () => {});
+      const request = client.request({ ":method": "POST", ":path": "/" });
+      request.on("error", () => {});
+      request.resume();
+      request.on("close", () => {
+        client!.close();
+        server.close();
+      });
+      request.end(body);
+
+      assertEquals(await received.promise, body.length);
+    } finally {
+      timers.forEach((t) => clearTimeout(t));
+      client?.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  },
+);

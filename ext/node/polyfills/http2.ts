@@ -3585,7 +3585,17 @@ function setupHandle(socket, type, options) {
         const peerBrokeProtocol = sentGoawayCode > NGHTTP2_NO_ERROR;
         process.nextTick(() => {
           if (this.destroyed) return;
-          handle.onstreamclose();
+          if (peerBrokeProtocol) {
+            handle.onstreamclose();
+          } else {
+            // Node's MaybeNotifyGracefulCloseComplete only notifies JS
+            // (ongracefulclosecomplete -> kMaybeDestroy). A stream that
+            // nghttp2 has closed but whose readable side is still draining
+            // to the application keeps the session alive until it ends;
+            // forcing closeSession here destroyed that stream with its
+            // buffered data (test-http2-pipe under load).
+            this[kMaybeDestroy](null);
+          }
           // After GOAWAY has been written, gracefully shut down the
           // underlying socket. We must NOT call socket.destroy() here while
           // socket.write(GOAWAY) is still pending in the writable stream
