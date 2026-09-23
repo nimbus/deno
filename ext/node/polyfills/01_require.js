@@ -347,6 +347,7 @@ const lazyNodeModules = {
   "crypto": () => core.loadExtScript("ext:deno_node/crypto.ts").default,
   "dgram": () => core.loadExtScript("ext:deno_node/dgram.ts").default,
   "zlib": () => core.loadExtScript("ext:deno_node/zlib.js"),
+  "zlib/iter": () => core.loadExtScript("ext:deno_node/zlib/iter.js"),
   "tls": () => tls().default,
   "internal/crypto/cipher": () =>
     core.loadExtScript("ext:deno_node/internal/crypto/cipher.ts").default,
@@ -384,6 +385,7 @@ const lazyNodeModules = {
   "stream": () => core.createLazyLoader("node:stream")().default,
   "stream/consumers": () =>
     core.loadExtScript("ext:deno_node/stream/consumers.js"),
+  "stream/iter": () => core.loadExtScript("ext:deno_node/stream/iter.js"),
   "stream/promises": () =>
     core.createLazyLoader("node:stream/promises")().default,
   "tty": () => core.createLazyLoader("node:tty")().default,
@@ -414,6 +416,20 @@ const lazyNodeModules = {
   "_stream_writable": () =>
     core.loadExtScript("ext:deno_node/internal/streams/writable.js").default,
 };
+
+// Match Node's experimentalModuleList: these builtins are only available
+// when their flag is set (see setupStreamIter in
+// lib/internal/process/pre_execution.js).
+const experimentalModuleFlags = {
+  __proto__: null,
+  "stream/iter": "--experimental-stream-iter",
+  "zlib/iter": "--experimental-stream-iter",
+};
+
+function experimentalModuleIsEnabled(request) {
+  const flag = experimentalModuleFlags[request];
+  return flag === undefined || getOptionValue(flag) === true;
+}
 
 function defineLazyNativeModule(name, loader) {
   ObjectDefineProperty(nativeModuleExports, name, {
@@ -475,6 +491,9 @@ function setupBuiltinModules() {
     // `internal/*` modules are only exposed under --expose-internals, so
     // they aren't part of the public builtinModules list.
     if (StringPrototypeStartsWith(name, "internal/")) {
+      return;
+    }
+    if (!experimentalModuleIsEnabled(name)) {
       return;
     }
     if (SetPrototypeHas(schemelessBlockList, name)) {
@@ -1390,7 +1409,7 @@ Module._resolveLookupPaths = function (request, parent) {
     : request;
   if (
     isBuiltin(request) ||
-    normalizedRequest in nativeModuleExports
+    nativeModuleCanBeRequiredByUsers(normalizedRequest)
   ) {
     return null;
   }
@@ -1440,7 +1459,7 @@ Module._load = function (request, parent, isMain) {
   ) {
     const id = StringPrototypeSlice(request, 5);
     if (
-      !(id in nativeModuleExports) ||
+      !nativeModuleCanBeRequiredByUsers(id) ||
       StringPrototypeStartsWith(id, "internal/")
     ) {
       throw new internalErrors.ERR_UNKNOWN_BUILTIN_MODULE(request);
@@ -1760,7 +1779,7 @@ Module._resolveFilename = function (
 
   if (StringPrototypeStartsWith(request, "node:")) {
     const id = StringPrototypeSlice(request, 5);
-    if (id in nativeModuleExports) {
+    if (nativeModuleCanBeRequiredByUsers(id)) {
       return request;
     }
     if (hookEntries.length > 0 && !insideResolveHook) {
@@ -2477,7 +2496,7 @@ function isBuiltin(moduleName) {
     return false;
   }
 
-  return moduleName in nativeModuleExports &&
+  return nativeModuleCanBeRequiredByUsers(moduleName) &&
     !StringPrototypeStartsWith(moduleName, "internal/");
 }
 
@@ -2733,7 +2752,8 @@ function loadNativeModule(_id, request) {
 function nativeModuleCanBeRequiredByUsers(request) {
   // `in` rather than bracket access avoids triggering the lazy getters
   // installed by `defineLazyNativeModule`.
-  return request in nativeModuleExports;
+  return request in nativeModuleExports &&
+    experimentalModuleIsEnabled(request);
 }
 
 /** @param specifier {string} */

@@ -60,6 +60,31 @@ fn slice_output(
     .ok_or_else(|| JsErrorBox::type_error("invalid output range"))
 }
 
+/// Report an engine error to the handle's `onerror(message, errno, code)`,
+/// the same arguments that Node's `CompressionStream::CheckError` passes.
+fn call_onerror(
+  scope: &mut v8::PinScope<'_, '_>,
+  this: v8::Local<v8::Object>,
+  message: &str,
+  errno: i32,
+  code: &str,
+) {
+  v8_static_strings! {
+    ONERROR_STR = "onerror",
+  }
+  let onerror_str = ONERROR_STR.v8_string(scope).unwrap();
+  let onerror = this.get(scope, onerror_str.into()).unwrap();
+  let cb = v8::Local::<v8::Function>::try_from(onerror).unwrap();
+  let message = v8::String::new(scope, message).unwrap();
+  let errno = v8::Integer::new(scope, errno);
+  let code = v8::String::new(scope, code).unwrap();
+  cb.call(
+    scope,
+    this.into(),
+    &[message.into(), errno.into(), code.into()],
+  );
+}
+
 #[derive(Default)]
 struct ZlibInner {
   dictionary: Option<Vec<u8>>,
@@ -303,20 +328,65 @@ impl ZlibInner {
     };
 
     let this = v8::Local::new(scope, this);
-    v8_static_strings! {
-      ONERROR_STR = "onerror",
-    }
-
-    let onerror_str = ONERROR_STR.v8_string(scope).unwrap();
-    let onerror = this.get(scope, onerror_str.into()).unwrap();
-    let cb = v8::Local::<v8::Function>::try_from(onerror).unwrap();
-
-    let msg = v8::String::new(scope, &msg).unwrap();
-    let err = v8::Integer::new(scope, err);
-
-    cb.call(scope, this.into(), &[msg.into(), err.into()]);
+    call_onerror(scope, this, &msg, err, zlib_error_code_name(err));
 
     false
+  }
+}
+
+/// The error code name that Node's `ZlibStrerror` gives for a zlib error.
+fn zlib_error_code_name(err: i32) -> &'static str {
+  match err {
+    Z_OK => "Z_OK",
+    Z_STREAM_END => "Z_STREAM_END",
+    Z_NEED_DICT => "Z_NEED_DICT",
+    Z_ERRNO => "Z_ERRNO",
+    Z_STREAM_ERROR => "Z_STREAM_ERROR",
+    Z_DATA_ERROR => "Z_DATA_ERROR",
+    Z_MEM_ERROR => "Z_MEM_ERROR",
+    Z_BUF_ERROR => "Z_BUF_ERROR",
+    Z_VERSION_ERROR => "Z_VERSION_ERROR",
+    _ => "Z_UNKNOWN_ERROR",
+  }
+}
+
+/// The name that Node's `BrotliDecoderErrorString` gives for a Brotli decoder
+/// error code. The `brotli-decompressor` crate drops the leading `_` that the
+/// C library keeps (and misspells `CL_SPACE`), so mirror the C list that Node
+/// vendors in deps/brotli/c/include/brotli/decode.h.
+fn brotli_decoder_error_name(code: i32) -> &'static str {
+  match code {
+    0 => "_NO_ERROR",
+    1 => "_SUCCESS",
+    2 => "_NEEDS_MORE_INPUT",
+    3 => "_NEEDS_MORE_OUTPUT",
+    -1 => "_ERROR_FORMAT_EXUBERANT_NIBBLE",
+    -2 => "_ERROR_FORMAT_RESERVED",
+    -3 => "_ERROR_FORMAT_EXUBERANT_META_NIBBLE",
+    -4 => "_ERROR_FORMAT_SIMPLE_HUFFMAN_ALPHABET",
+    -5 => "_ERROR_FORMAT_SIMPLE_HUFFMAN_SAME",
+    -6 => "_ERROR_FORMAT_CL_SPACE",
+    -7 => "_ERROR_FORMAT_HUFFMAN_SPACE",
+    -8 => "_ERROR_FORMAT_CONTEXT_MAP_REPEAT",
+    -9 => "_ERROR_FORMAT_BLOCK_LENGTH_1",
+    -10 => "_ERROR_FORMAT_BLOCK_LENGTH_2",
+    -11 => "_ERROR_FORMAT_TRANSFORM",
+    -12 => "_ERROR_FORMAT_DICTIONARY",
+    -13 => "_ERROR_FORMAT_WINDOW_BITS",
+    -14 => "_ERROR_FORMAT_PADDING_1",
+    -15 => "_ERROR_FORMAT_PADDING_2",
+    -16 => "_ERROR_FORMAT_DISTANCE",
+    -18 => "_ERROR_COMPOUND_DICTIONARY",
+    -19 => "_ERROR_DICTIONARY_NOT_SET",
+    -20 => "_ERROR_INVALID_ARGUMENTS",
+    -21 => "_ERROR_ALLOC_CONTEXT_MODES",
+    -22 => "_ERROR_ALLOC_TREE_GROUPS",
+    -25 => "_ERROR_ALLOC_CONTEXT_MAP",
+    -26 => "_ERROR_ALLOC_RING_BUFFER_1",
+    -27 => "_ERROR_ALLOC_RING_BUFFER_2",
+    -30 => "_ERROR_ALLOC_BLOCK_TYPE_TREES",
+    -31 => "_ERROR_UNREACHABLE",
+    _ => "INVALID",
   }
 }
 
@@ -939,19 +1009,12 @@ impl BrotliDecoder {
           ffi::decompressor::ffi::interface::BrotliDecoderResult::BROTLI_DECODER_RESULT_ERROR
         ) {
           let error_code =
-            ffi::decompressor::ffi::BrotliDecoderGetErrorCode(ctx.inst);
-          let error_str =
-            ffi::decompressor::ffi::BrotliDecoderErrorString(error_code);
-          let msg = if error_str.is_null() {
-            "Decompression failed".to_string()
-          } else {
-            let c_str = std::ffi::CStr::from_ptr(error_str as *const _);
-            format!(
-              "ERR_{}",
-              c_str.to_str().unwrap_or("Decompression failed")
-            )
-          };
-          Some((error_code as i32, msg))
+            ffi::decompressor::ffi::BrotliDecoderGetErrorCode(ctx.inst) as i32;
+          // Match Node: a fixed message, and the decoder error name as the
+          // code (e.g. `ERR__ERROR_FORMAT_PADDING_2`).
+          let code =
+            format!("ERR_{}", brotli_decoder_error_name(error_code));
+          Some((error_code, code))
         } else {
           None
         }
@@ -962,16 +1025,8 @@ impl BrotliDecoder {
 
     let this = v8::Local::new(scope, &this);
 
-    if let Some((err, msg)) = error_info {
-      v8_static_strings! {
-        ONERROR_STR = "onerror",
-      }
-      let onerror_str = ONERROR_STR.v8_string(scope).unwrap();
-      let onerror = this.get(scope, onerror_str.into()).unwrap();
-      let cb = v8::Local::<v8::Function>::try_from(onerror).unwrap();
-      let msg = v8::String::new(scope, &msg).unwrap();
-      let err = v8::Integer::new(scope, err);
-      cb.call(scope, this.into(), &[msg.into(), err.into()]);
+    if let Some((err, code)) = error_info {
+      call_onerror(scope, this, "Decompression failed", err, &code);
     } else {
       let _ = callback.call(scope, this.into(), &[]);
     }
@@ -1033,7 +1088,6 @@ impl BrotliDecoder {
 }
 
 // Zstd Compression/Decompression support
-use zstd::stream::raw::Decoder as ZstdRawDecoder;
 use zstd::stream::raw::Encoder as ZstdRawEncoder;
 use zstd::stream::raw::Operation; // Trait for run/flush/finish methods
 
@@ -1055,6 +1109,47 @@ unsafe impl deno_core::GarbageCollected for ZstdCompress {
   }
 }
 
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+enum PledgedSrcSizeError {
+  #[class(type)]
+  #[property("code" = "ERR_INVALID_ARG_TYPE")]
+  #[error("pledgedSrcSize must be a number")]
+  NotANumber,
+  #[class(range)]
+  #[property("code" = "ERR_OUT_OF_RANGE")]
+  #[error("pledgedSrcSize must be a safe integer")]
+  NotSafeInteger,
+  #[class(range)]
+  #[property("code" = "ERR_OUT_OF_RANGE")]
+  #[error("pledgedSrcSize must be non-negative")]
+  Negative,
+}
+
+/// Validate `pledgedSrcSize` as Node's `ZstdStream::Init` does: `undefined`
+/// leaves it unset, and any other value must be a non-negative safe integer.
+fn parse_pledged_src_size(
+  value: v8::Local<v8::Value>,
+) -> Result<Option<u64>, PledgedSrcSizeError> {
+  if value.is_undefined() {
+    return Ok(None);
+  }
+  let Ok(number) = v8::Local::<v8::Number>::try_from(value) else {
+    return Err(PledgedSrcSizeError::NotANumber);
+  };
+  let value = number.value();
+  const MAX_SAFE_INTEGER: f64 = 9007199254740991.0;
+  if !value.is_finite()
+    || value.trunc() != value
+    || value.abs() > MAX_SAFE_INTEGER
+  {
+    return Err(PledgedSrcSizeError::NotSafeInteger);
+  }
+  if value < 0.0 {
+    return Err(PledgedSrcSizeError::Negative);
+  }
+  Ok(Some(value as u64))
+}
+
 #[op2]
 impl ZstdCompress {
   #[constructor]
@@ -1069,20 +1164,20 @@ impl ZstdCompress {
     &self,
     #[buffer] params: &[u32],
     #[scoped] callback: v8::Global<v8::Function>,
-    pledged_src_size: f64,
-  ) -> bool {
+    pledged_src_size: v8::Local<v8::Value>,
+  ) -> Result<bool, JsErrorBox> {
+    let pledged_src_size =
+      parse_pledged_src_size(pledged_src_size).map_err(JsErrorBox::from_err)?;
+
     // Default compression level is 3
     let Ok(mut encoder) = ZstdRawEncoder::new(3) else {
-      return false;
+      return Ok(false);
     };
 
-    // Set pledged source size if provided (non-negative value)
-    if pledged_src_size >= 0.0
-      && encoder
-        .set_pledged_src_size(Some(pledged_src_size as u64))
-        .is_err()
+    if pledged_src_size.is_some()
+      && encoder.set_pledged_src_size(pledged_src_size).is_err()
     {
-      return false;
+      return Ok(false);
     }
 
     // Apply compression parameters
@@ -1114,7 +1209,7 @@ impl ZstdCompress {
             7 => Strategy::ZSTD_btopt,
             8 => Strategy::ZSTD_btultra,
             9 => Strategy::ZSTD_btultra2,
-            _ => return false, // Invalid strategy value
+            _ => return Ok(false), // Invalid strategy value
           };
           CParameter::Strategy(strategy)
         }
@@ -1132,7 +1227,7 @@ impl ZstdCompress {
         _ => continue, // Skip unknown parameters
       };
       if encoder.set_parameter(param).is_err() {
-        return false;
+        return Ok(false);
       }
     }
 
@@ -1140,7 +1235,7 @@ impl ZstdCompress {
       .ctx
       .borrow_mut()
       .replace(ZstdCompressCtx { encoder, callback });
-    true
+    Ok(true)
   }
 
   #[fast]
@@ -1330,8 +1425,62 @@ impl ZstdCompress {
 }
 
 struct ZstdDecompressCtx {
-  decoder: ZstdRawDecoder<'static>,
+  // The raw context, not `zstd::stream::raw::Decoder`: the decoder turns
+  // errors into `io::Error` text, and Node reports the numeric error code.
+  dctx: zstd::zstd_safe::DCtx<'static>,
   callback: v8::Global<v8::Function>,
+}
+
+/// The error code name that Node's `ZstdStrerror` gives for a zstd error.
+fn zstd_error_code_name(
+  code: zstd::zstd_safe::zstd_sys::ZSTD_ErrorCode,
+) -> &'static str {
+  use zstd::zstd_safe::zstd_sys::ZSTD_ErrorCode::*;
+  match code {
+    ZSTD_error_no_error => "ZSTD_error_no_error",
+    ZSTD_error_GENERIC => "ZSTD_error_GENERIC",
+    ZSTD_error_prefix_unknown => "ZSTD_error_prefix_unknown",
+    ZSTD_error_version_unsupported => "ZSTD_error_version_unsupported",
+    ZSTD_error_frameParameter_unsupported => {
+      "ZSTD_error_frameParameter_unsupported"
+    }
+    ZSTD_error_frameParameter_windowTooLarge => {
+      "ZSTD_error_frameParameter_windowTooLarge"
+    }
+    ZSTD_error_corruption_detected => "ZSTD_error_corruption_detected",
+    ZSTD_error_checksum_wrong => "ZSTD_error_checksum_wrong",
+    ZSTD_error_literals_headerWrong => "ZSTD_error_literals_headerWrong",
+    ZSTD_error_dictionary_corrupted => "ZSTD_error_dictionary_corrupted",
+    ZSTD_error_dictionary_wrong => "ZSTD_error_dictionary_wrong",
+    ZSTD_error_dictionaryCreation_failed => {
+      "ZSTD_error_dictionaryCreation_failed"
+    }
+    ZSTD_error_parameter_unsupported => "ZSTD_error_parameter_unsupported",
+    ZSTD_error_parameter_combination_unsupported => {
+      "ZSTD_error_parameter_combination_unsupported"
+    }
+    ZSTD_error_parameter_outOfBound => "ZSTD_error_parameter_outOfBound",
+    ZSTD_error_tableLog_tooLarge => "ZSTD_error_tableLog_tooLarge",
+    ZSTD_error_maxSymbolValue_tooLarge => "ZSTD_error_maxSymbolValue_tooLarge",
+    ZSTD_error_maxSymbolValue_tooSmall => "ZSTD_error_maxSymbolValue_tooSmall",
+    ZSTD_error_stabilityCondition_notRespected => {
+      "ZSTD_error_stabilityCondition_notRespected"
+    }
+    ZSTD_error_stage_wrong => "ZSTD_error_stage_wrong",
+    ZSTD_error_init_missing => "ZSTD_error_init_missing",
+    ZSTD_error_memory_allocation => "ZSTD_error_memory_allocation",
+    ZSTD_error_workSpace_tooSmall => "ZSTD_error_workSpace_tooSmall",
+    ZSTD_error_dstSize_tooSmall => "ZSTD_error_dstSize_tooSmall",
+    ZSTD_error_srcSize_wrong => "ZSTD_error_srcSize_wrong",
+    ZSTD_error_dstBuffer_null => "ZSTD_error_dstBuffer_null",
+    ZSTD_error_noForwardProgress_destFull => {
+      "ZSTD_error_noForwardProgress_destFull"
+    }
+    ZSTD_error_noForwardProgress_inputEmpty => {
+      "ZSTD_error_noForwardProgress_inputEmpty"
+    }
+    _ => "ZSTD_error_GENERIC",
+  }
 }
 
 pub struct ZstdDecompress {
@@ -1361,13 +1510,18 @@ impl ZstdDecompress {
     &self,
     #[buffer] params: &[u32],
     #[scoped] callback: v8::Global<v8::Function>,
-    _pledged_src_size: f64, // Unused for decompression, but needed for API consistency
-  ) -> bool {
+    pledged_src_size: v8::Local<v8::Value>,
+  ) -> Result<bool, JsErrorBox> {
+    use zstd::zstd_safe::DCtx;
     use zstd::zstd_safe::DParameter;
 
-    let Ok(mut decoder) = ZstdRawDecoder::new() else {
-      return false;
-    };
+    // Unused for decompression, but Node validates it for both modes.
+    parse_pledged_src_size(pledged_src_size).map_err(JsErrorBox::from_err)?;
+
+    let mut dctx = DCtx::create();
+    if dctx.init().is_err() {
+      return Ok(false);
+    }
 
     // Apply decompression parameters
     for (i, &value) in params.iter().enumerate() {
@@ -1379,16 +1533,16 @@ impl ZstdDecompress {
         100 => DParameter::WindowLogMax(value),
         _ => continue, // Skip unknown parameters
       };
-      if decoder.set_parameter(param).is_err() {
-        return false;
+      if dctx.set_parameter(param).is_err() {
+        return Ok(false);
       }
     }
 
     self
       .ctx
       .borrow_mut()
-      .replace(ZstdDecompressCtx { decoder, callback });
-    true
+      .replace(ZstdDecompressCtx { dctx, callback });
+    Ok(true)
   }
 
   #[fast]
@@ -1400,7 +1554,7 @@ impl ZstdDecompress {
   fn reset(&self) {
     let mut ctx = self.ctx.borrow_mut();
     if let Some(ctx) = ctx.as_mut() {
-      let _ = ctx.decoder.reinit();
+      let _ = ctx.dctx.reset(zstd::zstd_safe::ResetDirective::SessionOnly);
     }
   }
 
@@ -1422,7 +1576,7 @@ impl ZstdDecompress {
     use zstd::stream::raw::InBuffer;
     use zstd::stream::raw::OutBuffer;
 
-    let callback = {
+    let (result, callback) = {
       let mut ctx = self.ctx.borrow_mut();
       let ctx = ctx.as_mut().expect("ZstdDecompress not initialized");
 
@@ -1432,12 +1586,7 @@ impl ZstdDecompress {
       let mut in_buffer = InBuffer::around(input_slice);
       let mut out_buffer = OutBuffer::around(output_slice);
 
-      ctx
-        .decoder
-        .run(&mut in_buffer, &mut out_buffer)
-        .map_err(|e| {
-          JsErrorBox::generic(format!("Zstd decompress error: {}", e))
-        })?;
+      let result = ctx.dctx.decompress_stream(&mut out_buffer, &mut in_buffer);
 
       let avail_in = in_len as usize - in_buffer.pos();
       let avail_out = out_len as usize - out_buffer.pos();
@@ -1447,11 +1596,29 @@ impl ZstdDecompress {
         write_result[1] = avail_in as u32;
       }
 
-      v8::Local::new(scope, &ctx.callback)
+      (result, v8::Local::new(scope, &ctx.callback))
     };
 
     let this = v8::Local::new(scope, &this);
-    let _ = callback.call(scope, this.into(), &[]);
+    match result {
+      Ok(_) => {
+        let _ = callback.call(scope, this.into(), &[]);
+      }
+      // Match Node: report the error to `onerror` with zstd's message, the
+      // numeric error code, and its `ZSTD_error_*` name.
+      Err(code) => {
+        // SAFETY: `ZSTD_getErrorCode` only reads its argument.
+        let error =
+          unsafe { zstd::zstd_safe::zstd_sys::ZSTD_getErrorCode(code) };
+        call_onerror(
+          scope,
+          this,
+          zstd::zstd_safe::get_error_name(code),
+          error as i32,
+          zstd_error_code_name(error),
+        );
+      }
+    }
 
     Ok(())
   }
@@ -1481,10 +1648,13 @@ impl ZstdDecompress {
     let mut out_buffer = OutBuffer::around(output_slice);
 
     ctx
-      .decoder
-      .run(&mut in_buffer, &mut out_buffer)
-      .map_err(|e| {
-        JsErrorBox::generic(format!("Zstd decompress error: {}", e))
+      .dctx
+      .decompress_stream(&mut out_buffer, &mut in_buffer)
+      .map_err(|code| {
+        JsErrorBox::generic(format!(
+          "Zstd decompress error: {}",
+          zstd::zstd_safe::get_error_name(code)
+        ))
       })?;
 
     let avail_in = in_len as usize - in_buffer.pos();
@@ -1524,6 +1694,28 @@ pub fn op_zlib_crc32(#[buffer] data: &[u8], value: u32) -> u32 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn brotli_decoder_error_names() {
+    use ffi::decompressor::ffi::BrotliDecoderErrorCode as Code;
+    assert_eq!(
+      brotli_decoder_error_name(
+        Code::BROTLI_DECODER_ERROR_FORMAT_PADDING_2 as i32
+      ),
+      "_ERROR_FORMAT_PADDING_2"
+    );
+    assert_eq!(
+      brotli_decoder_error_name(
+        Code::BROTLI_DECODER_ERROR_FORMAT_CL_SPACE as i32
+      ),
+      "_ERROR_FORMAT_CL_SPACE"
+    );
+    assert_eq!(
+      brotli_decoder_error_name(Code::BROTLI_DECODER_ERROR_UNREACHABLE as i32),
+      "_ERROR_UNREACHABLE"
+    );
+    assert_eq!(brotli_decoder_error_name(-17), "INVALID");
+  }
 
   #[test]
   fn brotli_encoder_operation_values() {

@@ -57,6 +57,7 @@ const {
     ERR_INVALID_ARG_TYPE,
     ERR_METHOD_NOT_IMPLEMENTED,
     ERR_OUT_OF_RANGE,
+    ERR_STREAM_ITER_MISSING_FLAG,
     ERR_STREAM_PUSH_AFTER_EOF,
     ERR_STREAM_UNSHIFT_AFTER_END_EVENT,
     ERR_UNKNOWN_ENCODING,
@@ -99,6 +100,7 @@ const {
   Symbol,
   SymbolAsyncDispose,
   SymbolAsyncIterator,
+  SymbolFor,
   SymbolSpecies,
   TypedArrayPrototypeSet,
 } = primordials;
@@ -1887,6 +1889,51 @@ Readable.wrap = function (src, options) {
     },
   }).wrap(src);
 };
+
+// Interop with the stream/iter API via the toAsyncStreamable protocol.
+//
+// The batched iterator logic lives in classic.js (shared with the
+// fromReadable() utility for duck-typed streams). This prototype method
+// calls createBatchedAsyncIterator directly -- it must NOT call
+// fromReadable() since fromReadable() checks for toAsyncStreamable,
+// which would create infinite recursion.
+//
+// The flag cannot be checked at module load time (readable.js loads during
+// bootstrap before options are available). Instead, toAsyncStreamable is
+// always defined but lazily initializes on first call -- throwing if the
+// flag is not set.
+{
+  const toAsyncStreamable = SymbolFor("Stream.toAsyncStreamable");
+  let createBatchedAsyncIterator;
+  let normalizeBatch;
+  let kValidatedSource;
+
+  Readable.prototype[toAsyncStreamable] = function () {
+    if (createBatchedAsyncIterator === undefined) {
+      const { getOptionValue } = core.loadExtScript(
+        "ext:deno_node/internal/options.ts",
+      );
+      if (!getOptionValue("--experimental-stream-iter")) {
+        throw new ERR_STREAM_ITER_MISSING_FLAG();
+      }
+      ({
+        createBatchedAsyncIterator,
+        normalizeBatch,
+      } = core.loadExtScript("ext:deno_node/internal/streams/iter/classic.js"));
+      ({ kValidatedSource } = core.loadExtScript(
+        "ext:deno_node/internal/streams/iter/types.js",
+      ));
+    }
+    const state = this._readableState;
+    const normalize = (state.objectMode || state.encoding)
+      ? normalizeBatch
+      : null;
+    const iter = createBatchedAsyncIterator(this, normalize);
+    iter[kValidatedSource] = true;
+    iter.stream = this;
+    return iter;
+  };
+}
 
 return { default: Readable, Readable };
 })();

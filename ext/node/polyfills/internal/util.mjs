@@ -97,6 +97,13 @@ function isError(e) {
   return isNativeError(e) || ObjectPrototypeIsPrototypeOf(ErrorPrototype, e);
 }
 
+let _DOMException;
+function lazyDOMException(message, name) {
+  _DOMException ??= core.loadExtScript("ext:deno_web/01_dom_exception.js")
+    .DOMException;
+  return new _DOMException(message, name);
+}
+
 function promisify(
   original,
 ) {
@@ -296,6 +303,7 @@ return {
   kEmptyObject,
   kEnumerableProperty,
   kCustomPromisifiedSymbol,
+  lazyDOMException,
   normalizeEncoding,
   once,
   pendingDeprecate,
@@ -313,6 +321,7 @@ return {
     isError,
     kEmptyObject,
     kEnumerableProperty,
+    lazyDOMException,
     normalizeEncoding,
     once,
     pendingDeprecate,

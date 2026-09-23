@@ -1191,11 +1191,7 @@ class Zstd extends ZlibBase {
 
     const writeState = new Uint32Array(2);
     setupHandleWriteState(handle, writeState);
-    // pledgedSrcSize is only used for compression, use -1 to indicate "not set"
-    const pledgedSrcSize =
-      mode === ZSTD_COMPRESS && opts?.pledgedSrcSize != null
-        ? opts.pledgedSrcSize
-        : -1;
+    const pledgedSrcSize = opts?.pledgedSrcSize;
     const success = handle.init(
       initParamsArray,
       processCallback,
