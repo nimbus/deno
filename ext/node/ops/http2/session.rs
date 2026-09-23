@@ -2047,6 +2047,12 @@ pub struct Session {
   /// handle close is deferred until send_pending_data can run, allowing
   /// GOAWAY to be sent before the connection closes.
   pub pending_destroy: bool,
+  /// True while a `send_pending_data` flush is armed on the native
+  /// immediate queue. Mirrors Node's `SESSION_STATE_WRITE_SCHEDULED`:
+  /// `schedule_send_pending` coalesces on it and `send_pending_data`
+  /// clears it, so a flush that runs early makes the armed immediate a
+  /// no-op.
+  pub write_scheduled: bool,
   /// True while `get_outgoing_chunk` is inside `nghttp2_session_mem_send`
   /// on the JS-socket transport. It complements `is_sending`: native
   /// teardown uses `is_sending` to defer resource release, while write
@@ -2544,10 +2550,111 @@ impl Session {
     unsafe { &mut *(user_data as *mut Session) }
   }
 
+  /// Arm `send_pending_data` for the next check phase.
+  ///
+  /// This is the fork's counterpart of Node's
+  /// `Http2Session::MaybeScheduleWrite`, which defers `SendPendingData`
+  /// through `Environment::SetImmediate`. A native immediate runs in the
+  /// check phase before JS immediates and in the same drain as the
+  /// completions of the socket writes it issues: a synchronous TLS write
+  /// queues its completion onto the same queue, so the write callback
+  /// fires in the same tick as the flush instead of after the next poll
+  /// phase (test-http2-client-jsstream-destroy). Repeated calls coalesce
+  /// on `write_scheduled`. The immediate is a no-op when the session was
+  /// destroyed or an earlier flush already cleared the flag. The JS
+  /// callers own the want-write decision, as they do for every other
+  /// flush on the JS-socket transport.
+  pub fn schedule_send_pending(&mut self) {
+    if self.session.is_null() || self.write_scheduled {
+      return;
+    }
+    self.write_scheduled = true;
+    let loop_ = {
+      let state = self.op_state.borrow();
+      &**state.borrow::<Box<deno_core::uv_compat::uv_loop_t>>()
+        as *const deno_core::uv_compat::uv_loop_t
+        as *mut deno_core::uv_compat::uv_loop_t
+    };
+    let native = self.native.clone();
+    let session_ptr: *mut Session = self;
+    let flush = Box::new(move || {
+      if native.session.get().is_null() {
+        // Destroyed (or torn down) before this turn of the event loop.
+        return;
+      }
+      // SAFETY: `close_native_resources` nulls `native.session` before
+      // `Http2Session::teardown` frees the Session box, so a non-null
+      // nghttp2 session proves the box is still alive.
+      let session = unsafe { &mut *session_ptr };
+      if !session.write_scheduled {
+        // An earlier flush (for example a RST_STREAM drain) already
+        // ran; Node's SetImmediate callback returns here too.
+        return;
+      }
+      session.run_scheduled_send_pending();
+    });
+    // SAFETY: loop_ is the runtime's uv loop, which outlives every session
+    // created through its OpState.
+    unsafe {
+      deno_core::uv_compat::uv_queue_native_immediate(loop_, flush);
+    }
+  }
+
+  /// Run the flush armed by `schedule_send_pending` through the handle's
+  /// JS `sendPending` method, so the JS-socket override (one
+  /// `socket.write` per outgoing chunk) and the consumed-stream native
+  /// path both take their usual route. The JS call may destroy the session
+  /// and free this box, so nothing touches `self` after the call.
+  fn run_scheduled_send_pending(&mut self) {
+    self.write_scheduled = false;
+    let Some(this) = self.this.as_ref() else {
+      return;
+    };
+    let this = this.clone();
+    let context = self.context.clone();
+    let isolate_ptr = self.isolate;
+    // SAFETY: isolate pointer is valid for the session's lifetime, and the
+    // immediate only runs while the nghttp2 session is alive.
+    let mut isolate = unsafe { v8::Isolate::from_raw_isolate_ptr(isolate_ptr) };
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Local::new(handle_scope, context);
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+    let this_local = v8::Local::new(scope, this);
+    let key =
+      v8::String::new_external_onebyte_static(scope, b"sendPending").unwrap();
+    // The TryCatch covers the property lookup as well as the call: a
+    // throwing getter leaves the exception pending, and this runs on the
+    // event loop's shared scope.
+    let caught_exception = {
+      v8::tc_scope!(tc, scope);
+      let Some(send_pending) = this_local.get(tc, key.into()) else {
+        tc.reset();
+        return;
+      };
+      let Ok(func) = v8::Local::<v8::Function>::try_from(send_pending) else {
+        return;
+      };
+      let result = func.call(tc, this_local.into(), &[]);
+      if result.is_none() && tc.has_caught() {
+        let exc = tc.exception();
+        tc.reset();
+        exc
+      } else {
+        None
+      }
+    };
+    if let Some(exception) = caught_exception {
+      crate::ops::stream_wrap::call_fatal_exception(scope, exception);
+    }
+  }
+
   pub fn send_pending_data(&mut self) {
     if self.session.is_null() {
       return;
     }
+    // A flush is running now, so an armed check-phase flush has nothing
+    // left to do (Node: `SendPendingData` clears the scheduled flag first).
+    self.write_scheduled = false;
     // Prevent recursive calls. JS callbacks from nghttp2_session_mem_recv
     // can call back into send_pending_data via scheduleSendPending. Nested
     // nghttp2_session_mem_send can close/free streams that mem_recv still
@@ -2914,6 +3021,7 @@ impl Http2Session {
       stream: None,
       is_sending: false,
       pending_destroy: false,
+      write_scheduled: false,
       draining_outgoing: false,
       pending_rst_streams: Vec::new(),
       max_header_pairs: options.max_header_pairs(),
@@ -3120,6 +3228,18 @@ impl Http2Session {
     // SAFETY: self.inner was allocated by Box::into_raw and is valid
     let session = unsafe { &mut *self.inner.get() };
     session.send_pending_data();
+  }
+
+  /// Defer `sendPending` to the next check phase on the native immediate
+  /// queue (Node: `Http2Session::MaybeScheduleWrite` -> `SetImmediate`).
+  #[fast]
+  fn schedule_send_pending(&self) {
+    if self.inner.get().is_null() {
+      return;
+    }
+    // SAFETY: self.inner was allocated by Box::into_raw and is valid
+    let session = unsafe { &mut *self.inner.get() };
+    session.schedule_send_pending();
   }
 
   /// Drain a single outgoing h2 chunk from nghttp2's send queue.

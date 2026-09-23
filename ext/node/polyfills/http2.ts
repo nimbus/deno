@@ -402,6 +402,19 @@ function scheduleSendPending(session) {
   handle.sendPending();
 }
 
+// Arm the flush for the next check phase on the native immediate queue,
+// the way Node's `Http2Session::MaybeScheduleWrite` defers
+// `SendPendingData` through `Environment::SetImmediate`. Unlike a JS
+// setImmediate, the native immediate drains in the same phase as the
+// completions of the socket writes it issues, so a synchronous TLS write
+// reports back in the same tick instead of after the next poll phase.
+function scheduleSendPendingImmediate(session) {
+  if (!session) return;
+  const handle = session[kHandle];
+  if (!handle) return;
+  handle.scheduleSendPending();
+}
+
 // Per-session "writes pending nghttp2 mem_send" counter. Used to skip
 // re-scheduling the nextTick flush when one is already armed and to detect
 // pending writes that need to be drained synchronously by RST_STREAM /
@@ -1317,13 +1330,13 @@ function requestOnConnect(headersList, options) {
     return;
   }
   this[kInit](ret.id(), ret);
-  // Defer the HEADERS flush via setImmediate so any pending I/O
+  // Defer the HEADERS flush to the check phase so any pending I/O
   // (incoming server SETTINGS for an in-process Duplex pair, or just-
   // queued data writes that the writer wants to coalesce with the
   // next end()) runs first. nghttp2 then drains SETTINGS_ACK +
   // HEADERS together in priority order; settings frames come out
   // first, matching Node's libuv-driven write sequence.
-  setImmediate(scheduleSendPending, session);
+  scheduleSendPendingImmediate(session);
   if (onClientStreamStartChannel.hasSubscribers) {
     onClientStreamStartChannel.publish({
       stream: this,
@@ -1819,7 +1832,7 @@ function shutdownWritable(callback) {
       (err === 1 && !(state.flags & STREAM_FLAGS_HAS_TRAILERS))) &&
     !(state.flags & STREAM_FLAGS_CLOSED)
   ) {
-    setImmediate(scheduleSendPending, this[kSession]);
+    scheduleSendPendingImmediate(this[kSession]);
   } else {
     scheduleSendPending(this[kSession]);
   }

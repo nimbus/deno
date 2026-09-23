@@ -265,6 +265,13 @@ pub(crate) struct UvLoopInner {
   tty_handles: RefCell<Vec<*mut uv_tty_t>>,
   waker: RefCell<Option<Waker>>,
   closing_handles: RefCell<VecDeque<(*mut uv_handle_t, Option<uv_close_cb>)>>,
+  /// Native immediates, matching Node's `Environment::SetImmediate` for
+  /// native completions. They run in the check phase before the JS
+  /// `setImmediate` callbacks; see `run_native_immediates` and the event
+  /// loop's Phase 5. Node's `RunAndClearNativeImmediates` shifts from the
+  /// live queue, so a callback queued while the queue drains runs in the
+  /// same check phase.
+  native_immediates: RefCell<VecDeque<Box<dyn FnOnce()>>>,
   time_origin: Instant,
   /// Cached loop time in milliseconds. Updated once per tick via
   /// `update_time()`, matching libuv's `uv_update_time` semantics.
@@ -290,6 +297,7 @@ impl UvLoopInner {
       tty_handles: RefCell::new(Vec::with_capacity(4)),
       waker: RefCell::new(None),
       closing_handles: RefCell::new(VecDeque::with_capacity(16)),
+      native_immediates: RefCell::new(VecDeque::new()),
       time_origin: origin,
       cached_time_ms: Cell::new(0),
       shared: waker::LoopShared::new(),
@@ -423,7 +431,39 @@ impl UvLoopInner {
     if !self.closing_handles.borrow().is_empty() {
       return true;
     }
+    // A queued native immediate is refed work, like Node's default
+    // `SetImmediate`: the loop stays alive until it runs.
+    if self.has_native_immediates() {
+      return true;
+    }
     false
+  }
+
+  /// Queue a callback for the check phase of the current or next event loop
+  /// iteration. It runs before the JS `setImmediate` callbacks.
+  pub(crate) fn queue_native_immediate(&self, cb: Box<dyn FnOnce()>) {
+    self.native_immediates.borrow_mut().push_back(cb);
+  }
+
+  pub(crate) fn has_native_immediates(&self) -> bool {
+    !self.native_immediates.borrow().is_empty()
+  }
+
+  /// Run every queued native immediate, including the ones queued while
+  /// draining. Returns `true` when at least one callback ran. The caller
+  /// owns the nextTick and microtask drain that follows, matching the single
+  /// `InternalCallbackScope` around Node's `RunAndClearNativeImmediates`.
+  pub(crate) fn run_native_immediates(&self) -> bool {
+    let mut ran = false;
+    loop {
+      let cb = self.native_immediates.borrow_mut().pop_front();
+      let Some(cb) = cb else {
+        break;
+      };
+      cb();
+      ran = true;
+    }
+    ran
   }
 
   /// ### Safety
@@ -997,6 +1037,23 @@ pub unsafe fn uv_loop_get_inner_ptr(
 ) -> *const std::ffi::c_void {
   // SAFETY: Caller guarantees loop_ is valid and was initialized by uv_loop_init.
   unsafe { (*loop_).internal as *const std::ffi::c_void }
+}
+
+/// Queue a native immediate on `loop_`. The callback runs in the check phase
+/// of the current or next event loop iteration, before the JS `setImmediate`
+/// callbacks, and keeps the loop alive until it runs. This is the equivalent
+/// of Node's `Environment::SetImmediate` for a native completion, such as a
+/// stream write that finished synchronously.
+///
+/// ### Safety
+/// `loop_` must be a valid pointer to a `uv_loop_t` previously initialized by
+/// `uv_loop_init`, and the call must come from the loop's thread.
+pub unsafe fn uv_queue_native_immediate(
+  loop_: *mut uv_loop_t,
+  cb: Box<dyn FnOnce()>,
+) {
+  // SAFETY: Caller guarantees loop_ is valid and was initialized by uv_loop_init.
+  unsafe { get_inner(loop_) }.queue_native_immediate(cb);
 }
 
 /// ### Safety

@@ -41,6 +41,7 @@ use deno_core::ToJsBuffer;
 use deno_core::V8TaskSpawner;
 use deno_core::op2;
 use deno_core::uv_compat;
+use deno_core::uv_compat::UV_EAGAIN;
 use deno_core::uv_compat::UV_EBADF;
 use deno_core::uv_compat::UV_ECANCELED;
 use deno_core::uv_compat::UV_EOF;
@@ -969,33 +970,75 @@ impl UnderlyingStream {
     }
   }
 
-  fn write(&self, write_req: Box<EncryptedWriteReq>) -> (*mut uv_write_t, i32) {
+  /// Hand an encrypted buffer to the underlying stream, the equivalent of
+  /// `underlying_stream()->Write()` in Node's `TLSWrap::EncOut`.
+  fn write(&self, write_req: Box<EncryptedWriteReq>) -> EncWriteDispatch {
     match self {
       UnderlyingStream::Uv { stream } => {
         if stream.is_null() {
-          return (std::ptr::null_mut(), UV_EBADF);
+          return EncWriteDispatch::Failed {
+            req: std::ptr::null_mut(),
+            status: UV_EBADF,
+          };
         }
         let mut write_req = write_req;
+        // Node's `StreamBase::Write` calls `DoTryWrite` before it queues a
+        // `WriteWrap`, so a buffer the kernel accepts at once never becomes
+        // an asynchronous libuv write. `UV_EAGAIN` counts as zero bytes
+        // written; any other error is the write's result.
+        // SAFETY: stream is a valid, initialized uv stream while attached.
+        let written =
+          unsafe { uv_compat::uv_try_write(*stream, &write_req._data) };
+        let req_ptr = &mut write_req.uv_req as *mut uv_write_t;
+        let written = if written == UV_EAGAIN {
+          0
+        } else if written < 0 {
+          let _ = Box::into_raw(write_req); // reclaimed by the caller
+          return EncWriteDispatch::Failed {
+            req: req_ptr,
+            status: written,
+          };
+        } else {
+          written as usize
+        };
+        if written == write_req._data.len() {
+          // SAFETY: stream is valid (see above); the loop outlives it.
+          let loop_ = unsafe { (**stream).loop_ };
+          return EncWriteDispatch::Sync { loop_ };
+        }
+        write_req._data.drain(..written);
         let data_len = write_req._data.len();
         let buf = uv_buf_t {
           base: write_req._data.as_mut_ptr() as *mut c_char,
           len: data_len,
         };
-        let req_ptr = &mut write_req.uv_req as *mut uv_write_t;
         let _ = Box::into_raw(write_req); // freed in enc_write_cb
         // SAFETY: req_ptr and stream are valid; req is reclaimed in enc_write_cb or on error
         let ret = unsafe {
           uv_compat::uv_write(req_ptr, *stream, &buf, 1, Some(enc_write_cb))
         };
-        (req_ptr, ret)
+        if ret == 0 {
+          EncWriteDispatch::Async
+        } else {
+          EncWriteDispatch::Failed {
+            req: req_ptr,
+            status: ret,
+          }
+        }
       }
       UnderlyingStream::Js { .. } => {
         // For JS streams, enc_out should not be called — encrypted data
         // goes through the JS-side write callback. This path should not
         // be reached in normal operation. If it is, treat as EBADF.
-        (std::ptr::null_mut(), UV_EBADF)
+        EncWriteDispatch::Failed {
+          req: std::ptr::null_mut(),
+          status: UV_EBADF,
+        }
       }
-      UnderlyingStream::None => (std::ptr::null_mut(), UV_EBADF),
+      UnderlyingStream::None => EncWriteDispatch::Failed {
+        req: std::ptr::null_mut(),
+        status: UV_EBADF,
+      },
     }
   }
 
@@ -1039,6 +1082,22 @@ impl UnderlyingStream {
 // until the underlying stream's write completes.
 // ---------------------------------------------------------------------------
 
+/// Outcome of handing an encrypted buffer to the underlying stream. Mirrors
+/// the `StreamWriteResult` that Node's `TLSWrap::EncOut` consumes.
+enum EncWriteDispatch {
+  /// The whole buffer was written synchronously (`res.async == false`).
+  /// `enc_write_cb` will not run: `enc_out_uv` completes the write from a
+  /// native immediate on `loop_`, as `EncOut` does with `SetImmediate`.
+  Sync { loop_: *mut uv_compat::uv_loop_t },
+  /// The write is queued on the stream; `enc_write_cb` completes it.
+  Async,
+  /// The stream refused the write with a libuv error (`res.err`). `req` is
+  /// the request to reclaim when it is non-null.
+  Failed { req: *mut uv_write_t, status: i32 },
+}
+
+/// `uv_req` must stay the first field: `enc_write_cb` and the failure path
+/// in `enc_out_uv` reclaim the whole request from the `uv_write_t` pointer.
 #[repr(C)]
 struct EncryptedWriteReq {
   uv_req: uv_write_t,
@@ -1864,8 +1923,34 @@ impl TLSWrapInner {
     });
 
     self.enc_writes_in_flight += 1;
-    let (req_ptr, ret) = self.underlying.write(write_req);
-    if ret != 0 {
+    let (req_ptr, ret) = match self.underlying.write(write_req) {
+      EncWriteDispatch::Async => return,
+      EncWriteDispatch::Sync { loop_ } => {
+        // Node's `EncOut` on a synchronous write: "Simulate asynchronous
+        // finishing" with `SetImmediate(OnStreamAfterWrite(nullptr, 0))`.
+        // The native immediate runs in this iteration's check phase,
+        // before the JS immediates and before the next I/O poll can
+        // deliver new readiness, so the write callback and any chained
+        // writes observe the same ordering as Node.
+        let alive = self.alive.clone();
+        let ptr = self_ptr;
+        // SAFETY: loop_ is the live loop of the stream just written to;
+        // the callback checks `alive` before it touches `ptr`.
+        unsafe {
+          uv_compat::uv_queue_native_immediate(
+            loop_,
+            Box::new(move || {
+              if alive.get() {
+                on_enc_write_complete(ptr, 0);
+              }
+            }),
+          );
+        }
+        return;
+      }
+      EncWriteDispatch::Failed { req, status } => (req, status),
+    };
+    {
       self.enc_writes_in_flight -= 1;
       let should_invoke = if !req_ptr.is_null() {
         // Failed to write — reclaim the request
@@ -1899,8 +1984,9 @@ impl TLSWrapInner {
         }
       }
     }
-    // Note: for successful writes, invoke_queued is called from enc_write_cb
-    // when the uv_write completes asynchronously.
+    // Note: for successful writes, invoke_queued is called from
+    // on_enc_write_complete, from enc_write_cb when the uv_write completes
+    // asynchronously or from the native immediate queued above.
   }
 
   /// Finalizer-safe cleanup that does NOT invoke JS callbacks.
@@ -2032,36 +2118,50 @@ unsafe extern "C" fn shutdown_cb(
   }
 }
 
-/// Callback for when encrypted write to underlying stream completes.
+/// Callback for when an asynchronous encrypted write to the underlying
+/// stream completes.
 unsafe extern "C" fn enc_write_cb(req: *mut uv_write_t, status: i32) {
   // SAFETY: req was created via Box::into_raw in enc_out; tls_wrap_inner is
   // valid if non-null AND alive flag is set.
   unsafe {
     let write_req = Box::from_raw(req as *mut EncryptedWriteReq);
     if !write_req.tls_wrap_inner.is_null() && write_req.alive.get() {
-      let ptr = write_req.tls_wrap_inner;
-      (*ptr).enc_writes_in_flight =
-        (*ptr).enc_writes_in_flight.saturating_sub(1);
-      if (*ptr).enc_writes_in_flight == 0 && status >= 0 {
-        // If clear_in() was rate-limited (MAX_CLEAR_IN) and left
-        // pending cleartext, drain the next chunk now. Without
-        // this the remaining bytes are never fed to rustls and the
-        // peer never receives the full body ("socket hang up").
-        if (*ptr).pending_cleartext.len() > (*ptr).pending_cleartext_offset {
-          (*ptr).clear_in();
-        }
-        let enc_action = (*ptr).enc_out_collect();
-        // enc_write_cb runs from the libuv event loop, not an op, so the
-        // completion callback fires synchronously (WriteCompletion::Sync) to
-        // match Node's write-callback timing. See `do_enc_out_action`.
-        TLSWrapInner::do_enc_out_action(ptr, enc_action, WriteCompletion::Sync);
-      } else if (*ptr).enc_writes_in_flight == 0
-        && (*ptr).write_callback_scheduled
-      {
-        // Write failed — still need to fire the JS completion callback
-        if let Some((write_obj, ctx)) = prepare_invoke_queued(ptr) {
-          do_invoke_queued(&ctx, write_obj, status);
-        }
+      on_enc_write_complete(write_req.tls_wrap_inner, status);
+    }
+  }
+}
+
+/// Complete one encrypted write on the underlying stream, the equivalent of
+/// Node's `TLSWrap::OnStreamAfterWrite`. Runs from `enc_write_cb` for an
+/// asynchronous write, or from the native immediate that `enc_out_uv` queues
+/// for a write that finished synchronously.
+///
+/// ### Safety
+/// `ptr` must point to a `TLSWrapInner` whose `alive` flag is set, and the
+/// caller must not hold the `OpState` borrow.
+unsafe fn on_enc_write_complete(ptr: *mut TLSWrapInner, status: i32) {
+  unsafe {
+    (*ptr).enc_writes_in_flight = (*ptr).enc_writes_in_flight.saturating_sub(1);
+    if (*ptr).enc_writes_in_flight == 0 && status >= 0 {
+      // If clear_in() was rate-limited (MAX_CLEAR_IN) and left
+      // pending cleartext, drain the next chunk now. Without
+      // this the remaining bytes are never fed to rustls and the
+      // peer never receives the full body ("socket hang up").
+      if (*ptr).pending_cleartext.len() > (*ptr).pending_cleartext_offset {
+        (*ptr).clear_in();
+      }
+      let enc_action = (*ptr).enc_out_collect();
+      // This runs from the event loop (a libuv callback or the check
+      // phase), not an op, so the completion callback fires synchronously
+      // (WriteCompletion::Sync) to match Node's write-callback timing. See
+      // `do_enc_out_action`.
+      TLSWrapInner::do_enc_out_action(ptr, enc_action, WriteCompletion::Sync);
+    } else if (*ptr).enc_writes_in_flight == 0
+      && (*ptr).write_callback_scheduled
+    {
+      // Write failed — still need to fire the JS completion callback
+      if let Some((write_obj, ctx)) = prepare_invoke_queued(ptr) {
+        do_invoke_queued(&ctx, write_obj, status);
       }
     }
   }

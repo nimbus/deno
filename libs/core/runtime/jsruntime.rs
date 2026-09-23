@@ -16,6 +16,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
@@ -544,6 +546,33 @@ pub type ExtensionSourceProvider =
 
 /// Internal state for JsRuntime which is stored in one of v8::Isolate's
 /// embedder slots.
+/// Holds the event loop between a tick that queued more work and the next
+/// tokio I/O driver poll. See [`JsRuntime::rewake_after_io_driver_poll`].
+#[derive(Default)]
+pub(crate) struct IoDriverPollGate {
+  /// True from the deferred re-wake request until tokio fires it.
+  waiting: AtomicBool,
+  /// The event loop task, woken once the driver poll has happened.
+  task: AtomicWaker,
+}
+
+impl IoDriverPollGate {
+  fn is_waiting(&self) -> bool {
+    self.waiting.load(Ordering::Acquire)
+  }
+}
+
+impl std::task::Wake for IoDriverPollGate {
+  fn wake(self: Arc<Self>) {
+    self.wake_by_ref();
+  }
+
+  fn wake_by_ref(self: &Arc<Self>) {
+    self.waiting.store(false, Ordering::Release);
+    self.task.wake();
+  }
+}
+
 pub struct JsRuntimeState {
   pub(crate) source_mapper: Rc<RefCell<SourceMapper>>,
   pub(crate) op_state: Rc<RefCell<OpState>>,
@@ -573,6 +602,9 @@ pub struct JsRuntimeState {
   pub(crate) function_templates: Rc<RefCell<FunctionTemplateData>>,
   pub(crate) callsite_prototype: RefCell<Option<v8::Global<v8::Object>>>,
   waker: Arc<AtomicWaker>,
+  /// Gate that holds the next event loop tick until tokio has polled its
+  /// I/O driver. See [`JsRuntime::rewake_after_io_driver_poll`].
+  io_driver_poll_gate: Arc<IoDriverPollGate>,
   /// Foreground V8 tasks queued by the custom platform. Shared with the
   /// global isolate registry so background threads can push tasks, while
   /// the event loop drains them without touching the global map.
@@ -969,6 +1001,7 @@ impl JsRuntime {
         eval_context_set_code_cache_cb,
       ),
       waker: waker.clone(),
+      io_driver_poll_gate: Arc::new(IoDriverPollGate::default()),
       foreground_tasks: Default::default(),
       // Some fields are initialized later after isolate is created
       inspector: None.into(),
@@ -2667,6 +2700,13 @@ impl JsRuntime {
     let has_inspector = self.inner.state.has_inspector.get();
     self.inner.state.waker.register(cx.waker());
 
+    // A poll that arrives before tokio has polled its I/O driver (for example
+    // a direct wake from another task) must not run a tick, or immediates
+    // would run ahead of readiness the kernel already reported.
+    if self.inner.state.io_driver_poll_gate.is_waiting() {
+      return Poll::Pending;
+    }
+
     // Pre-phase: Inspector + drain foreground tasks + microtask checkpoint
     if has_inspector {
       self.inspector().poll_sessions_from_event_loop(cx);
@@ -2801,6 +2841,20 @@ impl JsRuntime {
     // (libuv check phase, after I/O).
     if let Some(uv_inner_ptr) = context_state.uv_loop_inner.get() {
       unsafe { (*uv_inner_ptr).run_check() };
+      // Native immediates run before the JS immediates, matching Node's
+      // `CheckImmediate`: `RunAndClearNativeImmediates` drains its queue,
+      // including callbacks queued while draining, inside one
+      // `InternalCallbackScope`, so nextTicks and microtasks drain once
+      // after the whole queue.
+      if unsafe { (*uv_inner_ptr).run_native_immediates() } {
+        did_work = true;
+        exception_state.check_exception_condition(scope)?;
+        if context_state.has_tick_scheduled() {
+          Self::drain_next_tick_and_macrotasks(scope, context_state)?;
+        } else {
+          scope.perform_microtask_checkpoint();
+        }
+      }
     }
     // Drain immediates in the check phase, matching Node.js semantics:
     // - Refed immediates always fire (they keep the event loop alive).
@@ -2922,6 +2976,16 @@ impl JsRuntime {
       }
     }
 
+    // A native immediate queued after the check phase, for example from a
+    // close callback, needs the next iteration now; Node's refed
+    // `SetImmediate` makes the poll timeout zero the same way.
+    let uv_has_native_immediates =
+      if let Some(uv_inner_ptr) = context_state.uv_loop_inner.get() {
+        unsafe { (*uv_inner_ptr).has_native_immediates() }
+      } else {
+        false
+      };
+
     // Re-wake logic for next iteration
     #[allow(
       clippy::suspicious_else_formatting,
@@ -2936,15 +3000,16 @@ impl JsRuntime {
         || pending_state.has_pending_promise_events
         || pending_state.has_pending_close_callbacks
         || uv_did_io
+        || uv_has_native_immediates
       {
-        self.inner.state.waker.wake();
+        self.rewake_after_io_driver_poll(cx);
       } else
       // If ops were dispatched we may have progress on pending modules that we should re-check
       if (pending_state.has_pending_module_evaluation
         || pending_state.has_pending_dyn_module_evaluation)
         && dispatched_ops
       {
-        self.inner.state.waker.wake();
+        self.rewake_after_io_driver_poll(cx);
       }
     }
 
@@ -3959,6 +4024,37 @@ impl JsRuntime {
     }
 
     Ok(())
+  }
+
+  /// Re-wake this task for the next tick once tokio has polled its I/O
+  /// driver.
+  ///
+  /// libuv runs `uv__io_poll` with a zero timeout on every iteration that
+  /// still has work queued, so readiness the kernel reported during this
+  /// tick reaches the next tick's I/O phase before its check phase. tokio
+  /// polls its driver only when the scheduler runs out of ready tasks or
+  /// reaches its event interval, so a direct self-wake keeps this task
+  /// runnable and a chain of `setImmediate` callbacks starves I/O: a
+  /// listening socket never sees a connection that is already accepted by
+  /// the kernel, and a `server.close()` in a later immediate resets it.
+  ///
+  /// `tokio::task::yield_now` defers its wake until the scheduler has parked
+  /// on the driver. The wake goes through [`IoDriverPollGate`], which also
+  /// holds back any earlier poll of this task (another task can wake it
+  /// directly) so no tick runs before the driver poll. Outside a tokio
+  /// scheduler `yield_now` completes at once and the task wakes itself,
+  /// which is the previous behavior.
+  fn rewake_after_io_driver_poll(&self, cx: &mut Context) {
+    let gate = &self.inner.state.io_driver_poll_gate;
+    gate.task.register(cx.waker());
+    gate.waiting.store(true, Ordering::Release);
+    let gate_waker = Waker::from(gate.clone());
+    let mut gate_cx = Context::from_waker(&gate_waker);
+    let mut yield_now = std::pin::pin!(tokio::task::yield_now());
+    if yield_now.as_mut().poll(&mut gate_cx).is_ready() {
+      gate.waiting.store(false, Ordering::Release);
+      cx.waker().wake_by_ref();
+    }
   }
 
   /// Drain nextTick queue and macrotask queue (no op resolution).
