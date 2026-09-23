@@ -185,6 +185,7 @@ const {
   ERR_OUT_OF_RANGE,
   ERR_SOCKET_CLOSED,
   ERR_TLS_ALPN_CALLBACK_WITH_PROTOCOLS,
+  errnoException,
   hideStackFrames,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const {
@@ -542,6 +543,7 @@ const kRawHeaders = Symbol("raw-headers");
 const kSentTrailers = Symbol("sent-trailers");
 const kServer = Symbol("server");
 const kSocketDataListener = Symbol("socket-data-listener");
+const kSocketReadingStopped = Symbol("socket-reading-stopped");
 const kState = Symbol("state");
 const kType = Symbol("type");
 const kWriteGeneric = Symbol("write-generic");
@@ -3552,19 +3554,15 @@ function setupHandle(socket, type, options) {
   // Http2Session::OnStreamAfterWrite (src/node_http2.cc): stop reading the
   // socket while nghttp2 wants no input, and read again once it does. After
   // a graceful GOAWAY exchange this leaves the peer's FIN unread until
-  // finishSessionClose resumes the socket, so socketOnClose cannot tear
+  // finishSessionClose starts reading again, so socketOnClose cannot tear
   // down a stream that is still draining to the application.
-  let readingStopped = false;
   const maybeStopReading = () => {
     if (this.destroyed || socket.destroyed) return;
     if (handle.wantRead()) {
-      if (readingStopped) {
-        readingStopped = false;
-        socket.resume();
-      }
-    } else if (!readingStopped) {
-      readingStopped = true;
-      socket.pause();
+      startSessionSocketReading(this, socket);
+    } else if (!this[kSocketReadingStopped]) {
+      this[kSocketReadingStopped] = true;
+      setSocketHandleReading(socket, false);
     }
   };
 
@@ -3657,6 +3655,7 @@ function setupHandle(socket, type, options) {
               socket.once("end", destroySocket);
               // Keep reading so the peer's FIN is observed even once the
               // session object is gone.
+              startSessionSocketReading(this, socket);
               socket.resume();
             }
             socket.end(() => {
@@ -3876,6 +3875,30 @@ function cleanupSession(session) {
   session[kSocketDataListener] = undefined;
 }
 
+// Node's Http2Session consumes the socket's i/o stream and calls ReadStop()
+// and ReadStart() on it directly, below the JS socket. Do the same on the
+// socket's handle, so the JS socket still sees its handle as reading: a
+// Readable read-ahead (maybeReadMore -> net.Socket._read) then cannot start
+// the handle again and read the peer's FIN while a stream is still draining.
+// A socket without a stream handle (a plain Duplex) is paused and resumed,
+// as Node's JSStreamSocket does.
+function setSocketHandleReading(socket, reading) {
+  const socketHandle = socket._handle;
+  if (typeof socketHandle?.readStop !== "function") {
+    if (reading) socket.resume();
+    else socket.pause();
+    return;
+  }
+  const err = reading ? socketHandle.readStart() : socketHandle.readStop();
+  if (err) socket.destroy(errnoException(err, "read"));
+}
+
+function startSessionSocketReading(session, socket) {
+  if (!session[kSocketReadingStopped] || socket.destroyed) return;
+  session[kSocketReadingStopped] = false;
+  setSocketHandleReading(socket, true);
+}
+
 function finishSessionClose(session, error) {
   debugSessionObj(session, "finishSessionClose");
 
@@ -3890,6 +3913,9 @@ function finishSessionClose(session, error) {
       socket.removeListener("close", socketOnClose);
       emitClose(session, error);
     });
+    // Like Http2Session::Close, start reading again to detect the other end
+    // finishing.
+    startSessionSocketReading(session, socket);
     if (session.closed) {
       // If we're gracefully closing the socket, call resume() so we can
       // detect the peer closing in case Http2Session is already gone.
