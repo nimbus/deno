@@ -1547,6 +1547,23 @@ impl JsRuntime {
     EventLoopPendingState::new_from_scope(&mut scope).is_warm_reuse_safe()
   }
 
+  /// Upper bound on foreground-task drain passes in `reset_request_state`.
+  ///
+  /// Incremental marking of a 128 MiB heap needs on the order of hundreds of
+  /// 1 ms steps. This bound is far above that and exists only to turn a task
+  /// that reposts itself forever into a reported error instead of a hang.
+  const WARM_RESET_MAX_FOREGROUND_DRAIN_PASSES: usize = 4096;
+
+  /// Number of V8 foreground tasks queued for this isolate and not yet run.
+  ///
+  /// V8 posts its own housekeeping here: incremental-marking steps, scavenge
+  /// jobs, and FinalizationRegistry cleanup. The event loop drains the queue
+  /// at the start of every poll, and `reset_request_state` drains it before a
+  /// warm runtime is retained.
+  pub fn queued_foreground_task_count(&self) -> usize {
+    self.inner.state.foreground_tasks.lock().unwrap().len()
+  }
+
   /// Reset request-scoped state in a quiescent warm runtime.
   pub fn reset_request_state(&mut self) -> Result<(), CoreError> {
     self.ensure_v8_lock_held();
@@ -1576,24 +1593,36 @@ impl JsRuntime {
       let context = v8::Local::new(scope, &main_context);
       let mut context_scope = v8::ContextScope::new(scope, context);
 
-      for _ in 0..8 {
+      // V8 posts its own housekeeping to this queue: incremental-marking
+      // steps, scavenge jobs, and FinalizationRegistry cleanup. A marking
+      // step reschedules itself until marking finishes, so the number of
+      // passes scales with the live heap, not with request work. Drain until
+      // the queue stays empty; the pass bound only stops a task that reposts
+      // itself forever.
+      let mut passes = 0usize;
+      let mut tasks_run = 0usize;
+      loop {
         let tasks = std::mem::take(&mut *foreground_tasks.lock().unwrap());
         let had_tasks = !tasks.is_empty();
+        passes += 1;
+        tasks_run += tasks.len();
         for task in tasks {
           task.run();
         }
         v8::tc_scope!(tc_scope, &mut context_scope);
         tc_scope.perform_microtask_checkpoint();
-        if !had_tasks {
+        if !had_tasks || passes >= Self::WARM_RESET_MAX_FOREGROUND_DRAIN_PASSES
+        {
           break;
         }
       }
 
-      if !foreground_tasks.lock().unwrap().is_empty() {
+      let queued = foreground_tasks.lock().unwrap().len();
+      if queued != 0 {
         return Err(
-          CoreErrorKind::JsBox(JsErrorBox::generic(
-            "reset_request_state could not drain foreground tasks",
-          ))
+          CoreErrorKind::JsBox(JsErrorBox::generic(format!(
+            "reset_request_state could not drain foreground tasks: {queued} still queued after {passes} passes ran {tasks_run} tasks",
+          )))
           .into_box(),
         );
       }
