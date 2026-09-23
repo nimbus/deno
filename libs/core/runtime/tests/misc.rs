@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
+use std::task::Waker;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -1006,6 +1007,153 @@ async fn test_set_macrotask_callback_set_next_tick_callback() {
     )
     .unwrap();
   runtime.run_event_loop(Default::default()).await.unwrap();
+}
+
+/// A refed immediate that queues another immediate keeps the event loop
+/// re-waking itself. Each re-wake must let tokio poll its I/O driver first,
+/// as libuv's zero-timeout `uv__io_poll` does on every iteration, or a chain
+/// of `setImmediate` callbacks starves I/O readiness that the kernel has
+/// already reported. The wake is deferred: it does not fire during the poll
+/// and it fires once the scheduler parks on the driver.
+#[tokio::test(flavor = "current_thread")]
+async fn immediate_tick_is_held_until_io_driver_poll() {
+  let mut runtime = JsRuntime::new(Default::default());
+  runtime
+    .execute_script(
+      "immediate_gate.js",
+      r#"
+      globalThis.ran = [];
+      function immediate(name, next) {
+        const imm = {
+          _idleNext: null,
+          _idlePrev: null,
+          _onImmediate: () => {
+            globalThis.ran.push(name);
+            if (next) next();
+          },
+          _argv: null,
+          _destroyed: false,
+        };
+        imm[Deno.core.kRefed] = true;
+        Deno.core.immediateRefCount(true);
+        Deno.core.queueImmediate(imm);
+      }
+      immediate("first", () => immediate("second"));
+      "#,
+    )
+    .unwrap();
+
+  let waker = Waker::noop();
+  let mut cx = Context::from_waker(waker);
+  assert!(
+    runtime
+      .poll_event_loop(&mut cx, Default::default())
+      .is_pending()
+  );
+
+  // A poll that arrives before tokio has polled its I/O driver, for example
+  // from a direct wake by another task, must not run the next tick.
+  for _ in 0..3 {
+    assert!(
+      runtime
+        .poll_event_loop(&mut cx, Default::default())
+        .is_pending()
+    );
+  }
+  let ran = |runtime: &mut JsRuntime| {
+    let value_global = runtime
+      .execute_script("ran.js", "globalThis.ran.join(',')")
+      .unwrap();
+    deno_core::scope!(scope, runtime);
+    let value = value_global.open(scope);
+    value.to_rust_string_lossy(scope)
+  };
+  assert_eq!(ran(&mut runtime), "first");
+
+  tokio::task::yield_now().await;
+  assert!(
+    runtime
+      .poll_event_loop(&mut cx, Default::default())
+      .is_ready()
+  );
+  assert_eq!(ran(&mut runtime), "first,second");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn immediate_rewake_waits_for_io_driver_poll() {
+  #[derive(Default)]
+  struct CountingWaker(AtomicUsize);
+
+  impl Wake for CountingWaker {
+    fn wake(self) {
+      self.0.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  impl WakeRef for CountingWaker {
+    fn wake_by_ref(&self) {
+      self.0.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  let mut runtime = JsRuntime::new(Default::default());
+  runtime
+    .execute_script(
+      "immediate_rewake.js",
+      r#"
+      globalThis.ran = [];
+      function immediate(name, next) {
+        const imm = {
+          _idleNext: null,
+          _idlePrev: null,
+          _onImmediate: () => {
+            globalThis.ran.push(name);
+            if (next) next();
+          },
+          _argv: null,
+          _destroyed: false,
+        };
+        imm[Deno.core.kRefed] = true;
+        Deno.core.immediateRefCount(true);
+        Deno.core.queueImmediate(imm);
+      }
+      immediate("first", () => immediate("second"));
+      "#,
+    )
+    .unwrap();
+
+  let counting = Arc::new(CountingWaker::default());
+  let waker = counting.clone().into_waker();
+  let mut cx = Context::from_waker(&waker);
+
+  // Tick 1 runs "first", which queues "second" for the next tick.
+  assert!(
+    runtime
+      .poll_event_loop(&mut cx, Default::default())
+      .is_pending()
+  );
+  assert_eq!(
+    counting.0.load(Ordering::SeqCst),
+    0,
+    "the re-wake must wait for the I/O driver poll"
+  );
+
+  // Yielding lets the scheduler park on the driver and release deferred wakes.
+  tokio::task::yield_now().await;
+  assert_eq!(counting.0.load(Ordering::SeqCst), 1);
+
+  // Tick 2 runs "second"; nothing is left, so the loop completes.
+  assert!(
+    runtime
+      .poll_event_loop(&mut cx, Default::default())
+      .is_ready()
+  );
+  let value_global = runtime
+    .execute_script("ran.js", "globalThis.ran.join(',')")
+    .unwrap();
+  deno_core::scope!(scope, runtime);
+  let value = value_global.open(scope);
+  assert_eq!(value.to_rust_string_lossy(scope), "first,second");
 }
 
 #[tokio::test]

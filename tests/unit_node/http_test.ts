@@ -3591,6 +3591,76 @@ Deno.test(
   },
 );
 
+// Half-close parity with Node. A client that sends its request and FINs at
+// once must still receive the response:
+// - the FIN is observed one event-loop tick after the request data, as under
+//   libuv, so a response written from `setImmediate` still goes out;
+// - a response still in flight when the socket `end`s is not aborted
+//   (`socketOnEnd` no longer calls `abortIncoming`, nodejs/node#36821).
+function halfCloseRoundTrip(
+  respond: (res: ServerResponse) => void,
+): Promise<{ received: string; aborted: boolean }> {
+  const { promise, resolve, reject } = Promise.withResolvers<
+    { received: string; aborted: boolean }
+  >();
+
+  let aborted = false;
+  const server = http.createServer((req, res) => {
+    req.on("aborted", () => {
+      aborted = true;
+    });
+    respond(res);
+  });
+  server.on("clientError", (err: Error & { code?: string }) => {
+    reject(new Error(`unexpected clientError: ${err.code ?? err.message}`));
+  });
+
+  server.listen(0, () => {
+    const port = (server.address() as AddressInfo).port;
+    const client = net.connect(port, "127.0.0.1");
+    const chunks: Buffer[] = [];
+    client.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+    client.on("error", reject);
+    client.on("end", () => {
+      const received = Buffer.concat(chunks).toString("latin1");
+      server.close(() => resolve({ received, aborted }));
+    });
+    // Write the whole request and half-close in one step.
+    client.end("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+  });
+
+  return promise;
+}
+
+Deno.test(
+  "[node/http] half-closed client receives a response written from setImmediate",
+  async () => {
+    const { received, aborted } = await halfCloseRoundTrip((res) => {
+      setImmediate(() => res.end("late"));
+    });
+    assertStringIncludes(received, "HTTP/1.1 200");
+    assertStringIncludes(received, "late");
+    assertEquals(aborted, false);
+  },
+);
+
+Deno.test(
+  "[node/http] half-closed client receives a large response still in flight",
+  async () => {
+    // Larger than the socket buffers, so the write is still pending when
+    // the client's FIN reaches the server.
+    const body = "x".repeat(8 * 1024 * 1024);
+    const { received, aborted } = await halfCloseRoundTrip((res) => {
+      res.end(body);
+    });
+    assertStringIncludes(received, "HTTP/1.1 200");
+    assertEquals(received.endsWith(body), true);
+    assertEquals(aborted, false);
+  },
+);
+
 // Regression test: oversized headers must trigger HPE_HEADER_OVERFLOW on the
 // server's clientError event, and the default handler should respond with 431.
 // Previously maxHeaderSize was tracked but never enforced.
