@@ -8,6 +8,7 @@ use std::future::poll_fn;
 use std::rc::Rc;
 use std::task::Poll;
 
+use super::get_inner;
 use super::tcp::AF_INET;
 use super::tcp::sockaddr_in;
 use crate::JsRuntime;
@@ -376,6 +377,149 @@ async fn check_fires_callback() {
       assert_eq!(uv_is_active(check_ptr as *const uv_handle_t), 0);
       Rc::from_raw(fired_ptr);
     }
+  })
+  .await;
+}
+
+// ========== Native immediate tests ==========
+
+thread_local! {
+  static NATIVE_IMMEDIATE_ORDER: RefCell<Vec<&'static str>> =
+    const { RefCell::new(Vec::new()) };
+}
+
+#[deno_core::op2(fast)]
+fn op_record_js_immediate() {
+  NATIVE_IMMEDIATE_ORDER.with(|order| order.borrow_mut().push("js"));
+}
+
+deno_core::extension!(
+  native_immediate_test_ext,
+  ops = [op_record_js_immediate]
+);
+
+/// Node's `CheckImmediate` runs `RunAndClearNativeImmediates` before the JS
+/// `processImmediate` callback, so a native completion queued as an
+/// immediate observes the loop before any `setImmediate` callback queued in
+/// the same iteration.
+#[tokio::test(flavor = "current_thread")]
+async fn native_immediate_runs_before_js_immediate_in_the_same_tick() {
+  NATIVE_IMMEDIATE_ORDER.with(|order| order.borrow_mut().clear());
+  let mut runtime = JsRuntime::new(crate::RuntimeOptions {
+    extensions: vec![native_immediate_test_ext::init()],
+    ..Default::default()
+  });
+  let uv_loop = runtime
+    .uv_loop_ptr()
+    .expect("JsRuntime should have a uv loop");
+  runtime
+    .execute_script(
+      "native_immediate_order.js",
+      r#"
+      const imm = {
+        _idleNext: null,
+        _idlePrev: null,
+        _onImmediate: () => Deno.core.ops.op_record_js_immediate(),
+        _argv: null,
+        _destroyed: false,
+      };
+      imm[Deno.core.kRefed] = true;
+      Deno.core.immediateRefCount(true);
+      Deno.core.queueImmediate(imm);
+      "#,
+    )
+    .unwrap();
+  unsafe {
+    uv_queue_native_immediate(
+      uv_loop,
+      Box::new(|| {
+        NATIVE_IMMEDIATE_ORDER.with(|order| order.borrow_mut().push("native"));
+      }),
+    );
+  }
+
+  tick(&mut runtime).await;
+
+  let order = NATIVE_IMMEDIATE_ORDER.with(|order| order.borrow().clone());
+  assert_eq!(order, vec!["native", "js"]);
+}
+
+/// `RunAndClearNativeImmediates` shifts from the live queue, so a native
+/// immediate queued by a native immediate runs in the same check phase. A
+/// TLS write whose completion issues the next synchronous write depends on
+/// this: the peer must not see a poll between the chained writes.
+#[tokio::test(flavor = "current_thread")]
+async fn chained_native_immediates_run_in_one_check_phase() {
+  run_test(async |runtime, uv_loop| {
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let ran_first = ran.clone();
+    let loop_addr = uv_loop as usize;
+    unsafe {
+      uv_queue_native_immediate(
+        uv_loop,
+        Box::new(move || {
+          ran_first.borrow_mut().push("first");
+          let ran_second = ran_first.clone();
+          // The closure runs from the loop's check phase; `loop_addr` is
+          // the loop that is running it.
+          uv_queue_native_immediate(
+            loop_addr as *mut uv_loop_t,
+            Box::new(move || ran_second.borrow_mut().push("second")),
+          );
+        }),
+      );
+    }
+
+    tick(runtime).await;
+
+    assert_eq!(*ran.borrow(), vec!["first", "second"]);
+    let inner = unsafe { get_inner(uv_loop) };
+    assert!(!inner.has_native_immediates());
+    assert!(!inner.has_alive_handles());
+  })
+  .await;
+}
+
+/// A native immediate is refed work, like Node's default `SetImmediate`:
+/// one queued after the check phase, here from a close callback, keeps the
+/// loop alive and runs in the next iteration instead of being dropped.
+#[tokio::test(flavor = "current_thread")]
+async fn native_immediate_queued_from_close_callback_keeps_the_loop_alive() {
+  run_test(async |runtime, uv_loop| {
+    let ran = Rc::new(Cell::new(false));
+
+    unsafe extern "C" fn close_cb(handle: *mut uv_handle_t) {
+      let ran = unsafe { Rc::from_raw((*handle).data as *const Cell<bool>) };
+      let loop_ = unsafe { (*handle).loop_ };
+      let ran_in_immediate = ran.clone();
+      unsafe {
+        uv_queue_native_immediate(
+          loop_,
+          Box::new(move || ran_in_immediate.set(true)),
+        );
+      }
+      drop(ran);
+    }
+
+    let mut check = std::mem::MaybeUninit::<uv_check_t>::uninit();
+    let check_ptr = check.as_mut_ptr();
+    unsafe {
+      uv_check_init(uv_loop, check_ptr);
+      (*check_ptr).data = Rc::into_raw(ran.clone()) as *mut c_void;
+      uv_close(check_ptr as *mut uv_handle_t, Some(close_cb));
+      assert!(get_inner(uv_loop).has_alive_handles());
+    }
+
+    tokio::time::timeout(
+      std::time::Duration::from_secs(5),
+      runtime.run_event_loop(Default::default()),
+    )
+    .await
+    .expect("event loop should finish once the native immediate ran")
+    .unwrap();
+
+    assert!(ran.get());
+    assert!(!unsafe { get_inner(uv_loop) }.has_alive_handles());
   })
   .await;
 }
@@ -3748,4 +3892,161 @@ fn handle_waker_cross_thread_wake_race() {
   let _ = std::mem::take(&mut *shared.ready_tty.lock().unwrap());
   std::task::Waker::from(handle_waker.clone()).wake_by_ref();
   assert!(shared.ready_tty.lock().unwrap().is_empty());
+}
+
+// ========== TCP: EOF after a partial read lands on the next tick ==========
+
+/// libuv's `uv__read` returns after a partial read and only sees the peer's
+/// FIN on the next loop iteration, so a stream's data and its EOF reach the
+/// read callback one tick apart. The tokio-backed loop reads until
+/// `WouldBlock`, so it must park the EOF it finds early and deliver it on
+/// the next poll (`internal_deferred_read_status`).
+#[tokio::test(flavor = "current_thread")]
+async fn tcp_eof_after_partial_read_is_delivered_next_tick() {
+  run_test(async |runtime, uv_loop| {
+    // Peer: a blocking std listener that writes a few bytes and closes.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let peer = std::thread::spawn(move || {
+      use std::io::Write;
+      let (mut sock, _) = listener.accept().unwrap();
+      sock.write_all(b"hello").unwrap();
+      sock.shutdown(std::net::Shutdown::Write).unwrap();
+      sock
+    });
+
+    /// (tick at which the callback ran, nread)
+    struct ReadLog {
+      tick: Rc<Cell<u32>>,
+      events: RefCell<Vec<(u32, isize)>>,
+    }
+
+    let current_tick = Rc::new(Cell::new(0u32));
+    let log = Rc::new(ReadLog {
+      tick: current_tick.clone(),
+      events: RefCell::new(Vec::new()),
+    });
+    let log_ptr = Rc::into_raw(log.clone());
+
+    unsafe extern "C" fn alloc_cb(
+      _: *mut uv_handle_t,
+      size: usize,
+      buf: *mut uv_buf_t,
+    ) {
+      let mut v = Vec::<u8>::with_capacity(size);
+      unsafe {
+        (*buf).base = v.as_mut_ptr().cast();
+        (*buf).len = size;
+      }
+      std::mem::forget(v);
+    }
+
+    unsafe extern "C" fn read_cb(
+      handle: *mut uv_stream_t,
+      nread: isize,
+      buf: *const uv_buf_t,
+    ) {
+      unsafe {
+        let tcp = handle as *const uv_tcp_t;
+        let log = Rc::from_raw((*tcp).data as *const ReadLog);
+        if nread != 0 {
+          log.events.borrow_mut().push((log.tick.get(), nread));
+        }
+        let _ = Rc::into_raw(log);
+        if !(*buf).base.is_null() && (*buf).len > 0 {
+          drop(Vec::<u8>::from_raw_parts((*buf).base.cast(), 0, (*buf).len));
+        }
+      }
+    }
+
+    let connected = Rc::new(Cell::new(false));
+    let connected_ptr = Rc::into_raw(connected.clone());
+
+    unsafe extern "C" fn on_connect(req: *mut uv_connect_t, status: i32) {
+      assert_eq!(status, 0);
+      let connected = unsafe { Rc::from_raw((*req).data as *const Cell<bool>) };
+      connected.set(true);
+      let _ = Rc::into_raw(connected);
+    }
+
+    let mut client = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+    let client_ptr = client.as_mut_ptr();
+    let mut connect_req = std::mem::MaybeUninit::<uv_connect_t>::uninit();
+    let connect_req_ptr = connect_req.as_mut_ptr();
+
+    unsafe {
+      uv_tcp_init(uv_loop, client_ptr);
+      (*client_ptr).data = log_ptr as *mut c_void;
+      (*connect_req_ptr).data = connected_ptr as *mut c_void;
+
+      let mut addr = std::mem::MaybeUninit::<sockaddr_in>::uninit();
+      let ip = std::ffi::CString::new("127.0.0.1").unwrap();
+      uv_ip4_addr(ip.as_ptr(), port as i32, addr.as_mut_ptr());
+      assert_ok(uv_tcp_connect(
+        connect_req_ptr,
+        client_ptr,
+        addr.as_ptr() as *const c_void,
+        Some(on_connect),
+      ));
+    }
+
+    for _ in 0..100 {
+      tick(runtime).await;
+      if connected.get() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(connected.get(), "client should have connected");
+
+    // Let the peer finish writing and closing before the first read poll,
+    // so the data and the FIN are both queued in the kernel.
+    let _peer_sock = peer.join().unwrap();
+
+    unsafe {
+      assert_ok(uv_read_start(
+        client_ptr as *mut uv_stream_t,
+        Some(alloc_cb),
+        Some(read_cb),
+      ));
+    }
+
+    for _ in 0..100 {
+      current_tick.set(current_tick.get() + 1);
+      tick(runtime).await;
+      if log
+        .events
+        .borrow()
+        .iter()
+        .any(|(_, n)| *n == UV_EOF as isize)
+      {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+
+    let events = log.events.borrow().clone();
+    let data_tick = events
+      .iter()
+      .find(|(_, n)| *n > 0)
+      .map(|(t, _)| *t)
+      .expect("data callback should have fired");
+    let eof_tick = events
+      .iter()
+      .find(|(_, n)| *n == UV_EOF as isize)
+      .map(|(t, _)| *t)
+      .expect("EOF callback should have fired");
+    assert!(
+      eof_tick > data_tick,
+      "EOF must land on a later tick than the data (events: {events:?})"
+    );
+
+    unsafe {
+      uv_close(client_ptr as *mut uv_handle_t, None);
+      Rc::from_raw(connected_ptr);
+      Rc::from_raw(log_ptr);
+    }
+    tick(runtime).await;
+  })
+  .await;
 }

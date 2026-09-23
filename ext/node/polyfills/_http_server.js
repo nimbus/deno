@@ -769,8 +769,10 @@ function socketOnEnd(server, socket, parser, state) {
     return;
   }
 
+  // Node aborts pending requests only from `socketOnClose`
+  // (nodejs/node#36821). A client that half-closes after sending its request
+  // must still receive the response that is in flight.
   if (!server.httpAllowHalfOpen) {
-    abortIncoming(state.incoming);
     if (socket.writable) socket.end();
   } else if (state.outgoing.length) {
     state.outgoing[state.outgoing.length - 1]._last = true;

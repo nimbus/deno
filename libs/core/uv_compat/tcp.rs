@@ -127,6 +127,17 @@ pub struct uv_tcp_t {
   /// stays valid) from a peer that aborted before sending anything
   /// (writes can't be delivered). Persists across polls.
   pub(crate) internal_received_data: bool,
+  /// A terminal read status (`UV_EOF` or an error) that `try_read`
+  /// returned right after a partial read in the same poll.
+  ///
+  /// libuv stops reading after a partial read (`uv__read`: "return if we
+  /// didn't fill the buffer completely") and only discovers the EOF on the
+  /// next loop iteration, so a peer's data and its FIN reach JS one tick
+  /// apart. This loop keeps reading until `WouldBlock` to clear tokio's
+  /// readiness bit (see the note in `poll_tcp_handle`), so it observes the
+  /// EOF early; the status is parked here and delivered on the next poll to
+  /// keep the observable ordering identical to libuv.
+  pub(crate) internal_deferred_read_status: Option<c_int>,
   pub(crate) internal_connect: Option<ConnectPending>,
   pub(crate) internal_write_queue: VecDeque<WritePending>,
   pub(crate) internal_connection_cb: Option<uv_connection_cb>,
@@ -410,6 +421,7 @@ pub unsafe fn uv_tcp_init(loop_: *mut uv_loop_t, tcp: *mut uv_tcp_t) -> c_int {
     write(addr_of_mut!((*tcp).internal_read_cb), None);
     write(addr_of_mut!((*tcp).internal_reading), false);
     write(addr_of_mut!((*tcp).internal_received_data), false);
+    write(addr_of_mut!((*tcp).internal_deferred_read_status), None);
     write(addr_of_mut!((*tcp).internal_connect), None);
     write(addr_of_mut!((*tcp).internal_write_queue), VecDeque::new());
     write(addr_of_mut!((*tcp).internal_connection_cb), None);
@@ -1346,6 +1358,7 @@ pub fn new_tcp() -> uv_tcp_t {
     internal_read_cb: None,
     internal_reading: false,
     internal_received_data: false,
+    internal_deferred_read_status: None,
     internal_connect: None,
     internal_write_queue: VecDeque::new(),
     internal_connection_cb: None,
@@ -1475,8 +1488,25 @@ pub(crate) unsafe fn poll_tcp_handle(
           let _ = stream.poll_read_ready(cx);
         }
 
+        // A terminal status observed right after a partial read in the
+        // previous poll: libuv would only have read it now.
+        if let Some(status) = (*tcp_ptr).internal_deferred_read_status.take() {
+          let mut buf = uv_buf_t {
+            base: std::ptr::null_mut(),
+            len: 0,
+          };
+          alloc_cb(tcp_ptr as *mut uv_handle_t, 65536, &mut buf);
+          read_cb(tcp_ptr as *mut uv_stream_t, status as isize, &buf);
+          (*tcp_ptr).internal_reading = false;
+          crate::uv_compat::stream::maybe_clear_tcp_active(tcp_ptr);
+          any_work = true;
+        }
+
         // Prevent loop starvation (matches libuv's count=32 in uv__read).
         let mut count = 32;
+        // True once a read in this poll returned fewer bytes than the
+        // buffer holds. libuv returns to the loop at that point.
+        let mut partial_read = false;
         loop {
           // Re-check after each callback: the callback may have
           // called uv_close or uv_read_stop.
@@ -1503,6 +1533,14 @@ pub(crate) unsafe fn poll_tcp_handle(
             (*tcp_ptr).internal_stream.as_ref().unwrap().try_read(slice);
           match read_result {
             Ok(0) => {
+              if partial_read {
+                // libuv would not have issued this read until the next
+                // loop iteration. Free the buffer (nread=0) and deliver
+                // the EOF on the next poll.
+                (*tcp_ptr).internal_deferred_read_status = Some(UV_EOF);
+                read_cb(tcp_ptr as *mut uv_stream_t, 0, &buf);
+                break;
+              }
               read_cb(tcp_ptr as *mut uv_stream_t, UV_EOF as isize, &buf);
               (*tcp_ptr).internal_reading = false;
               crate::uv_compat::stream::maybe_clear_tcp_active(tcp_ptr);
@@ -1511,7 +1549,9 @@ pub(crate) unsafe fn poll_tcp_handle(
             Ok(n) => {
               any_work = true;
               (*tcp_ptr).internal_received_data = true;
+              let buflen = buf.len;
               read_cb(tcp_ptr as *mut uv_stream_t, n as isize, &buf);
+              partial_read = n < buflen;
               count -= 1;
               if count == 0 {
                 break;
@@ -1519,7 +1559,10 @@ pub(crate) unsafe fn poll_tcp_handle(
               // NOTE: libuv (uv__read) breaks here when `n < buf.len`
               // to skip the predicted-EAGAIN syscall. We deliberately
               // do NOT — keep looping until try_read returns
-              // WouldBlock.
+              // WouldBlock. A terminal status (EOF or error) that the
+              // extra read turns up is parked in
+              // `internal_deferred_read_status` so JS still observes
+              // it one tick after the data, exactly as under libuv.
               //
               // Tokio's TcpStream readiness is edge-triggered: the
               // internal "readable" bit is cleared only by a
@@ -1574,6 +1617,13 @@ pub(crate) unsafe fn poll_tcp_handle(
                   raw
                 }
               };
+              if partial_read {
+                // Same deferral as EOF: libuv sees this error on the
+                // next loop iteration.
+                (*tcp_ptr).internal_deferred_read_status = Some(status);
+                read_cb(tcp_ptr as *mut uv_stream_t, 0, &buf);
+                break;
+              }
               read_cb(tcp_ptr as *mut uv_stream_t, status as isize, &buf);
               (*tcp_ptr).internal_reading = false;
               crate::uv_compat::stream::maybe_clear_tcp_active(tcp_ptr);
@@ -1813,8 +1863,11 @@ pub(crate) unsafe fn poll_tcp_handle(
     if let Some(ref stream) = (*tcp_ptr).internal_stream {
       let mut needs_requeue = false;
       if (*tcp_ptr).internal_reading
-        && matches!(stream.poll_read_ready(cx), Poll::Ready(_))
+        && ((*tcp_ptr).internal_deferred_read_status.is_some()
+          || matches!(stream.poll_read_ready(cx), Poll::Ready(_)))
       {
+        // A deferred EOF/error must be delivered on the next poll even
+        // though tokio has nothing new to report.
         needs_requeue = true;
       }
       if !(*tcp_ptr).internal_write_queue.is_empty()
