@@ -64,12 +64,27 @@ function setOptionSourceExecArgv(execArgv: string[]) {
   execArgvOptionsMap = undefined;
 }
 
+// Defaults are listed only for options whose Node default is the same on
+// every supported Node release line. `getOptionValueFromMap` in
+// `internal/options.ts` answers `--no-<name>` by negating `--<name>`, so
+// negatable options are stored under their positive name (`--no-deprecation`
+// sets `--deprecation` to `false`).
 function createDefaultOptions() {
   return new SafeMap([
     ["--warnings", { value: true }],
+    ["--deprecation", { value: true }],
+    ["--throw-deprecation", { value: false }],
+    ["--trace-warnings", { value: false }],
     ["--pending-deprecation", { value: false }],
     ["--expose-internals", { value: false }],
+    ["--enable-source-maps", { value: false }],
+    ["--experimental-require-module", { value: true }],
+    ["--experimental-stream-iter", { value: false }],
+    ["--experimental-vm-modules", { value: false }],
+    ["--preserve-symlinks", { value: false }],
+    ["--preserve-symlinks-main", { value: false }],
     ["--title", { value: "" }],
+    ["--unhandled-rejections", { value: "throw" }],
   ]);
 }
 
@@ -84,9 +99,36 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     });
     return;
   }
+  if (StringPrototypeStartsWith(arg, "--unhandled-rejections=")) {
+    options.set("--unhandled-rejections", {
+      value: StringPrototypeSlice(arg, "--unhandled-rejections=".length),
+    });
+    return;
+  }
+  if (StringPrototypeStartsWith(arg, "--trace-require-module=")) {
+    options.set("--trace-require-module", {
+      value: StringPrototypeSlice(arg, "--trace-require-module=".length),
+    });
+    return;
+  }
   switch (arg) {
     case "--no-warnings":
       options.set("--warnings", { value: false });
+      break;
+    case "--no-deprecation":
+      options.set("--deprecation", { value: false });
+      break;
+    case "--throw-deprecation":
+      options.set("--throw-deprecation", { value: true });
+      break;
+    case "--no-throw-deprecation":
+      options.set("--throw-deprecation", { value: false });
+      break;
+    case "--trace-warnings":
+      options.set("--trace-warnings", { value: true });
+      break;
+    case "--no-trace-warnings":
+      options.set("--trace-warnings", { value: false });
       break;
     case "--pending-deprecation":
       options.set("--pending-deprecation", { value: true });
@@ -94,6 +136,72 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     case "--expose-internals":
     case "--expose_internals":
       options.set("--expose-internals", { value: true });
+      break;
+    case "--enable-source-maps":
+      options.set("--enable-source-maps", { value: true });
+      break;
+    case "--no-enable-source-maps":
+      options.set("--enable-source-maps", { value: false });
+      break;
+    // `--async-context-frame` has no default here: Node 22 defaults it off
+    // and Node 24 defaults it on, so only an explicit flag is recorded.
+    case "--async-context-frame":
+      options.set("--async-context-frame", { value: true });
+      break;
+    case "--no-async-context-frame":
+      options.set("--async-context-frame", { value: false });
+      break;
+    case "--experimental-require-module":
+    case "--require-module":
+      options.set("--experimental-require-module", { value: true });
+      break;
+    case "--no-experimental-require-module":
+    case "--no-require-module":
+      options.set("--experimental-require-module", { value: false });
+      break;
+    case "--experimental-print-required-tla":
+      options.set("--experimental-print-required-tla", { value: true });
+      break;
+    case "--experimental-eventsource":
+      options.set("--experimental-eventsource", { value: true });
+      break;
+    // `--experimental-sqlite` has no default here: Node 22.13 unflagged it
+    // and Node 20 never shipped it, so only an explicit flag is recorded.
+    case "--experimental-sqlite":
+      options.set("--experimental-sqlite", { value: true });
+      break;
+    case "--no-experimental-sqlite":
+      options.set("--experimental-sqlite", { value: false });
+      break;
+    case "--experimental-stream-iter":
+      options.set("--experimental-stream-iter", { value: true });
+      break;
+    case "--experimental-vm-modules":
+      options.set("--experimental-vm-modules", { value: true });
+      break;
+    case "--no-experimental-vm-modules":
+      options.set("--experimental-vm-modules", { value: false });
+      break;
+    case "--preserve-symlinks":
+      options.set("--preserve-symlinks", { value: true });
+      break;
+    case "--no-preserve-symlinks":
+      options.set("--preserve-symlinks", { value: false });
+      break;
+    case "--preserve-symlinks-main":
+      options.set("--preserve-symlinks-main", { value: true });
+      break;
+    case "--no-preserve-symlinks-main":
+      options.set("--preserve-symlinks-main", { value: false });
+      break;
+    case "--trace-events-enabled":
+      options.set("--trace-events-enabled", { value: true });
+      break;
+    case "--turbo-fast-api-calls":
+      options.set("--turbo-fast-api-calls", { value: true });
+      break;
+    case "--no-turbo-fast-api-calls":
+      options.set("--turbo-fast-api-calls", { value: false });
       break;
     case "--tls-min-v1.0":
     case "--tls-min-v1.1":

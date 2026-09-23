@@ -1,0 +1,26 @@
+{
+  "tests": {
+    "defaults": {
+      "envs": {
+        "NODE_OPTIONS": "--no-warnings"
+      },
+      "args": "run -A main.ts",
+      "output": "defaults.out"
+    },
+    "no_deprecation": {
+      "envs": {
+        "NODE_OPTIONS": "--no-warnings --no-deprecation"
+      },
+      "args": "run -A main.ts",
+      "output": "no_deprecation.out"
+    },
+    "throw_deprecation": {
+      "envs": {
+        "NODE_OPTIONS": "--no-warnings --throw-deprecation"
+      },
+      "args": "run -A main.ts",
+      "output": "throw_deprecation.out",
+      "exitCode": 1
+    }
+  }
+}

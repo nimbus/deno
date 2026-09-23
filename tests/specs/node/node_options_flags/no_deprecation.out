@@ -1,0 +1,3 @@
+noDeprecation=true
+throwDeprecation=undefined
+deprecate=called
