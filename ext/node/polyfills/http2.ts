@@ -947,21 +947,6 @@ function doStreamClose(stream, code) {
   stream[kState].fd = -1;
   // Defer destroy we actually emit end.
   if (!stream.readable || code !== NGHTTP2_NO_ERROR) {
-    // If the writable side is still finalising (state.ending observed but
-    // 'finish' not yet emitted) wait for it. The native EOF DATA frame can
-    // be flushed via the deferred process.nextTick scheduleSendPending,
-    // which fires before kWriteGeneric's setImmediate runs shutdownWritable
-    // and the Writable state machine emits 'finish'. Destroying immediately
-    // would short-circuit the state machine and emit 'close' before
-    // writableFinished flips to true (test-http2-server-close-idle-connection).
-    const ws = stream._writableState;
-    if (
-      code === NGHTTP2_NO_ERROR && ws && ws.ending && !ws.finished &&
-      !ws.destroyed
-    ) {
-      stream.once("finish", () => stream.destroy());
-      return true;
-    }
     // If errored or ended, we can destroy immediately.
     stream.destroy();
   } else {
@@ -3265,7 +3250,12 @@ class ServerHttp2Stream extends Http2Stream {
       this[kHandle],
       [headersList[0], headersList[1], streamOptions],
     );
-    scheduleSendPending(this[kSession]);
+    // Node's Http2Stream::SubmitResponse flushes through MaybeScheduleWrite,
+    // which defers SendPendingData to the check phase. A synchronous flush
+    // closes an endStream (HEAD) response before a write-after-end error
+    // from the same tick errors the readable side, so onStreamClose waits
+    // for an 'end' that the errored stream never emits.
+    scheduleSendPendingImmediate(this[kSession]);
     if (ret < 0) {
       this.destroy(new NghttpError(ret));
     } else if (onServerStreamFinishChannel.hasSubscribers) {
@@ -3558,6 +3548,26 @@ function setupHandle(socket, type, options) {
   );
   handle[kOwner] = this;
 
+  // Mirrors Http2Session::MaybeStopReading and the ReadStart in
+  // Http2Session::OnStreamAfterWrite (src/node_http2.cc): stop reading the
+  // socket while nghttp2 wants no input, and read again once it does. After
+  // a graceful GOAWAY exchange this leaves the peer's FIN unread until
+  // finishSessionClose resumes the socket, so socketOnClose cannot tear
+  // down a stream that is still draining to the application.
+  let readingStopped = false;
+  const maybeStopReading = () => {
+    if (this.destroyed || socket.destroyed) return;
+    if (handle.wantRead()) {
+      if (readingStopped) {
+        readingStopped = false;
+        socket.resume();
+      }
+    } else if (!readingStopped) {
+      readingStopped = true;
+      socket.pause();
+    }
+  };
+
   // Pump data from socket to session via JS events.
   // After receiving data, flush outgoing h2 frames back to the socket.
   const socketOnData = (buf) => {
@@ -3595,6 +3605,13 @@ function setupHandle(socket, type, options) {
             // forcing closeSession here destroyed that stream with its
             // buffered data (test-http2-pipe under load).
             this[kMaybeDestroy](null);
+            if (!this.destroyed) {
+              // A stream is still draining. Like Node, leave the socket
+              // alone: maybeStopReading has already stopped reading, and
+              // finishSessionClose resumes and ends the socket once the last
+              // stream is gone.
+              return;
+            }
           }
           // After GOAWAY has been written, gracefully shut down the
           // underlying socket. We must NOT call socket.destroy() here while
@@ -3686,6 +3703,9 @@ function setupHandle(socket, type, options) {
     // send_pending_data() (stream==None path) only checks
     // maybe_notify_graceful_close_complete, so this is safe.
     origSendPending();
+    // Node checks after every receive and send; socketOnData always sends
+    // after it receives.
+    maybeStopReading();
   };
 
   // Process data on the next tick - a remoteSettings handler may be attached.
@@ -4012,11 +4032,16 @@ function socketOnClose() {
     // deno-lint-ignore deno-internal/prefer-primordials
     state.pendingStreams.forEach((stream) => stream.close(NGHTTP2_CANCEL));
     session.close();
-    // Route through kMaybeDestroy -> destroy(err) so the `if (this.destroyed)`
-    // guard in destroy() prevents a second emit("close") when the Rust-side
-    // EOF (handle.onstreamclose) and the JS-side socket "close" both fire
-    // for the same socket teardown (e.g. external client[kSocket].destroy()).
-    session[kMaybeDestroy](err);
+    // Node calls closeSession here unconditionally: the transport is gone, so
+    // a stream still waiting on 'finish' or 'end' can never complete and must
+    // not keep the session open. kMaybeDestroy would return early while such
+    // a stream exists, and the session would never emit 'close'.
+    // session.close() can destroy the session synchronously, and the native
+    // EOF path (handle.onstreamclose) can run first for the same teardown, so
+    // skip a session that is already destroyed to avoid a second 'close'.
+    if (!session.destroyed) {
+      closeSession(session, NGHTTP2_NO_ERROR, err);
+    }
   }
 }
 

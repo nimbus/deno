@@ -815,10 +815,11 @@ unsafe extern "C" fn on_frame_recv_callback(
   } else if ft == ffi::NGHTTP2_PUSH_PROMISE as u32
     || ft == ffi::NGHTTP2_HEADERS as u32
   {
+    // Like Node's Http2Session::OnFrameReceive, END_STREAM on a HEADERS
+    // frame is not a read EOF: onSessionHeaders ends the readable side, and
+    // onStreamClose consumes it. Only a DATA frame emits UV_EOF
+    // (Http2Session::HandleDataFrame).
     handle_headers_frame(session, frame);
-    if ff & ffi::NGHTTP2_FLAG_END_STREAM as u8 != 0 {
-      handle_data_end_stream(session, frame);
-    }
   } else if ft == ffi::NGHTTP2_SETTINGS as u32 {
     if ff & ffi::NGHTTP2_FLAG_ACK as u8 == 0 {
       // Peer's actual settings. Update our tracked remote custom settings
@@ -3467,6 +3468,18 @@ impl Http2Session {
       let want_read = ffi::nghttp2_session_want_read(self.native.session.get());
       want_write != 0 || want_read != 0
     }
+  }
+
+  /// Mirrors `nghttp2_session_want_read`. Node's
+  /// `Http2Session::MaybeStopReading` stops reading the socket while this is
+  /// false.
+  #[fast]
+  fn want_read(&self) -> bool {
+    if self.native.session.get().is_null() {
+      return false;
+    }
+    // SAFETY: self.session is a valid nghttp2 session pointer
+    unsafe { ffi::nghttp2_session_want_read(self.native.session.get()) != 0 }
   }
 
   /// Returns the error code from the most recent GOAWAY frame this session
