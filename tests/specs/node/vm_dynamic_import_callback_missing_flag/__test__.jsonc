@@ -1,0 +1,8 @@
+{
+  "tests": {
+    "dynamic_import_callback_missing_flag": {
+      "args": "run -A main.mjs",
+      "output": "main.out"
+    }
+  }
+}
