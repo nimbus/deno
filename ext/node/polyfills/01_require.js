@@ -982,10 +982,27 @@ function findPackageRootFromNodeModules(filepath) {
   return StringPrototypeSlice(filepath, 0, afterNm) + parts[0];
 }
 
-function tryFile(requestPath, _isMain) {
+function shouldPreserveSymlinks(isMain) {
+  return getOptionValue(
+    isMain ? "--preserve-symlinks-main" : "--preserve-symlinks",
+  );
+}
+
+// Node keeps the requested path under `--preserve-symlinks` (or
+// `--preserve-symlinks-main` for the entry module) and canonicalizes it
+// otherwise. The preserved path is the module's identity: its cache key,
+// its `__dirname`, and the `node_modules` lookup paths derived from it, so a
+// symlinked package can find peer dependencies next to the link.
+function finalizeModulePath(requestPath, isMain) {
+  return shouldPreserveSymlinks(isMain)
+    ? pathResolve(requestPath)
+    : toRealPath(requestPath);
+}
+
+function tryFile(requestPath, isMain) {
   const rc = stat(requestPath);
   if (rc !== 0) return;
-  return toRealPath(requestPath);
+  return finalizeModulePath(requestPath, isMain);
 }
 
 function tryPackage(requestPath, exts, isMain, originalPath) {
@@ -1319,7 +1336,7 @@ Module._findPath = function (request, paths, isMain, parentPath) {
     const rc = stat(basePath);
     if (!trailingSlash) {
       if (rc === 0) { // File.
-        filename = toRealPath(basePath);
+        filename = finalizeModulePath(basePath, isMain);
       }
 
       if (!filename) {
@@ -1844,7 +1861,9 @@ Module._resolveFilename = function (
     parentPath,
   );
   if (filename) {
-    return op_require_real_path(filename);
+    return shouldPreserveSymlinks(isMain)
+      ? filename
+      : op_require_real_path(filename);
   }
   // fallback and attempt to resolve bare specifiers using
   // the global cache when not using --node-modules-dir
@@ -1931,7 +1950,9 @@ Module.prototype.load = function (filename) {
   }
 
   // Canonicalize the path so it's not pointing to the symlinked directory
-  // in `node_modules` directory of the referrer.
+  // in `node_modules` directory of the referrer, unless resolution preserved
+  // the symlink on purpose (`--preserve-symlinks`, or
+  // `--preserve-symlinks-main` for the entry module).
   // When load hooks are active, the file may not exist on disk (virtual
   // modules), so we fall back to the original filename.
   let hasLoadHooks = false;
@@ -1943,7 +1964,9 @@ Module.prototype.load = function (filename) {
       }
     }
   }
-  if (hasLoadHooks) {
+  if (shouldPreserveSymlinks(this === mainModule)) {
+    this.filename = filename;
+  } else if (hasLoadHooks) {
     try {
       this.filename = op_require_real_path(filename);
     } catch {

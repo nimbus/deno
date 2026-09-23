@@ -1,0 +1,6 @@
+moduleA -> moduleA/index.js
+error: Uncaught (in promise) Error: Cannot find module 'moduleB'
+Require stack:
+- [WILDCARD]moduleA/index.js
+- [WILDCARD]app/index.cjs
+[WILDCARD]

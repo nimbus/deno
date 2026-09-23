@@ -1,0 +1,38 @@
+// `--preserve-symlinks` keeps a symlinked CommonJS package at its link path,
+// so the package resolves peer dependencies from the `node_modules` directory
+// that contains the link. `--preserve-symlinks-main` does the same for the
+// entry module. Without the flags, Node (and Deno) canonicalize every
+// resolved module path.
+{
+  "tempDir": true,
+  "steps": [
+    {
+      "args": "run -A setup.cjs",
+      "output": ""
+    },
+    {
+      "args": "run -A app/index.cjs",
+      "output": "peer_without_flag.out",
+      "exitCode": 1
+    },
+    {
+      "envs": {
+        "NODE_OPTIONS": "--preserve-symlinks"
+      },
+      "args": "run -A app/index.cjs",
+      "output": "peer_with_flag.out"
+    },
+    {
+      "args": "run -A index.cjs",
+      "output": "main_without_flag.out",
+      "exitCode": 1
+    },
+    {
+      "envs": {
+        "NODE_OPTIONS": "--preserve-symlinks --preserve-symlinks-main"
+      },
+      "args": "run -A index.cjs",
+      "output": "main_with_flag.out"
+    }
+  ]
+}
