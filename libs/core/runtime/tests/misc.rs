@@ -148,6 +148,44 @@ fn warm_reset_preserves_evaluated_global_state() {
 }
 
 #[tokio::test]
+async fn warm_reset_drains_gc_housekeeping_tasks() {
+  // A small initial heap makes V8 start incremental marking while the
+  // request still runs. Marking steps are foreground tasks that reschedule
+  // themselves until marking finishes, so the reset must drain the queue to
+  // completion instead of giving up after a fixed number of passes.
+  let create_params = v8::Isolate::create_params()
+    .heap_limits(8 * 1024 * 1024, 128 * 1024 * 1024);
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    create_params: Some(create_params),
+    ..Default::default()
+  });
+  runtime
+    .execute_script(
+      "gc_pressure.js",
+      r#"
+        let junk = [];
+        for (let i = 0; i < 3000; i++) {
+          junk.push(new Array(4096).fill(i));
+          if (junk.length > 200) junk = [];
+        }
+        globalThis.warmValue = 41;
+      "#,
+    )
+    .unwrap();
+
+  assert!(runtime.is_warm_reuse_safe());
+  runtime.reset_request_state().unwrap();
+  assert_eq!(runtime.queued_foreground_task_count(), 0);
+  assert!(runtime.is_warm_reuse_safe());
+  runtime
+    .execute_script(
+      "verify_state.js",
+      "if (globalThis.warmValue !== 41) throw new Error('state lost')",
+    )
+    .unwrap();
+}
+
+#[tokio::test]
 async fn warm_reset_revokes_stale_task_spawners() {
   let mut runtime = create_spawner_runtime();
   let stale_spawner = runtime
