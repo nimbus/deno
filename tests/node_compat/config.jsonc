@@ -4341,7 +4341,10 @@
     "parallel/test-zlib-params.js": {},
     "parallel/test-zlib-premature-end.js": {},
     "parallel/test-zlib-random-byte-pipes.js": {},
-    "parallel/test-zlib-reject-garbage-after-end.js": {},
+    "parallel/test-zlib-reject-garbage-after-end.js": {
+      "ignore": true,
+      "reason": "Node 26.5 expects zstd to stop after the first frame; the zstd binding follows Node 26.10, which decodes concatenated frames, and Node 26.10 fails this test at the same assertion"
+    },
     "parallel/test-zlib-reset-before-write.js": {},
     "parallel/test-zlib-sync-no-event.js": {},
     "parallel/test-zlib-truncated.js": {},

@@ -244,10 +244,15 @@ function zlibOnError(message, errno, code) {
   // There is no way to cleanly recover.
   // Continuing only obscures problems.
 
-  code = code || codes[errno];
-  const error = genericNodeError(message, { errno, code });
-  error.errno = errno;
-  error.code = code;
+  let error;
+  if (code === "ERR_TRAILING_JUNK_AFTER_STREAM_END") {
+    error = new ERR_TRAILING_JUNK_AFTER_STREAM_END();
+  } else {
+    code = code || codes[errno];
+    error = genericNodeError(message, { errno, code });
+    error.errno = errno;
+    error.code = code;
+  }
   // Set the error synchronously so sync operations can check it immediately
   self[kError] = error;
 
@@ -1185,6 +1190,27 @@ class Zstd extends ZlibBase {
       });
     }
 
+    let dictionary = opts?.dictionary;
+    if (dictionary !== undefined && !isArrayBufferView(dictionary)) {
+      if (isAnyArrayBuffer(dictionary)) {
+        dictionary = new Uint8Array(dictionary);
+      } else {
+        throw new ERR_INVALID_ARG_TYPE(
+          "options.dictionary",
+          ["Buffer", "TypedArray", "DataView", "ArrayBuffer"],
+          dictionary,
+        );
+      }
+    }
+    // The native binding expects a Uint8Array, convert other ArrayBufferViews
+    if (dictionary !== undefined && !isUint8Array(dictionary)) {
+      dictionary = new Uint8Array(
+        dictionary.buffer,
+        dictionary.byteOffset,
+        dictionary.byteLength,
+      );
+    }
+
     const handle = mode === ZSTD_COMPRESS
       ? new binding.ZstdCompress(mode)
       : new binding.ZstdDecompress(mode);
@@ -1192,11 +1218,20 @@ class Zstd extends ZlibBase {
     const writeState = new Uint32Array(2);
     setupHandleWriteState(handle, writeState);
     const pledgedSrcSize = opts?.pledgedSrcSize;
-    const success = handle.init(
-      initParamsArray,
-      processCallback,
-      pledgedSrcSize,
-    );
+    const success = mode === ZSTD_COMPRESS
+      ? handle.init(
+        initParamsArray,
+        processCallback,
+        pledgedSrcSize,
+        dictionary,
+      )
+      : handle.init(
+        initParamsArray,
+        processCallback,
+        pledgedSrcSize,
+        dictionary,
+        opts?.rejectGarbageAfterEnd === true,
+      );
     if (!success) {
       throw new ERR_ZLIB_INITIALIZATION_FAILED("Setting parameter failed");
     }

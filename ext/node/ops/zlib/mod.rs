@@ -1093,6 +1093,7 @@ use zstd::stream::raw::Operation; // Trait for run/flush/finish methods
 
 struct ZstdCompressCtx {
   encoder: ZstdRawEncoder<'static>,
+  pledged_src_size: Option<u64>,
   callback: v8::Global<v8::Function>,
 }
 
@@ -1165,13 +1166,23 @@ impl ZstdCompress {
     #[buffer] params: &[u32],
     #[scoped] callback: v8::Global<v8::Function>,
     pledged_src_size: v8::Local<v8::Value>,
+    #[buffer] dictionary: Option<&[u8]>,
   ) -> Result<bool, JsErrorBox> {
     let pledged_src_size =
       parse_pledged_src_size(pledged_src_size).map_err(JsErrorBox::from_err)?;
 
     // Default compression level is 3
-    let Ok(mut encoder) = ZstdRawEncoder::new(3) else {
-      return Ok(false);
+    let mut encoder = match dictionary {
+      Some(dictionary) if !dictionary.is_empty() => {
+        ZstdRawEncoder::with_dictionary(3, dictionary)
+          .map_err(|_| JsErrorBox::from_err(ZstdDictionaryLoadError))?
+      }
+      _ => {
+        let Ok(encoder) = ZstdRawEncoder::new(3) else {
+          return Ok(false);
+        };
+        encoder
+      }
     };
 
     if pledged_src_size.is_some()
@@ -1231,10 +1242,11 @@ impl ZstdCompress {
       }
     }
 
-    self
-      .ctx
-      .borrow_mut()
-      .replace(ZstdCompressCtx { encoder, callback });
+    self.ctx.borrow_mut().replace(ZstdCompressCtx {
+      encoder,
+      pledged_src_size,
+      callback,
+    });
     Ok(true)
   }
 
@@ -1247,7 +1259,10 @@ impl ZstdCompress {
   fn reset(&self) {
     let mut ctx = self.ctx.borrow_mut();
     if let Some(ctx) = ctx.as_mut() {
+      // A session reset keeps the dictionary and parameters but drops the
+      // pledged source size, so set it again as Node does.
       let _ = ctx.encoder.reinit();
+      let _ = ctx.encoder.set_pledged_src_size(ctx.pledged_src_size);
     }
   }
 
@@ -1424,13 +1439,6 @@ impl ZstdCompress {
   }
 }
 
-struct ZstdDecompressCtx {
-  // The raw context, not `zstd::stream::raw::Decoder`: the decoder turns
-  // errors into `io::Error` text, and Node reports the numeric error code.
-  dctx: zstd::zstd_safe::DCtx<'static>,
-  callback: v8::Global<v8::Function>,
-}
-
 /// The error code name that Node's `ZstdStrerror` gives for a zstd error.
 fn zstd_error_code_name(
   code: zstd::zstd_safe::zstd_sys::ZSTD_ErrorCode,
@@ -1483,6 +1491,221 @@ fn zstd_error_code_name(
   }
 }
 
+/// A zstd stream error, with the message, code, and errno that Node's
+/// `CompressionError` passes to `onerror`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ZstdStreamError {
+  message: &'static str,
+  code: &'static str,
+  errno: i32,
+}
+
+impl ZstdStreamError {
+  fn from_code(code: usize) -> Self {
+    // SAFETY: `ZSTD_getErrorCode` only reads its argument.
+    let error = unsafe { zstd::zstd_safe::zstd_sys::ZSTD_getErrorCode(code) };
+    Self {
+      message: zstd::zstd_safe::get_error_name(code),
+      code: zstd_error_code_name(error),
+      errno: error as i32,
+    }
+  }
+
+  fn trailing_junk(errno: i32) -> Self {
+    Self {
+      message: "Trailing junk found after the end of the compressed stream",
+      code: "ERR_TRAILING_JUNK_AFTER_STREAM_END",
+      errno,
+    }
+  }
+}
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+#[class(generic)]
+#[property("code" = "ERR_ZLIB_INITIALIZATION_FAILED")]
+#[error("Failed to load zstd dictionary")]
+struct ZstdDictionaryLoadError;
+
+const ZSTD_E_END: i32 = 2;
+
+/// The decoder state of Node's `ZstdDecompressContext`: it decodes
+/// concatenated frames, skips skippable frames, ignores or rejects input after
+/// the last frame, and reports a frame that the input ends inside.
+struct ZstdDecoder {
+  // The raw context, not `zstd::stream::raw::Decoder`: the decoder turns
+  // errors into `io::Error` text, and Node reports the numeric error code.
+  dctx: zstd::zstd_safe::DCtx<'static>,
+  frame_complete: bool,
+  decoding_frame_after_complete: bool,
+  reject_garbage_after_end: bool,
+  ignoring_trailing_input: bool,
+  frame_prefix_size: usize,
+  possible_frame_types: u8,
+  error: Option<ZstdStreamError>,
+}
+
+impl ZstdDecoder {
+  fn new(
+    dctx: zstd::zstd_safe::DCtx<'static>,
+    reject_garbage_after_end: bool,
+  ) -> Self {
+    Self {
+      dctx,
+      frame_complete: false,
+      decoding_frame_after_complete: false,
+      reject_garbage_after_end,
+      ignoring_trailing_input: false,
+      frame_prefix_size: 0,
+      possible_frame_types: 0,
+      error: None,
+    }
+  }
+
+  /// Reset the session and keep the dictionary and parameters.
+  fn reset(&mut self) {
+    let _ = self
+      .dctx
+      .reset(zstd::zstd_safe::ResetDirective::SessionOnly);
+    self.frame_complete = false;
+    self.decoding_frame_after_complete = false;
+    self.ignoring_trailing_input = false;
+    self.frame_prefix_size = 0;
+    self.possible_frame_types = 0;
+    self.error = None;
+  }
+
+  /// Decompress as Node's `DoThreadPoolWork` and `GetErrorInfo` do. On
+  /// success, return the write result `[avail_out, avail_in]`.
+  fn write(
+    &mut self,
+    flush: i32,
+    input: &[u8],
+    output: &mut [u8],
+  ) -> Result<[u32; 2], ZstdStreamError> {
+    use zstd::stream::raw::InBuffer;
+    use zstd::stream::raw::OutBuffer;
+
+    let out_len = output.len();
+    let mut in_buffer = InBuffer::around(input);
+    let mut out_buffer = OutBuffer::around(output);
+    self.decompress(&mut in_buffer, &mut out_buffer);
+    if let Some(error) = self.error {
+      return Err(error);
+    }
+
+    let avail_in = input.len() - in_buffer.pos();
+    let avail_out = out_len - out_buffer.pos();
+    if flush == ZSTD_E_END
+      && !self.frame_complete
+      && avail_in == 0
+      && avail_out > 0
+    {
+      // The input ends inside a frame. Only a partial magic number after the
+      // last complete frame is trailing input, not a truncated frame.
+      if !self.decoding_frame_after_complete || self.frame_prefix_size >= 4 {
+        return Err(ZstdStreamError {
+          message: "unexpected end of file",
+          code: "Z_BUF_ERROR",
+          errno: Z_BUF_ERROR,
+        });
+      }
+      if self.reject_garbage_after_end {
+        return Err(ZstdStreamError::trailing_junk(-1));
+      }
+    }
+    Ok([avail_out as u32, avail_in as u32])
+  }
+
+  fn decompress(
+    &mut self,
+    input: &mut zstd::stream::raw::InBuffer<'_>,
+    output: &mut zstd::stream::raw::OutBuffer<'_, [u8]>,
+  ) {
+    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+    const SKIPPABLE_MAGIC: [u8; 4] = [0x50, 0x2a, 0x4d, 0x18];
+
+    if self.ignoring_trailing_input {
+      return;
+    }
+
+    // The JavaScript processing loop retries with empty input when the
+    // previous call filled the output buffer. Do not read that retry as the
+    // start of a new, incomplete frame.
+    if self.frame_complete && input.src.is_empty() {
+      return;
+    }
+
+    loop {
+      if self.frame_complete {
+        self.decoding_frame_after_complete = true;
+        self.frame_prefix_size = 0;
+        self.possible_frame_types = 0b11;
+      }
+
+      if self.decoding_frame_after_complete && self.frame_prefix_size < 4 {
+        // Look at the next magic number without consuming it. Bit 0b01 is a
+        // zstd frame and bit 0b10 is a skippable frame.
+        let prefix = &input.src[input.pos()..];
+        for &byte in prefix.iter().take(4 - self.frame_prefix_size) {
+          let index = self.frame_prefix_size;
+          if byte != ZSTD_MAGIC[index] {
+            self.possible_frame_types &= !0b01;
+          }
+          let skippable = if index == 0 {
+            byte & 0xf0 == SKIPPABLE_MAGIC[0]
+          } else {
+            byte == SKIPPABLE_MAGIC[index]
+          };
+          if !skippable {
+            self.possible_frame_types &= !0b10;
+          }
+          self.frame_prefix_size += 1;
+        }
+
+        if self.possible_frame_types == 0 {
+          self.frame_complete = true;
+          self.decoding_frame_after_complete = false;
+          if self.reject_garbage_after_end {
+            self.error = Some(ZstdStreamError::trailing_junk(
+              zstd::zstd_safe::zstd_sys::ZSTD_ErrorCode::ZSTD_error_GENERIC
+                as i32,
+            ));
+          } else {
+            self.ignoring_trailing_input = true;
+          }
+          return;
+        }
+      }
+
+      match self.dctx.decompress_stream(output, input) {
+        Ok(remaining) => {
+          self.frame_complete = remaining == 0;
+          if self.frame_complete {
+            self.decoding_frame_after_complete = false;
+          }
+        }
+        Err(code) => {
+          self.frame_complete = false;
+          self.error = Some(ZstdStreamError::from_code(code));
+          return;
+        }
+      }
+
+      if !(self.frame_complete
+        && input.pos() < input.src.len()
+        && output.pos() < output.capacity())
+      {
+        return;
+      }
+    }
+  }
+}
+
+struct ZstdDecompressCtx {
+  decoder: ZstdDecoder,
+  callback: v8::Global<v8::Function>,
+}
+
 pub struct ZstdDecompress {
   ctx: Rc<RefCell<Option<ZstdDecompressCtx>>>,
 }
@@ -1511,6 +1734,8 @@ impl ZstdDecompress {
     #[buffer] params: &[u32],
     #[scoped] callback: v8::Global<v8::Function>,
     pledged_src_size: v8::Local<v8::Value>,
+    #[buffer] dictionary: Option<&[u8]>,
+    reject_garbage_after_end: bool,
   ) -> Result<bool, JsErrorBox> {
     use zstd::zstd_safe::DCtx;
     use zstd::zstd_safe::DParameter;
@@ -1521,6 +1746,14 @@ impl ZstdDecompress {
     let mut dctx = DCtx::create();
     if dctx.init().is_err() {
       return Ok(false);
+    }
+
+    // Load the dictionary after `init()`, which drops any dictionary.
+    if let Some(dictionary) = dictionary
+      && !dictionary.is_empty()
+      && dctx.load_dictionary(dictionary).is_err()
+    {
+      return Err(JsErrorBox::from_err(ZstdDictionaryLoadError));
     }
 
     // Apply decompression parameters
@@ -1538,10 +1771,10 @@ impl ZstdDecompress {
       }
     }
 
-    self
-      .ctx
-      .borrow_mut()
-      .replace(ZstdDecompressCtx { dctx, callback });
+    self.ctx.borrow_mut().replace(ZstdDecompressCtx {
+      decoder: ZstdDecoder::new(dctx, reject_garbage_after_end),
+      callback,
+    });
     Ok(true)
   }
 
@@ -1554,7 +1787,7 @@ impl ZstdDecompress {
   fn reset(&self) {
     let mut ctx = self.ctx.borrow_mut();
     if let Some(ctx) = ctx.as_mut() {
-      let _ = ctx.dctx.reset(zstd::zstd_safe::ResetDirective::SessionOnly);
+      ctx.decoder.reset();
     }
   }
 
@@ -1564,7 +1797,7 @@ impl ZstdDecompress {
     &self,
     #[this] this: v8::Global<v8::Object>,
     scope: &mut v8::PinScope<'_, '_>,
-    #[smi] _flush: i32,
+    #[smi] flush: i32,
     #[buffer] input: &[u8],
     #[smi] in_off: u32,
     #[smi] in_len: u32,
@@ -1573,9 +1806,6 @@ impl ZstdDecompress {
     #[smi] out_len: u32,
     #[buffer] write_result: &mut [u32],
   ) -> Result<(), JsErrorBox> {
-    use zstd::stream::raw::InBuffer;
-    use zstd::stream::raw::OutBuffer;
-
     let (result, callback) = {
       let mut ctx = self.ctx.borrow_mut();
       let ctx = ctx.as_mut().expect("ZstdDecompress not initialized");
@@ -1583,40 +1813,22 @@ impl ZstdDecompress {
       let input_slice = slice_input(input, in_off, in_len)?;
       let output_slice = slice_output(out, out_off, out_len)?;
 
-      let mut in_buffer = InBuffer::around(input_slice);
-      let mut out_buffer = OutBuffer::around(output_slice);
-
-      let result = ctx.dctx.decompress_stream(&mut out_buffer, &mut in_buffer);
-
-      let avail_in = in_len as usize - in_buffer.pos();
-      let avail_out = out_len as usize - out_buffer.pos();
-
-      if write_result.len() >= 2 {
-        write_result[0] = avail_out as u32;
-        write_result[1] = avail_in as u32;
-      }
-
+      let result = ctx.decoder.write(flush, input_slice, output_slice);
       (result, v8::Local::new(scope, &ctx.callback))
     };
 
+    // Match Node's `CheckError`: on an error, call `onerror` and do not
+    // update the write result or call the write callback.
     let this = v8::Local::new(scope, &this);
     match result {
-      Ok(_) => {
+      Ok(avail) => {
+        if write_result.len() >= 2 {
+          write_result[..2].copy_from_slice(&avail);
+        }
         let _ = callback.call(scope, this.into(), &[]);
       }
-      // Match Node: report the error to `onerror` with zstd's message, the
-      // numeric error code, and its `ZSTD_error_*` name.
-      Err(code) => {
-        // SAFETY: `ZSTD_getErrorCode` only reads its argument.
-        let error =
-          unsafe { zstd::zstd_safe::zstd_sys::ZSTD_getErrorCode(code) };
-        call_onerror(
-          scope,
-          this,
-          zstd::zstd_safe::get_error_name(code),
-          error as i32,
-          zstd_error_code_name(error),
-        );
+      Err(error) => {
+        call_onerror(scope, this, error.message, error.errno, error.code);
       }
     }
 
@@ -1624,9 +1836,12 @@ impl ZstdDecompress {
   }
 
   #[fast]
+  #[reentrant]
   pub fn write_sync(
     &self,
-    #[smi] _flush: i32,
+    #[this] this: v8::Global<v8::Object>,
+    scope: &mut v8::PinScope<'_, '_>,
+    #[smi] flush: i32,
     #[buffer] input: &[u8],
     #[smi] in_off: u32,
     #[smi] in_len: u32,
@@ -1635,34 +1850,26 @@ impl ZstdDecompress {
     #[smi] out_len: u32,
     #[buffer] write_result: &mut [u32],
   ) -> Result<(), JsErrorBox> {
-    use zstd::stream::raw::InBuffer;
-    use zstd::stream::raw::OutBuffer;
+    let result = {
+      let mut ctx = self.ctx.borrow_mut();
+      let ctx = ctx.as_mut().expect("ZstdDecompress not initialized");
 
-    let mut ctx = self.ctx.borrow_mut();
-    let ctx = ctx.as_mut().expect("ZstdDecompress not initialized");
+      let input_slice = slice_input(input, in_off, in_len)?;
+      let output_slice = slice_output(out, out_off, out_len)?;
 
-    let input_slice = slice_input(input, in_off, in_len)?;
-    let output_slice = slice_output(out, out_off, out_len)?;
+      ctx.decoder.write(flush, input_slice, output_slice)
+    };
 
-    let mut in_buffer = InBuffer::around(input_slice);
-    let mut out_buffer = OutBuffer::around(output_slice);
-
-    ctx
-      .dctx
-      .decompress_stream(&mut out_buffer, &mut in_buffer)
-      .map_err(|code| {
-        JsErrorBox::generic(format!(
-          "Zstd decompress error: {}",
-          zstd::zstd_safe::get_error_name(code)
-        ))
-      })?;
-
-    let avail_in = in_len as usize - in_buffer.pos();
-    let avail_out = out_len as usize - out_buffer.pos();
-
-    if write_result.len() >= 2 {
-      write_result[0] = avail_out as u32;
-      write_result[1] = avail_in as u32;
+    match result {
+      Ok(avail) => {
+        if write_result.len() >= 2 {
+          write_result[..2].copy_from_slice(&avail);
+        }
+      }
+      Err(error) => {
+        let this = v8::Local::new(scope, &this);
+        call_onerror(scope, this, error.message, error.errno, error.code);
+      }
     }
 
     Ok(())
@@ -1748,6 +1955,129 @@ mod tests {
     for parameter in [7, 149, 163, 170, 172, 256] {
       assert!(encoder_param(parameter).is_none());
     }
+  }
+
+  fn zstd_decoder(reject_garbage_after_end: bool) -> ZstdDecoder {
+    let mut dctx = zstd::zstd_safe::DCtx::create();
+    dctx.init().unwrap();
+    ZstdDecoder::new(dctx, reject_garbage_after_end)
+  }
+
+  /// Write `input` in one call with an output buffer of `out_len` bytes, and
+  /// retry with the remaining input while the output buffer is full, as the
+  /// JavaScript processing loop does.
+  fn zstd_decode(
+    decoder: &mut ZstdDecoder,
+    flush: i32,
+    mut input: &[u8],
+    out_len: usize,
+  ) -> Result<(Vec<u8>, usize), ZstdStreamError> {
+    let mut decoded = Vec::new();
+    loop {
+      let mut out = vec![0; out_len];
+      let [avail_out, avail_in] = decoder.write(flush, input, &mut out)?;
+      decoded.extend_from_slice(&out[..out_len - avail_out as usize]);
+      input = &input[input.len() - avail_in as usize..];
+      if avail_out != 0 {
+        return Ok((decoded, input.len()));
+      }
+    }
+  }
+
+  #[test]
+  fn zstd_decoder_concatenated_and_skippable_frames() {
+    let mut input = zstd::bulk::compress(b"abc", 3).unwrap();
+    // A skippable frame: magic 0x184D2A5?, a 4-byte size, then the payload.
+    input.extend_from_slice(&[0x53, 0x2a, 0x4d, 0x18, 2, 0, 0, 0, 7, 7]);
+    input.extend(zstd::bulk::compress(b"def", 3).unwrap());
+
+    for out_len in [1, 64] {
+      let mut decoder = zstd_decoder(false);
+      let (decoded, avail_in) =
+        zstd_decode(&mut decoder, ZSTD_E_END, &input, out_len).unwrap();
+      assert_eq!(decoded, b"abcdef");
+      assert_eq!(avail_in, 0);
+    }
+  }
+
+  #[test]
+  fn zstd_decoder_trailing_junk() {
+    let mut input = zstd::bulk::compress(b"abc", 3).unwrap();
+    input.extend_from_slice(b"junk");
+
+    let mut decoder = zstd_decoder(false);
+    let (decoded, avail_in) =
+      zstd_decode(&mut decoder, ZSTD_E_END, &input, 64).unwrap();
+    assert_eq!(decoded, b"abc");
+    assert_eq!(avail_in, 4);
+
+    let mut decoder = zstd_decoder(true);
+    let error = zstd_decode(&mut decoder, ZSTD_E_END, &input, 64).unwrap_err();
+    assert_eq!(error.code, "ERR_TRAILING_JUNK_AFTER_STREAM_END");
+
+    // A partial magic number at the end is trailing input too.
+    let mut input = zstd::bulk::compress(b"abc", 3).unwrap();
+    input.extend_from_slice(&[0x28, 0xb5]);
+    let mut decoder = zstd_decoder(false);
+    let (decoded, _) =
+      zstd_decode(&mut decoder, ZSTD_E_END, &input, 64).unwrap();
+    assert_eq!(decoded, b"abc");
+    let mut decoder = zstd_decoder(true);
+    let error = zstd_decode(&mut decoder, ZSTD_E_END, &input, 64).unwrap_err();
+    assert_eq!(error.code, "ERR_TRAILING_JUNK_AFTER_STREAM_END");
+    assert_eq!(error.errno, -1);
+  }
+
+  #[test]
+  fn zstd_decoder_truncated_frame() {
+    let input = zstd::bulk::compress(&[b'a'; 1000], 3).unwrap();
+    let truncated = &input[..input.len() / 2];
+
+    let mut decoder = zstd_decoder(false);
+    let error =
+      zstd_decode(&mut decoder, ZSTD_E_END, truncated, 64).unwrap_err();
+    assert_eq!(
+      error,
+      ZstdStreamError {
+        message: "unexpected end of file",
+        code: "Z_BUF_ERROR",
+        errno: Z_BUF_ERROR,
+      }
+    );
+
+    // A flush that does not end the stream accepts the partial frame.
+    let mut decoder = zstd_decoder(false);
+    assert!(zstd_decode(&mut decoder, 1, truncated, 64).is_ok());
+
+    // A second write that ends the stream reports the incomplete frame.
+    let mut decoder = zstd_decoder(false);
+    zstd_decode(&mut decoder, 0, truncated, 64).unwrap();
+    assert!(zstd_decode(&mut decoder, ZSTD_E_END, &[], 64).is_err());
+
+    // Ending after a complete frame is not an empty, truncated frame.
+    let mut decoder = zstd_decoder(false);
+    zstd_decode(&mut decoder, 0, &input, 64).unwrap();
+    assert!(zstd_decode(&mut decoder, ZSTD_E_END, &[], 64).is_ok());
+  }
+
+  #[test]
+  fn zstd_decoder_reset_keeps_dictionary() {
+    let dictionary = b"a dictionary with some content to reference";
+    let input = zstd::bulk::Compressor::with_dictionary(3, dictionary)
+      .unwrap()
+      .compress(b"some content to reference")
+      .unwrap();
+
+    let mut dctx = zstd::zstd_safe::DCtx::create();
+    dctx.init().unwrap();
+    dctx.load_dictionary(dictionary).unwrap();
+    let mut decoder = ZstdDecoder::new(dctx, false);
+
+    assert!(zstd_decode(&mut decoder, ZSTD_E_END, b"not zstd", 64).is_err());
+    decoder.reset();
+    let (decoded, _) =
+      zstd_decode(&mut decoder, ZSTD_E_END, &input, 64).unwrap();
+    assert_eq!(decoded, b"some content to reference");
   }
 
   #[test]

@@ -2764,7 +2764,7 @@ class ERR_TRAILING_JUNK_AFTER_STREAM_END extends NodeTypeError {
   constructor() {
     super(
       "ERR_TRAILING_JUNK_AFTER_STREAM_END",
-      "Trailing garbage found after the compressed stream",
+      "Trailing junk found after the end of the compressed stream",
     );
   }
 }

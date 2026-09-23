@@ -334,11 +334,11 @@ function createZstdHandle(mode, options, processCallback, onError) {
   }
 
   handle.onerror = onError;
-  // Deno's Zstd binding has no dictionary support, as in lib/zlib.js.
   handle.init(
     initArray,
     processCallback,
     pledgedSrcSize,
+    dictionary,
   );
 
   return { __proto__: null, handle, writeState, chunkSize };

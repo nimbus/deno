@@ -417,19 +417,9 @@ const lazyNodeModules = {
     core.loadExtScript("ext:deno_node/internal/streams/writable.js").default,
 };
 
-// Match Node's experimentalModuleList: these builtins are only available
-// when their flag is set (see setupStreamIter in
-// lib/internal/process/pre_execution.js).
-const experimentalModuleFlags = {
-  __proto__: null,
-  "stream/iter": "--experimental-stream-iter",
-  "zlib/iter": "--experimental-stream-iter",
-};
-
-function experimentalModuleIsEnabled(request) {
-  const flag = experimentalModuleFlags[request];
-  return flag === undefined || getOptionValue(flag) === true;
-}
+const { experimentalModuleIsEnabled } = core.loadExtScript(
+  "ext:deno_node/internal/experimental_modules.js",
+);
 
 function defineLazyNativeModule(name, loader) {
   ObjectDefineProperty(nativeModuleExports, name, {

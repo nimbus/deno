@@ -1834,6 +1834,9 @@ impl JsRuntime {
     for (module_spec, backing_spec) in loaded_sources.synthetic_esm {
       module_map.add_synthetic_esm_module(module_spec, backing_spec);
     }
+    for (module_spec, gate_spec) in loaded_sources.synthetic_esm_gates {
+      module_map.add_synthetic_esm_gate(module_spec, gate_spec);
+    }
 
     // Temporarily override the loader of the `ModuleMap` so we can load
     // extension code.
