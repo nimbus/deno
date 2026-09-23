@@ -50,11 +50,18 @@ const {
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
   ERR_MODULE_LINK_MISMATCH,
+  ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG,
   ERR_VM_MODULE_ALREADY_LINKED,
   ERR_VM_MODULE_DIFFERENT_CONTEXT,
   ERR_VM_MODULE_NOT_MODULE,
   ERR_VM_MODULE_STATUS,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
+const { getOptionValue } = core.loadExtScript(
+  "ext:deno_node/internal/options.ts",
+);
+const { isModuleNamespaceObject } = core.loadExtScript(
+  "ext:deno_node/internal/util/types.ts",
+);
 
 const {
   ArrayIsArray,
@@ -65,6 +72,7 @@ const {
   ArrayPrototypeSome,
   JSONStringify,
   ObjectAssign,
+  ObjectCreate,
   ObjectFreeze,
   ObjectPrototypeHasOwnProperty,
   PromisePrototypeThen,
@@ -200,11 +208,35 @@ class Script {
   }
 }
 
+// Mirrors Node's `importModuleDynamicallyWrap`: a module namespace object
+// passes through, an errored module rethrows its error, and any other value
+// rejects the import with ERR_VM_MODULE_NOT_MODULE.
 function finishDynamicImportResult(result) {
-  if (isModule(result)) {
-    return PromisePrototypeThen(result.evaluate(), () => result.namespace);
+  if (isModuleNamespaceObject(result)) {
+    return result;
   }
-  return result;
+  if (!isModule(result)) {
+    throw new ERR_VM_MODULE_NOT_MODULE();
+  }
+  if (result.status === "errored") {
+    throw result.error;
+  }
+  return PromisePrototypeThen(result.evaluate(), () => result.namespace);
+}
+
+// Node defers the missing-flag error to the first `import()` instead of
+// rejecting the option up front, so a callback registered only to throw keeps
+// working without `--experimental-vm-modules`. One shared callback serves
+// every script compiled without the flag.
+let missingFlagCallbackId = 0;
+
+function getMissingFlagCallbackId() {
+  if (missingFlagCallbackId === 0) {
+    missingFlagCallbackId = op_vm_dynamic_import_callback_register(() =>
+      PromiseReject(new ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG())
+    );
+  }
+  return missingFlagCallbackId;
 }
 
 function validateImportModuleDynamically(value, name) {
@@ -229,10 +261,18 @@ function getImportModuleDynamicallyId(value, name, getReferrer) {
   if (value === undefined) {
     return 0;
   }
+  if (!getOptionValue("--experimental-vm-modules")) {
+    return getMissingFlagCallbackId();
+  }
   return op_vm_dynamic_import_callback_register(
     (specifier, importAttributes) => {
+      // Node hands the callback a null-prototype attributes object and the
+      // import phase; deno_core only surfaces evaluation-phase imports.
+      const attributes = ObjectAssign(ObjectCreate(null), importAttributes);
       return PromisePrototypeThen(
-        PromiseResolve(value(specifier, getReferrer(), importAttributes)),
+        PromiseResolve(
+          value(specifier, getReferrer(), attributes, "evaluation"),
+        ),
         finishDynamicImportResult,
       );
     },

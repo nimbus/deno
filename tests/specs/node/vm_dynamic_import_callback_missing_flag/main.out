@@ -1,0 +1,5 @@
+Script TypeError ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG: A dynamic import callback was invoked without --experimental-vm-modules
+compileFunction TypeError ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG: A dynamic import callback was invoked without --experimental-vm-modules
+createContext TypeError ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG: A dynamic import callback was invoked without --experimental-vm-modules
+SourceTextModule TypeError ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG: A dynamic import callback was invoked without --experimental-vm-modules
+USE_MAIN_CONTEXT_DEFAULT_LOADER object

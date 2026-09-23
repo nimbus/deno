@@ -577,6 +577,11 @@ fn parse_flags(source: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
           n if n.starts_with("--unhandled-rejections=") => {
             node_options.push(flag.to_string());
           }
+          // `node:vm` gates `importModuleDynamically` callbacks on this flag,
+          // matching Node. Forward it so the vm module tests run as Node does.
+          "--experimental-vm-modules" => {
+            node_options.push("--experimental-vm-modules".to_string());
+          }
           // Inspector tests opt in to the inspector via `--inspect=PORT`
           // (commonly `--inspect=0` to pick a random port). Forward to
           // Deno, normalizing the bare port form to `127.0.0.1:PORT` since
