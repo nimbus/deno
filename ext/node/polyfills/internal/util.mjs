@@ -104,6 +104,17 @@ function lazyDOMException(message, name) {
   return new _DOMException(message, name);
 }
 
+function setOwnProperty(obj, key, value) {
+  ObjectDefineProperty(obj, key, {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
+  return value;
+}
+
 function promisify(
   original,
 ) {
@@ -309,6 +320,7 @@ return {
   pendingDeprecate,
   promisify,
   removeColors,
+  setOwnProperty,
   shouldColorize,
   sleep,
   WeakReference,
@@ -327,6 +339,7 @@ return {
     pendingDeprecate,
     promisify,
     removeColors,
+    setOwnProperty,
     shouldColorize,
     sleep,
   },

@@ -1,6 +1,6 @@
 // deno-lint-ignore-file
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Node.js v26.7.0 lib/internal/streams/iter/pull.js.
+// Ported from Node.js v26.10.0 lib/internal/streams/iter/pull.js.
 
 (function () {
 const { core, primordials } = __bootstrap;
@@ -13,15 +13,13 @@ const { core, primordials } = __bootstrap;
 
 const {
   ArrayBufferIsView,
-  ArrayFromAsync,
-  ArrayIsArray,
   ArrayPrototypePush,
   ArrayPrototypeSlice,
+  FunctionPrototypeCall,
   PromisePrototypeThen,
   PromiseResolve,
   SymbolAsyncIterator,
   SymbolIterator,
-  TypedArrayPrototypeGetByteLength,
   Uint8Array,
 } = primordials;
 
@@ -29,23 +27,29 @@ const {
   codes: {
     ERR_INVALID_ARG_TYPE,
     ERR_INVALID_ARG_VALUE,
+    ERR_INVALID_STATE,
     ERR_OUT_OF_RANGE,
   },
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { lazyDOMException } = core.loadExtScript(
   "ext:deno_node/internal/util.mjs",
 );
-const { validateAbortSignal } = core.loadExtScript(
-  "ext:deno_node/internal/validators.mjs",
-);
 const {
   isAnyArrayBuffer,
   isPromise,
   isUint8Array,
 } = core.loadExtScript("ext:deno_node/internal/util/types.ts");
-const { AbortController } = core.loadExtScript(
-  "ext:deno_web/03_abort_signal.js",
-);
+const {
+  AbortController,
+  AbortSignal,
+  signalAbort,
+} = core.loadExtScript("ext:deno_web/03_abort_signal.js");
+
+// Deno has no abortSignal(signal, reason) helper. The [[signalAbort]]
+// method of the deno_web AbortSignal runs the same abort steps.
+function abortSignal(signal, reason) {
+  signal[signalAbort](reason);
+}
 
 const {
   arrayBufferViewToUint8Array,
@@ -53,26 +57,25 @@ const {
   fromSync,
   isSyncIterable,
   isAsyncIterable,
-  isPrimitiveChunk,
   isUint8ArrayBatch,
-  normalizeAsyncValue,
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/from.js");
 
 const {
-  isPullOptions,
+  createBatchEntry,
   isTransform,
   isTransformObject,
   parsePullArgs,
   toUint8Array,
-  wrapError,
+  validateBatchEntry,
+  validateByteView,
   yieldAbortable,
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/utils.js");
+const {
+  converters,
+} = core.loadExtScript("ext:deno_node/internal/streams/iter/webidl.js");
 
 const {
-  kValidatedSource,
   kValidatedTransform,
-  toAsyncStreamable,
-  toStreamable,
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/types.js");
 
 // =============================================================================
@@ -91,7 +94,7 @@ function hasMethod(value, name) {
  * Parse pipeTo/pipeToSync arguments: [...transforms, writer, options?]
  * @param {Array} args
  * @param {string} requiredMethod - 'write' for pipeTo, 'writeSync' for pipeToSync
- * @returns {{ transforms: Array, writer: object, options: object }}
+ * @returns {{ transforms: Array, writer: object, options: unknown }}
  */
 function parsePipeToArgs(args, requiredMethod) {
   if (args.length === 0) {
@@ -107,7 +110,7 @@ function parsePipeToArgs(args, requiredMethod) {
 
   // Check if last arg is options
   const last = args[args.length - 1];
-  if (isPullOptions(last) && !hasMethod(last, requiredMethod)) {
+  if (!isTransform(last) && !hasMethod(last, requiredMethod)) {
     options = last;
     writerIndex = args.length - 2;
   }
@@ -146,24 +149,6 @@ function parsePipeToArgs(args, requiredMethod) {
     writer,
     options,
   };
-}
-
-function canUseSyncIterablePipeToFastPath(source, transforms, signal) {
-  if (
-    signal !== undefined ||
-    transforms.length !== 0 ||
-    isPrimitiveChunk(source) ||
-    ArrayIsArray(source) ||
-    source?.[kValidatedSource] ||
-    !isSyncIterable(source) ||
-    isAsyncIterable(source)
-  ) {
-    return false;
-  }
-
-  // Preserve from()'s top-level protocol precedence for custom iterables.
-  return typeof source[toAsyncStreamable] !== "function" &&
-    typeof source[toStreamable] !== "function";
 }
 
 // =============================================================================
@@ -486,6 +471,16 @@ async function appendTransformResultAsyncSlow(target, result) {
   }
 }
 
+function normalizeTransformResultFast(result) {
+  if (isUint8ArrayBatch(result)) {
+    return result.length === 0 ? null : result;
+  }
+  if (isUint8Array(result)) return [result];
+  if (typeof result === "string") return [toUint8Array(result)];
+  if (isAnyArrayBuffer(result)) return [new Uint8Array(result)];
+  if (ArrayBufferIsView(result)) return [arrayBufferViewToUint8Array(result)];
+}
+
 // =============================================================================
 // Sync Pipeline Implementation
 // =============================================================================
@@ -509,7 +504,17 @@ function* applyFusedStatelessSyncTransforms(source, run) {
         current = null;
         break;
       }
-      current = result;
+      if (i === run.length - 1) {
+        current = result;
+        continue;
+      }
+      current = normalizeTransformResultFast(result);
+      if (current === undefined) {
+        const normalized = [];
+        appendTransformResultSync(normalized, result);
+        current = normalized.length === 0 ? null : normalized[0];
+      }
+      if (current === null) break;
     }
     if (current === null) continue;
     // Inline normalization with Uint8Array[] batch as the fast path,
@@ -553,8 +558,12 @@ function* withFlushSync(source) {
   yield null;
 }
 
-function* applyStatefulSyncTransform(source, transform) {
-  const output = transform(withFlushSync(source));
+function* applyStatefulSyncTransform(source, transform, receiver) {
+  const output = FunctionPrototypeCall(
+    transform,
+    receiver,
+    withFlushSync(source),
+  );
   for (const item of output) {
     if (item === null) continue;
     const batch = [];
@@ -585,7 +594,11 @@ function* createSyncPipeline(source, transforms) {
         current = applyFusedStatelessSyncTransforms(current, statelessRun);
         statelessRun = [];
       }
-      current = applyStatefulSyncTransform(current, transform.transform);
+      current = applyStatefulSyncTransform(
+        current,
+        transform.transform,
+        transform,
+      );
     } else {
       ArrayPrototypePush(statelessRun, transform);
     }
@@ -622,21 +635,24 @@ async function* applyFusedStatelessAsyncTransforms(source, run, signal) {
   for await (const chunks of source) {
     let current = chunks;
     for (let i = 0; i < run.length; i++) {
-      const result = run[i](current, { __proto__: null, signal });
+      let result = run[i](current, { __proto__: null, signal });
+      if (isPromise(result)) result = await result;
       if (result === null) {
         current = null;
         break;
       }
-      if (isPromise(result)) {
-        const resolved = await result;
-        if (resolved === null) {
-          current = null;
-          break;
-        }
-        current = resolved;
-      } else {
+      if (i === run.length - 1) {
         current = result;
+        continue;
       }
+      current = normalizeTransformResultFast(result);
+      if (current === undefined) {
+        const normalized = [];
+        const pendingResult = appendTransformResultAsync(normalized, result);
+        if (pendingResult !== undefined) await pendingResult;
+        current = normalized.length === 0 ? null : normalized[0];
+      }
+      if (current === null) break;
     }
     if (current === null) continue;
     // Normalize the final output
@@ -695,8 +711,18 @@ async function* withFlushAsync(source) {
   yield null;
 }
 
-async function* applyStatefulAsyncTransform(source, transform, options) {
-  const output = transform(withFlushAsync(source), options);
+async function* applyStatefulAsyncTransform(
+  source,
+  transform,
+  receiver,
+  options,
+) {
+  const output = FunctionPrototypeCall(
+    transform,
+    receiver,
+    withFlushAsync(source),
+    options,
+  );
   for await (const item of output) {
     if (item === null) continue;
     // Fast path: item is already a Uint8Array[] batch (e.g. compression transforms)
@@ -731,9 +757,15 @@ async function* applyStatefulAsyncTransform(source, transform, options) {
 async function* applyValidatedStatefulAsyncTransform(
   source,
   transform,
+  receiver,
   options,
 ) {
-  const output = transform(source, options);
+  const output = FunctionPrototypeCall(
+    transform,
+    receiver,
+    source,
+    options,
+  );
   for await (const batch of output) {
     if (batch.length > 0) {
       yield batch;
@@ -767,10 +799,7 @@ async function* createAsyncPipeline(source, transforms, signal) {
   let abortHandler;
   if (signal) {
     abortHandler = () => {
-      controller.abort(
-        signal.reason ??
-          lazyDOMException("Aborted", "AbortError"),
-      );
+      abortSignal(controller.signal, signal.reason);
     };
     signal.addEventListener("abort", abortHandler, {
       __proto__: null,
@@ -811,12 +840,14 @@ async function* createAsyncPipeline(source, transforms, signal) {
         current = applyValidatedStatefulAsyncTransform(
           current,
           transform.transform,
+          transform,
           opts,
         );
       } else {
         current = applyStatefulAsyncTransform(
           current,
           transform.transform,
+          transform,
           opts,
         );
       }
@@ -839,10 +870,14 @@ async function* createAsyncPipeline(source, transforms, signal) {
       controller.signal.throwIfAborted();
       yield batch;
     }
+    // A transform can abort while completing without producing a final batch,
+    // for example when an async flush resolves to null. In that case the loop
+    // body has no opportunity to observe the abort.
+    controller.signal.throwIfAborted();
     completed = true;
   } catch (error) {
     if (!controller.signal.aborted) {
-      controller.abort(wrapError(error));
+      abortSignal(controller.signal, error);
     }
     throw error;
   } finally {
@@ -869,6 +904,7 @@ async function* createAsyncPipeline(source, transforms, signal) {
  * @returns {Iterable<Uint8Array[]>}
  */
 function pullSync(source, ...transforms) {
+  const normalized = fromSync(source);
   for (let i = 0; i < transforms.length; i++) {
     if (!isTransform(transforms[i])) {
       throw new ERR_INVALID_ARG_TYPE(
@@ -881,7 +917,7 @@ function pullSync(source, ...transforms) {
   return {
     __proto__: null,
     *[SymbolIterator]() {
-      yield* createSyncPipeline(fromSync(source), transforms);
+      yield* createSyncPipeline(normalized, transforms);
     },
   };
 }
@@ -894,26 +930,131 @@ function pullSync(source, ...transforms) {
  * @returns {AsyncIterable<Uint8Array[]>}
  */
 function pull(source, ...args) {
-  const { transforms, options } = parsePullArgs(args);
-  const signal = options?.signal;
-  if (signal !== undefined) {
-    validateAbortSignal(signal, "options.signal");
-    // Eagerly check abort at call time per spec
-    if (signal.aborted) {
+  const parsed = parsePullArgs(args);
+  const { transforms } = parsed;
+  const options = converters.PullOptions(parsed.options, {
+    __proto__: null,
+    context: "options",
+  });
+  const { signal } = options;
+  const normalized = from(source);
+  signal?.throwIfAborted();
+
+  return {
+    __proto__: null,
+    [SymbolAsyncIterator]() {
+      const controller = new AbortController();
+      const iteratorSignal = signal === undefined
+        ? controller.signal
+        : AbortSignal.any([signal, controller.signal]);
+
+      async function* pipeline() {
+        yield* createAsyncPipeline(normalized, transforms, iteratorSignal);
+      }
+      const iterator = pipeline();
+
       return {
         __proto__: null,
-        // eslint-disable-next-line require-yield
-        async *[SymbolAsyncIterator]() {
-          throw signal.reason;
+        next(value) {
+          return iterator.next(value);
+        },
+        return(value) {
+          controller.abort(lazyDOMException("Aborted", "AbortError"));
+          return iterator.return(value);
+        },
+        throw(error) {
+          abortSignal(controller.signal, error);
+          return iterator.throw(error);
+        },
+        [SymbolAsyncIterator]() {
+          return this;
         },
       };
+    },
+  };
+}
+
+// Keep ownership of a bonded consumer outside the transform pipeline so it can
+// be detached even when the pipeline never starts or terminates early.
+function pullWithConsumerCleanup(source, transforms, signal) {
+  const sourceIterator = source[SymbolAsyncIterator]();
+  const pipelineSource = {
+    __proto__: null,
+    [SymbolAsyncIterator]() {
+      return sourceIterator;
+    },
+  };
+  let sourceClosed = false;
+  let abortHandler;
+
+  function closeSource(method, value) {
+    if (sourceClosed) return;
+    sourceClosed = true;
+    if (abortHandler !== undefined) {
+      signal.removeEventListener("abort", abortHandler);
     }
+    const close = sourceIterator[method] ?? sourceIterator.return;
+    if (typeof close === "function") {
+      const result = FunctionPrototypeCall(close, sourceIterator, value);
+      PromisePrototypeThen(PromiseResolve(result), undefined, () => {});
+    }
+  }
+
+  if (signal?.aborted) {
+    closeSource("throw", signal.reason);
+    return {
+      __proto__: null,
+      // eslint-disable-next-line require-yield
+      async *[SymbolAsyncIterator]() {
+        throw signal.reason;
+      },
+    };
+  }
+
+  const pipeline = signal === undefined
+    ? pull(pipelineSource, ...transforms)
+    : pull(pipelineSource, ...transforms, { __proto__: null, signal });
+
+  if (signal !== undefined) {
+    abortHandler = () => closeSource("throw", signal.reason);
+    signal.addEventListener("abort", abortHandler, {
+      __proto__: null,
+      once: true,
+    });
+    if (signal.aborted) abortHandler();
   }
 
   return {
     __proto__: null,
-    async *[SymbolAsyncIterator]() {
-      yield* createAsyncPipeline(from(source), transforms, signal);
+    [SymbolAsyncIterator]() {
+      const iterator = pipeline[SymbolAsyncIterator]();
+      return {
+        __proto__: null,
+        next(value) {
+          return PromisePrototypeThen(
+            iterator.next(value),
+            (result) => {
+              if (result.done) closeSource("return");
+              return result;
+            },
+            (error) => {
+              closeSource("throw", error);
+              throw error;
+            },
+          );
+        },
+        return(value) {
+          closeSource("return", value);
+          return iterator.return(value);
+        },
+        throw(error) {
+          closeSource("throw", error);
+          return iterator.throw(error);
+        },
+        [SymbolAsyncIterator]() {
+          return this;
+        },
+      };
     },
   };
 }
@@ -929,7 +1070,22 @@ function pull(source, ...args) {
  * @returns {number} Total bytes written
  */
 function pipeToSync(source, ...args) {
-  const { transforms, writer, options } = parsePipeToArgs(args, "writeSync");
+  const parsed = parsePipeToArgs(args, "writeSync");
+  const { transforms, writer } = parsed;
+  const options = converters.PipeToSyncOptions(parsed.options, {
+    __proto__: null,
+    context: "options",
+  });
+  const hasWritevSync = typeof writer.writevSync === "function";
+  const endSync = writer.endSync;
+
+  if (!options.preventClose && typeof endSync !== "function") {
+    throw new ERR_INVALID_ARG_TYPE(
+      "writer.endSync",
+      "Function",
+      endSync,
+    );
+  }
 
   // Normalize source and create pipeline
   const normalized = fromSync(source);
@@ -938,45 +1094,49 @@ function pipeToSync(source, ...args) {
     : normalized;
 
   let totalBytes = 0;
-  const hasWritevSync = typeof writer.writevSync === "function";
-  const hasEndSync = typeof writer.endSync === "function";
 
   try {
     for (const batch of pipeline) {
+      const entry = createBatchEntry(batch);
       if (hasWritevSync && batch.length > 1) {
-        if (writer.writevSync(batch) === false) {
+        const accepted = writer.writevSync(validateBatchEntry(entry));
+        validateBatchEntry(entry);
+        if (accepted === false) {
           throw new ERR_OUT_OF_RANGE(
             "write",
             "within byte budget",
             "budget exhausted",
           );
         }
-        for (let i = 0; i < batch.length; i++) {
-          totalBytes += TypedArrayPrototypeGetByteLength(batch[i]);
-        }
+        totalBytes += entry.byteLength;
       } else {
-        for (let i = 0; i < batch.length; i++) {
-          const chunk = batch[i];
-          if (writer.writeSync(chunk) === false) {
+        for (let i = 0; i < entry.views.length; i++) {
+          const view = entry.views[i];
+          const chunk = validateByteView(view);
+          const accepted = writer.writeSync(chunk);
+          validateByteView(view);
+          if (accepted === false) {
             throw new ERR_OUT_OF_RANGE(
               "write",
               "within byte budget",
               "budget exhausted",
             );
           }
-          totalBytes += TypedArrayPrototypeGetByteLength(chunk);
+          totalBytes += view.byteLength;
         }
       }
     }
 
-    if (!options?.preventClose) {
-      if (!hasEndSync || writer.endSync() < 0) {
-        writer.end?.();
+    if (!options.preventClose) {
+      if (FunctionPrototypeCall(endSync, writer) < 0) {
+        throw new ERR_INVALID_STATE(
+          "Writer could not be closed synchronously",
+        );
       }
     }
   } catch (error) {
-    if (!options?.preventFail) {
-      writer.fail?.(wrapError(error));
+    if (!options.preventFail) {
+      writer.fail?.(error);
     }
     throw error;
   }
@@ -991,20 +1151,29 @@ function pipeToSync(source, ...args) {
  * @returns {Promise<number>} Total bytes written
  */
 async function pipeTo(source, ...args) {
-  const { transforms, writer, options } = parsePipeToArgs(args, "write");
-  if (options?.signal !== undefined) {
-    validateAbortSignal(options.signal, "options.signal");
+  const parsed = parsePipeToArgs(args, "write");
+  const { transforms, writer } = parsed;
+  const options = converters.PipeToOptions(parsed.options, {
+    __proto__: null,
+    context: "options",
+  });
+  const { signal } = options;
+
+  function failWriter(error) {
+    if (!options.preventFail) {
+      writer.fail?.(error);
+    }
   }
 
-  const signal = options?.signal;
-
-  // Check for abort
-  signal?.throwIfAborted();
+  try {
+    signal?.throwIfAborted();
+  } catch (error) {
+    failWriter(error);
+    throw error;
+  }
 
   const hasWriteSync = typeof writer.writeSync === "function";
-  const useSyncIterableFastPath = hasWriteSync &&
-    canUseSyncIterablePipeToFastPath(source, transforms, signal);
-  const normalized = useSyncIterableFastPath ? undefined : from(source);
+  const normalized = from(source);
 
   let totalBytes = 0;
   const hasWritev = typeof writer.writev === "function";
@@ -1013,21 +1182,27 @@ async function pipeTo(source, ...args) {
 
   // Async fallback for writeBatch when sync write fails partway through.
   // Continues writing from batch[startIndex] using async write().
-  async function writeBatchAsyncFallback(batch, startIndex) {
-    for (let i = startIndex; i < batch.length; i++) {
-      const chunk = batch[i];
-      if (hasWriteSync && writer.writeSync(chunk)) {
-        // Sync retry succeeded
-      } else {
-        const result = writer.write(
-          chunk,
-          signal ? { __proto__: null, signal } : undefined,
-        );
-        if (result !== undefined) {
-          await result;
+  async function writeBatchAsyncFallback(entry, startIndex) {
+    for (let i = startIndex; i < entry.views.length; i++) {
+      const view = entry.views[i];
+      if (hasWriteSync) {
+        const chunk = validateByteView(view);
+        if (writer.writeSync(chunk)) {
+          validateByteView(view);
+          totalBytes += view.byteLength;
+          continue;
         }
+        validateByteView(view);
       }
-      totalBytes += TypedArrayPrototypeGetByteLength(chunk);
+      const result = writer.write(
+        validateByteView(view),
+        signal ? { __proto__: null, signal } : undefined,
+      );
+      if (result !== undefined) {
+        await result;
+      }
+      validateByteView(view);
+      totalBytes += view.byteLength;
     }
   }
 
@@ -1035,63 +1210,44 @@ async function pipeTo(source, ...args) {
   // Returns undefined on sync success, or a Promise when async fallback
   // is required. Callers must check: const p = writeBatch(b); if (p) await p;
   function writeBatch(batch) {
+    const entry = createBatchEntry(batch);
     if (hasWritev && batch.length > 1) {
-      if (!hasWritevSync || !writer.writevSync(batch)) {
+      if (
+        !hasWritevSync ||
+        !writer.writevSync(validateBatchEntry(entry))
+      ) {
+        validateBatchEntry(entry);
         const opts = signal ? { __proto__: null, signal } : undefined;
-        const writevResult = writer.writev(batch, opts);
+        const writevResult = writer.writev(validateBatchEntry(entry), opts);
         if (writevResult === undefined) {
-          for (let i = 0; i < batch.length; i++) {
-            totalBytes += TypedArrayPrototypeGetByteLength(batch[i]);
-          }
+          validateBatchEntry(entry);
+          totalBytes += entry.byteLength;
           return;
         }
         return PromisePrototypeThen(PromiseResolve(writevResult), () => {
-          for (let i = 0; i < batch.length; i++) {
-            totalBytes += TypedArrayPrototypeGetByteLength(batch[i]);
-          }
+          validateBatchEntry(entry);
+          totalBytes += entry.byteLength;
         });
       }
-      for (let i = 0; i < batch.length; i++) {
-        totalBytes += TypedArrayPrototypeGetByteLength(batch[i]);
-      }
+      validateBatchEntry(entry);
+      totalBytes += entry.byteLength;
       return;
     }
-    for (let i = 0; i < batch.length; i++) {
-      const chunk = batch[i];
+    for (let i = 0; i < entry.views.length; i++) {
+      const view = entry.views[i];
+      const chunk = validateByteView(view);
       if (!hasWriteSync || !writer.writeSync(chunk)) {
+        if (hasWriteSync) validateByteView(view);
         // Sync path failed at index i - fall back to async for the rest.
-        return writeBatchAsyncFallback(batch, i);
+        return writeBatchAsyncFallback(entry, i);
       }
-      totalBytes += TypedArrayPrototypeGetByteLength(chunk);
+      validateByteView(view);
+      totalBytes += view.byteLength;
     }
   }
 
   try {
-    if (useSyncIterableFastPath) {
-      // Avoid from()'s async sync-iterable batching path. This keeps writes
-      // incremental for synchronous sources while preserving async
-      // normalization for non-primitive yielded values.
-      for (const value of source) {
-        if (isUint8ArrayBatch(value)) {
-          if (value.length > 0) {
-            const p = writeBatch(value);
-            if (p) await p;
-          }
-          continue;
-        }
-        if (isUint8Array(value)) {
-          const p = writeBatch([value]);
-          if (p) await p;
-          continue;
-        }
-
-        const batch = await ArrayFromAsync(normalizeAsyncValue(value));
-        if (batch.length > 0) {
-          const p = writeBatch(batch);
-          if (p) await p;
-        }
-      }
-    } else if (transforms.length === 0) {
+    if (transforms.length === 0) {
       // Fast path: no transforms - iterate normalized source directly
       if (signal) {
         for await (const batch of yieldAbortable(normalized, signal)) {
@@ -1122,15 +1278,13 @@ async function pipeTo(source, ...args) {
       }
     }
 
-    if (!options?.preventClose) {
+    if (!options.preventClose) {
       if (!hasEndSync || writer.endSync() < 0) {
         await writer.end?.(signal ? { __proto__: null, signal } : undefined);
       }
     }
   } catch (error) {
-    if (!options?.preventFail) {
-      writer.fail?.(wrapError(error));
-    }
+    failWriter(error);
     throw error;
   }
 
@@ -1142,5 +1296,6 @@ return {
   pipeToSync,
   pull,
   pullSync,
+  pullWithConsumerCleanup,
 };
 })();

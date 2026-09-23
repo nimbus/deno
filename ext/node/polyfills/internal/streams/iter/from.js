@@ -1,6 +1,6 @@
 // deno-lint-ignore-file
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Node.js v26.7.0 lib/internal/streams/iter/from.js.
+// Ported from Node.js v26.10.0 lib/internal/streams/iter/from.js.
 
 (function () {
 const { core, primordials } = __bootstrap;
@@ -20,6 +20,7 @@ const {
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
   FunctionPrototypeCall,
+  PromisePrototypeThen,
   SymbolAsyncIterator,
   SymbolIterator,
   TypedArrayPrototypeGetBuffer,
@@ -27,6 +28,12 @@ const {
   TypedArrayPrototypeGetByteOffset,
   Uint8Array,
 } = primordials;
+
+// Deno has no util binding with markPromiseAsHandled. A no-op rejection
+// handler marks the promise as handled in the same way.
+function markPromiseAsHandled(promise) {
+  PromisePrototypeThen(promise, undefined, () => {});
+}
 
 const {
   codes: {
@@ -375,9 +382,13 @@ async function* normalizeAsyncSource(source) {
         continue;
       }
       // Slow path: normalize the value
-      const batch = [];
+      let batch = [];
       for await (const chunk of normalizeAsyncValue(value)) {
         ArrayPrototypePush(batch, chunk);
+        if (batch.length === FROM_BATCH_SIZE) {
+          yield batch;
+          batch = [];
+        }
       }
       if (batch.length > 0) {
         yield batch;
@@ -611,7 +622,11 @@ function from(input) {
   // Check toAsyncStreamable protocol (takes precedence over toStreamable and
   // iteration protocols)
   if (typeof input[toAsyncStreamable] === "function") {
-    const result = input[toAsyncStreamable]();
+    let result = input[toAsyncStreamable]();
+    if (isPromise(result)) {
+      result = PromisePrototypeThen(result, undefined, undefined);
+      markPromiseAsHandled(result);
+    }
     // Synchronous validated source (e.g. Readable batched iterator)
     if (result?.[kValidatedSource]) {
       return result;

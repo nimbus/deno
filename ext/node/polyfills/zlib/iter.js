@@ -1,6 +1,6 @@
 // deno-lint-ignore-file
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Node.js v26.7.0 lib/zlib/iter.js.
+// Ported from Node.js v26.10.0 lib/zlib/iter.js.
 
 (function () {
 const { core, primordials } = __bootstrap;

@@ -1,6 +1,6 @@
 // deno-lint-ignore-file
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Node.js v26.7.0 lib/internal/streams/iter/consumers.js.
+// Ported from Node.js v26.10.0 lib/internal/streams/iter/consumers.js.
 
 (function () {
 const { core, primordials } = __bootstrap;
@@ -23,6 +23,8 @@ const {
   Promise,
   PromisePrototypeThen,
   SafePromiseAllReturnVoid,
+  SafeSet,
+  Symbol,
   SymbolAsyncIterator,
   TypedArrayPrototypeGetBuffer,
   TypedArrayPrototypeGetByteLength,
@@ -39,11 +41,7 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { TextDecoder } = core.loadExtScript("ext:deno_web/08_text_encoding.js");
 const {
-  validateAbortSignal,
   validateFunction,
-  validateInteger,
-  validateObject,
-  validateString,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 
 // Deno has no util binding with markPromiseAsHandled. A no-op rejection
@@ -61,6 +59,8 @@ const {
 
 const {
   concatBytes,
+  createBatchEntry,
+  validateBatchEntry,
   yieldAbortable,
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/utils.js");
 
@@ -69,6 +69,9 @@ const {
   toAsyncStreamable,
   toStreamable,
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/types.js");
+const {
+  converters,
+} = core.loadExtScript("ext:deno_node/internal/streams/iter/webidl.js");
 
 const {
   isAnyArrayBuffer,
@@ -96,6 +99,17 @@ function isMergeOptions(value) {
 // Shared chunk collection helpers
 // =============================================================================
 
+function flattenBatchEntries(entries) {
+  const chunks = [];
+  for (let i = 0; i < entries.length; i++) {
+    const batch = validateBatchEntry(entries[i]);
+    for (let j = 0; j < batch.length; j++) {
+      ArrayPrototypePush(chunks, batch[j]);
+    }
+  }
+  return chunks;
+}
+
 /**
  * Collect chunks from a sync source into an array.
  * @param {Iterable<Uint8Array[]>} source
@@ -105,23 +119,23 @@ function isMergeOptions(value) {
 function collectSync(source, limit) {
   // Normalize source via fromSync() - accepts strings, ArrayBuffers, protocols, etc.
   const normalized = fromSync(source);
-  const chunks = [];
+  const entries = [];
   let totalBytes = 0;
 
   for (const batch of normalized) {
-    for (let i = 0; i < batch.length; i++) {
-      const chunk = batch[i];
-      if (limit !== undefined) {
-        totalBytes += TypedArrayPrototypeGetByteLength(chunk);
+    const entry = createBatchEntry(batch);
+    if (limit !== undefined) {
+      for (let i = 0; i < entry.views.length; i++) {
+        totalBytes += entry.views[i].byteLength;
         if (totalBytes > limit) {
           throw new ERR_OUT_OF_RANGE("totalBytes", `<= ${limit}`, totalBytes);
         }
       }
-      ArrayPrototypePush(chunks, chunk);
     }
+    ArrayPrototypePush(entries, entry);
   }
 
-  return chunks;
+  return flattenBatchEntries(entries);
 }
 
 /**
@@ -135,20 +149,15 @@ async function collectAsync(source, signal, limit) {
   signal?.throwIfAborted();
 
   // Normalize source via from() - accepts strings, ArrayBuffers, protocols, etc.
-  const abortableSource = signal && isAsyncIterable(source)
-    ? yieldAbortable(source, signal)
-    : source;
-  const normalized = from(abortableSource);
-  const chunks = [];
+  const normalized = from(source);
+  const entries = [];
 
   // Fast path: no signal and no limit
   if (!signal && limit === undefined) {
     for await (const batch of normalized) {
-      for (let i = 0; i < batch.length; i++) {
-        ArrayPrototypePush(chunks, batch[i]);
-      }
+      ArrayPrototypePush(entries, createBatchEntry(batch));
     }
-    return chunks;
+    return flattenBatchEntries(entries);
   }
 
   // Slow path: with signal or limit checks
@@ -157,19 +166,19 @@ async function collectAsync(source, signal, limit) {
 
   for await (const batch of iterable) {
     signal?.throwIfAborted();
-    for (let i = 0; i < batch.length; i++) {
-      const chunk = batch[i];
-      if (limit !== undefined) {
-        totalBytes += TypedArrayPrototypeGetByteLength(chunk);
+    const entry = createBatchEntry(batch);
+    if (limit !== undefined) {
+      for (let i = 0; i < entry.views.length; i++) {
+        totalBytes += entry.views[i].byteLength;
         if (totalBytes > limit) {
           throw new ERR_OUT_OF_RANGE("totalBytes", `<= ${limit}`, totalBytes);
         }
       }
-      ArrayPrototypePush(chunks, chunk);
     }
+    ArrayPrototypePush(entries, entry);
   }
 
-  return chunks;
+  return flattenBatchEntries(entries);
 }
 
 /**
@@ -196,39 +205,6 @@ function toArrayBuffer(data) {
 }
 
 // =============================================================================
-// Shared option validation
-// =============================================================================
-
-function validateBaseConsumerOptions(options) {
-  validateObject(options, "options");
-  if (options.limit !== undefined) {
-    validateInteger(options.limit, "options.limit", 0);
-  }
-  if (options.encoding !== undefined) {
-    validateString(options.encoding, "options.encoding");
-    try {
-      new TextDecoder(options.encoding);
-    } catch {
-      throw new ERR_INVALID_ARG_VALUE.RangeError(
-        "options.encoding",
-        options.encoding,
-      );
-    }
-  }
-}
-
-function validateConsumerOptions(options) {
-  validateBaseConsumerOptions(options);
-  if (options.signal !== undefined) {
-    validateAbortSignal(options.signal, "options.signal");
-  }
-}
-
-function validateSyncConsumerOptions(options) {
-  validateBaseConsumerOptions(options);
-}
-
-// =============================================================================
 // Sync Consumers
 // =============================================================================
 
@@ -241,7 +217,10 @@ const kNullPrototype = { __proto__: null };
  * @returns {Uint8Array}
  */
 function bytesSync(source, options = kNullPrototype) {
-  validateSyncConsumerOptions(options);
+  options = converters.ConsumeSyncOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
   return concatBytes(collectSync(source, options.limit));
 }
 
@@ -252,9 +231,20 @@ function bytesSync(source, options = kNullPrototype) {
  * @returns {string}
  */
 function textSync(source, options = kNullPrototype) {
-  validateSyncConsumerOptions(options);
+  options = converters.TextConsumeSyncOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
+  try {
+    new TextDecoder(options.encoding);
+  } catch {
+    throw new ERR_INVALID_ARG_VALUE.RangeError(
+      "options.encoding",
+      options.encoding,
+    );
+  }
   const data = concatBytes(collectSync(source, options.limit));
-  const decoder = new TextDecoder(options.encoding ?? "utf-8", {
+  const decoder = new TextDecoder(options.encoding, {
     __proto__: null,
     fatal: true,
   });
@@ -268,7 +258,10 @@ function textSync(source, options = kNullPrototype) {
  * @returns {ArrayBuffer}
  */
 function arrayBufferSync(source, options = kNullPrototype) {
-  validateSyncConsumerOptions(options);
+  options = converters.ConsumeSyncOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
   return toArrayBuffer(concatBytes(collectSync(source, options.limit)));
 }
 
@@ -279,7 +272,10 @@ function arrayBufferSync(source, options = kNullPrototype) {
  * @returns {Uint8Array[]}
  */
 function arraySync(source, options = kNullPrototype) {
-  validateSyncConsumerOptions(options);
+  options = converters.ConsumeSyncOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
   return collectSync(source, options.limit);
 }
 
@@ -294,7 +290,10 @@ function arraySync(source, options = kNullPrototype) {
  * @returns {Promise<Uint8Array>}
  */
 async function bytes(source, options = kNullPrototype) {
-  validateConsumerOptions(options);
+  options = converters.ConsumeOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
   const chunks = await collectAsync(source, options.signal, options.limit);
   return concatBytes(chunks);
 }
@@ -306,10 +305,21 @@ async function bytes(source, options = kNullPrototype) {
  * @returns {Promise<string>}
  */
 async function text(source, options = kNullPrototype) {
-  validateConsumerOptions(options);
+  options = converters.TextConsumeOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
+  try {
+    new TextDecoder(options.encoding);
+  } catch {
+    throw new ERR_INVALID_ARG_VALUE.RangeError(
+      "options.encoding",
+      options.encoding,
+    );
+  }
   const chunks = await collectAsync(source, options.signal, options.limit);
   const data = concatBytes(chunks);
-  const decoder = new TextDecoder(options.encoding ?? "utf-8", {
+  const decoder = new TextDecoder(options.encoding, {
     __proto__: null,
     fatal: true,
   });
@@ -323,7 +333,10 @@ async function text(source, options = kNullPrototype) {
  * @returns {Promise<ArrayBuffer>}
  */
 async function arrayBuffer(source, options = kNullPrototype) {
-  validateConsumerOptions(options);
+  options = converters.ConsumeOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
   const chunks = await collectAsync(source, options.signal, options.limit);
   return toArrayBuffer(concatBytes(chunks));
 }
@@ -335,7 +348,10 @@ async function arrayBuffer(source, options = kNullPrototype) {
  * @returns {Promise<Uint8Array[]>}
  */
 async function array(source, options = kNullPrototype) {
-  validateConsumerOptions(options);
+  options = converters.ConsumeOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
   return collectAsync(source, options.signal, options.limit);
 }
 
@@ -401,6 +417,8 @@ function ondrain(drainable) {
 // Merge Utility
 // =============================================================================
 
+const kNoMergeError = Symbol("kNoMergeError");
+
 /**
  * Merge multiple async iterables by yielding values in temporal order.
  * @param {...(AsyncIterable<Uint8Array[]>|object)} args
@@ -417,9 +435,10 @@ function merge(...args) {
     sources = args;
   }
 
-  if (options?.signal !== undefined) {
-    validateAbortSignal(options.signal, "options.signal");
-  }
+  options = converters.MergeOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
 
   // Normalize each source via from()
   const normalized = ArrayPrototypeMap(sources, (source) => from(source));
@@ -427,7 +446,7 @@ function merge(...args) {
   return {
     __proto__: null,
     async *[SymbolAsyncIterator]() {
-      const signal = options?.signal;
+      const { signal } = options;
 
       signal?.throwIfAborted();
 
@@ -448,9 +467,11 @@ function merge(...args) {
       // async tick per batch. Each source has at most one pending .next()
       // at a time. Every batch from every source is preserved.
       const ready = [];
+      const pendingPulls = new SafeSet();
       let activeCount = normalized.length;
       let waitResolve = null;
       let onAbort;
+      let stopped = false;
 
       if (signal) {
         onAbort = () => {
@@ -468,15 +489,32 @@ function merge(...args) {
       // Called when a source's .next() settles. Pushes the result into
       // the ready queue and wakes the consumer if it's waiting.
       const onSettled = (iterator, result) => {
+        pendingPulls.delete(iterator);
+        if (stopped) return;
         if (result.done) {
           activeCount--;
         } else {
           ArrayPrototypePush(ready, {
             __proto__: null,
+            kind: "value",
             iterator,
             value: result.value,
           });
         }
+        if (waitResolve) {
+          waitResolve();
+          waitResolve = null;
+        }
+      };
+
+      const onRejected = (iterator, reason) => {
+        pendingPulls.delete(iterator);
+        if (stopped) return;
+        ArrayPrototypePush(ready, {
+          __proto__: null,
+          kind: "error",
+          reason,
+        });
         if (waitResolve) {
           waitResolve();
           waitResolve = null;
@@ -488,20 +526,15 @@ function merge(...args) {
       for (let i = 0; i < normalized.length; i++) {
         const iterator = normalized[i][SymbolAsyncIterator]();
         ArrayPrototypePush(iterators, iterator);
+        pendingPulls.add(iterator);
         PromisePrototypeThen(
           iterator.next(),
           (r) => onSettled(iterator, r),
-          (err) => {
-            ArrayPrototypePush(ready, { __proto__: null, error: err });
-            if (waitResolve) {
-              waitResolve();
-              waitResolve = null;
-            }
-          },
+          (reason) => onRejected(iterator, reason),
         );
       }
 
-      let primaryError;
+      let primaryError = kNoMergeError;
       try {
         while (activeCount > 0 || ready.length > 0) {
           signal?.throwIfAborted();
@@ -509,20 +542,15 @@ function merge(...args) {
           // Drain ready queue synchronously
           while (ready.length > 0) {
             const item = ArrayPrototypeShift(ready);
-            if (item?.error) {
-              throw item.error;
+            if (item.kind === "error") {
+              throw item.reason;
             }
             yield item.value;
+            pendingPulls.add(item.iterator);
             PromisePrototypeThen(
               item.iterator.next(),
               (r) => onSettled(item.iterator, r),
-              (err) => {
-                ArrayPrototypePush(ready, { __proto__: null, error: err });
-                if (waitResolve) {
-                  waitResolve();
-                  waitResolve = null;
-                }
-              },
+              (reason) => onRejected(item.iterator, reason),
             );
           }
 
@@ -540,6 +568,7 @@ function merge(...args) {
       } catch (err) {
         primaryError = err;
       } finally {
+        stopped = true;
         if (onAbort !== undefined) {
           signal.removeEventListener("abort", onAbort);
         }
@@ -549,32 +578,32 @@ function merge(...args) {
         await cleanupIterators(
           iterators,
           primaryError,
-          signal?.aborted && primaryError === signal.reason,
+          pendingPulls,
         );
       }
     },
   };
 }
 
-async function cleanupIterators(iterators, primaryError, skipAwaitCleanup) {
-  let cleanupError;
+async function cleanupIterators(iterators, primaryError, pendingPulls) {
+  let cleanupError = kNoMergeError;
   await SafePromiseAllReturnVoid(iterators, async (iterator) => {
     if (iterator.return) {
       try {
         const result = iterator.return();
-        if (skipAwaitCleanup) {
+        if (pendingPulls.has(iterator)) {
           markPromiseAsHandled(result);
         } else {
           await result;
         }
       } catch (err) {
         // Keep the first cleanup error encountered.
-        cleanupError ??= err;
+        if (cleanupError === kNoMergeError) cleanupError = err;
       }
     }
   });
-  if (cleanupError !== undefined) {
-    if (primaryError !== undefined) {
+  if (cleanupError !== kNoMergeError) {
+    if (primaryError !== kNoMergeError) {
       // Both a primary error and a cleanup error occurred.
       // Wrap in SuppressedError so neither is lost:
       // .error = primaryError, .suppressed = cleanupError.
@@ -584,7 +613,7 @@ async function cleanupIterators(iterators, primaryError, skipAwaitCleanup) {
     // No primary error - the cleanup error is the only error.
     throw cleanupError;
   }
-  if (primaryError !== undefined) {
+  if (primaryError !== kNoMergeError) {
     throw primaryError;
   }
 }

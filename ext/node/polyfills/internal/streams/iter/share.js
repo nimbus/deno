@@ -1,6 +1,6 @@
 // deno-lint-ignore-file
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Node.js v26.7.0 lib/internal/streams/iter/share.js.
+// Ported from Node.js v26.10.0 lib/internal/streams/iter/share.js.
 
 (function () {
 const { core, primordials } = __bootstrap;
@@ -12,14 +12,16 @@ const { core, primordials } = __bootstrap;
 
 const {
   ArrayPrototypePush,
+  FunctionPrototypeCall,
   PromisePrototypeThen,
   PromiseResolve,
   PromiseWithResolvers,
+  SafePromiseRace,
   SafeSet,
+  Symbol,
   SymbolAsyncIterator,
   SymbolDispose,
   SymbolIterator,
-  TypedArrayPrototypeGetByteLength,
 } = primordials;
 
 const {
@@ -35,19 +37,22 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/from.js");
 
 const {
-  pull: pullWithTransforms,
   pullSync: pullSyncWithTransforms,
+  pullWithConsumerCleanup,
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/pull.js");
 
 const {
   kMultiConsumerDefaultBudget,
+  createBatchEntry,
   getMinCursor,
   hasProtocol,
   onSignalAbort,
-  wrapError,
   parsePullArgs,
-  validateBackpressure,
+  validateBatchEntry,
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/utils.js");
+const {
+  converters,
+} = core.loadExtScript("ext:deno_node/internal/streams/iter/webidl.js");
 
 const {
   RingBuffer,
@@ -56,19 +61,21 @@ const {
 const {
   codes: {
     ERR_INVALID_ARG_TYPE,
+    ERR_INVALID_ARG_VALUE,
     ERR_INVALID_RETURN_VALUE,
     ERR_OUT_OF_RANGE,
   },
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const {
-  validateAbortSignal,
   validateInteger,
-  validateObject,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 
 // =============================================================================
 // Async Share Implementation
 // =============================================================================
+
+const kNoShareError = Symbol("kNoShareError");
+const kShareCancelled = Symbol("kShareCancelled");
 
 class ShareImpl {
   #source;
@@ -78,10 +85,13 @@ class ShareImpl {
   #consumers = new SafeSet();
   #sourceIterator = null;
   #sourceExhausted = false;
-  #sourceError = null;
+  #sourceError = kNoShareError;
   #cancelled = false;
   #pulling = false;
   #pullWaiters = [];
+  #cancelPromise;
+  #resolveCancel;
+  #cancelError = kNoShareError;
   #cachedMinCursor = 0;
   #cachedMinCursorConsumers = 0;
   /** Cumulative byte size of buffered entries */
@@ -90,6 +100,9 @@ class ShareImpl {
   constructor(source, options) {
     this.#source = source;
     this.#options = options;
+    const { promise, resolve } = PromiseWithResolvers();
+    this.#cancelPromise = promise;
+    this.#resolveCancel = resolve;
   }
 
   get consumerCount() {
@@ -97,14 +110,30 @@ class ShareImpl {
   }
 
   pull(...args) {
-    const { transforms, options } = parsePullArgs(args);
+    const parsed = parsePullArgs(args);
+    const { transforms } = parsed;
+    const options = converters.PullOptions(parsed.options, {
+      __proto__: null,
+      context: "options",
+    });
+    const { signal } = options;
+
+    // Avoid registering a consumer that the pre-aborted pipeline will never
+    // read or detach.
+    if (signal?.aborted) {
+      return {
+        __proto__: null,
+        // eslint-disable-next-line require-yield
+        async *[SymbolAsyncIterator]() {
+          throw signal.reason;
+        },
+      };
+    }
+
     const rawConsumer = this.#createRawConsumer();
 
-    if (transforms.length > 0 || options?.signal) {
-      if (options) {
-        return pullWithTransforms(rawConsumer, ...transforms, options);
-      }
-      return pullWithTransforms(rawConsumer, ...transforms);
+    if (transforms.length > 0 || signal) {
+      return pullWithConsumerCleanup(rawConsumer, transforms, signal);
     }
     return rawConsumer;
   }
@@ -116,6 +145,7 @@ class ShareImpl {
       resolve: null,
       reject: null,
       detached: false,
+      error: kNoShareError,
       pendingNext: PromiseResolve(),
     };
 
@@ -134,32 +164,28 @@ class ShareImpl {
       __proto__: null,
       [SymbolAsyncIterator]() {
         const getNext = async () => {
-          if (self.#sourceError) {
-            state.detached = true;
-            self.#consumers.delete(state);
-            throw self.#sourceError;
-          }
-
           // Loop until we get data, source is exhausted, or
           // consumer is detached. Multiple consumers may be woken
           // after a single pull - those that find no data at their
           // cursor must re-pull rather than terminating prematurely.
           for (;;) {
             if (state.detached) {
-              if (self.#sourceError) throw self.#sourceError;
+              if (state.error !== kNoShareError) throw state.error;
               return { __proto__: null, done: true, value: undefined };
             }
 
             if (self.#cancelled) {
               state.detached = true;
+              state.error = self.#cancelError;
               self.#deleteConsumer(state);
+              if (state.error !== kNoShareError) throw state.error;
               return { __proto__: null, done: true, value: undefined };
             }
 
             // Check if data is available in buffer
             const bufferIndex = state.cursor - self.#bufferStart;
             if (bufferIndex < self.#buffer.length) {
-              const chunk = self.#buffer.get(bufferIndex);
+              const chunk = self.#readEntry(self.#buffer.get(bufferIndex));
               const cursor = state.cursor;
               state.cursor++;
               if (
@@ -174,20 +200,36 @@ class ShareImpl {
             if (self.#sourceExhausted) {
               state.detached = true;
               self.#deleteConsumer(state);
-              if (self.#sourceError) throw self.#sourceError;
+              if (self.#sourceError !== kNoShareError) {
+                state.error = self.#sourceError;
+                throw state.error;
+              }
               return { __proto__: null, done: true, value: undefined };
             }
 
             // Need to pull from source - check buffer limit
-            const shouldBuffer = await self.#waitForBufferSpace();
+            let shouldBuffer;
+            try {
+              shouldBuffer = await self.#waitForBufferSpace();
+            } catch (error) {
+              state.detached = true;
+              if (self.#deleteConsumer(state)) {
+                self.#tryTrimBuffer();
+              }
+              throw error;
+            }
             if (shouldBuffer === null) {
               state.detached = true;
+              state.error = self.#cancelError;
               self.#deleteConsumer(state);
-              if (self.#sourceError) throw self.#sourceError;
+              if (state.error !== kNoShareError) throw state.error;
               return { __proto__: null, done: true, value: undefined };
             }
 
             await self.#pullFromSource(!shouldBuffer);
+            if (!shouldBuffer) {
+              await self.#waitForBufferSpaceAfterDrop();
+            }
           }
         };
 
@@ -229,19 +271,36 @@ class ShareImpl {
 
   cancel(reason) {
     if (this.#cancelled) return;
+    const hasReason = arguments.length > 0;
     this.#cancelled = true;
 
-    if (reason !== undefined) {
-      this.#sourceError = reason;
+    if (hasReason) {
+      this.#cancelError = reason;
     }
 
-    if (this.#sourceIterator?.return) {
-      PromisePrototypeThen(this.#sourceIterator.return(), undefined, () => {});
+    this.#resolveCancel(kShareCancelled);
+    this.#resolveCancel = null;
+
+    try {
+      const returnMethod = this.#sourceIterator?.return;
+      if (typeof returnMethod === "function") {
+        PromisePrototypeThen(
+          PromiseResolve(FunctionPrototypeCall(
+            returnMethod,
+            this.#sourceIterator,
+          )),
+          undefined,
+          () => {},
+        );
+      }
+    } catch {
+      // Cancellation has precedence over source cleanup errors.
     }
 
     for (const consumer of this.#consumers) {
+      consumer.error = this.#cancelError;
       if (consumer.resolve) {
-        if (reason !== undefined) {
+        if (hasReason) {
           consumer.reject?.(reason);
         } else {
           consumer.resolve({ __proto__: null, done: true, value: undefined });
@@ -252,6 +311,8 @@ class ShareImpl {
       consumer.detached = true;
     }
     this.#consumers.clear();
+    this.#buffer.clear();
+    this.#bufferedBytes = 0;
 
     for (let i = 0; i < this.#pullWaiters.length; i++) {
       this.#pullWaiters[i]();
@@ -267,7 +328,11 @@ class ShareImpl {
 
   async #waitForBufferSpace() {
     while (this.#bufferedBytes >= this.#options.budget) {
-      if (this.#cancelled || this.#sourceError || this.#sourceExhausted) {
+      if (
+        this.#cancelled ||
+        this.#sourceError !== kNoShareError ||
+        this.#sourceExhausted
+      ) {
         return this.#cancelled ? null : true;
       }
 
@@ -290,7 +355,7 @@ class ShareImpl {
             this.#buffer.length > 0
           ) {
             const evicted = this.#buffer.shift();
-            this.#bufferedBytes -= this.#batchByteSize(evicted);
+            this.#bufferedBytes -= evicted.byteLength;
             this.#bufferStart++;
           }
           for (const consumer of this.#consumers) {
@@ -306,6 +371,19 @@ class ShareImpl {
       }
     }
     return true;
+  }
+
+  async #waitForBufferSpaceAfterDrop() {
+    while (
+      this.#bufferedBytes >= this.#options.budget &&
+      !this.#cancelled &&
+      this.#sourceError === kNoShareError &&
+      !this.#sourceExhausted
+    ) {
+      const { promise, resolve } = PromiseWithResolvers();
+      ArrayPrototypePush(this.#pullWaiters, resolve);
+      await promise;
+    }
   }
 
   #pullFromSource(discard = false) {
@@ -347,16 +425,22 @@ class ShareImpl {
           }
         }
 
-        const result = await this.#sourceIterator.next();
+        const result = await SafePromiseRace([
+          this.#sourceIterator.next(),
+          this.#cancelPromise,
+        ]);
+
+        if (this.#cancelled || result === kShareCancelled) return;
 
         if (result.done) {
           this.#sourceExhausted = true;
         } else if (!discard) {
-          this.#buffer.push(result.value);
-          this.#bufferedBytes += this.#batchByteSize(result.value);
+          const entry = createBatchEntry(result.value);
+          this.#buffer.push(entry);
+          this.#bufferedBytes += entry.byteLength;
         }
       } catch (error) {
-        this.#sourceError = wrapError(error);
+        this.#sourceError = error;
         this.#sourceExhausted = true;
       } finally {
         this.#pulling = false;
@@ -376,7 +460,7 @@ class ShareImpl {
     if (trimCount > 0) {
       for (let i = 0; i < trimCount; i++) {
         const evicted = this.#buffer.get(i);
-        this.#bufferedBytes -= this.#batchByteSize(evicted);
+        this.#bufferedBytes -= evicted.byteLength;
       }
       this.#buffer.trimFront(trimCount);
       this.#bufferStart = this.#cachedMinCursor;
@@ -387,12 +471,15 @@ class ShareImpl {
     }
   }
 
-  #batchByteSize(batch) {
-    let size = 0;
-    for (let i = 0; i < batch.length; i++) {
-      size += TypedArrayPrototypeGetByteLength(batch[i]);
+  #readEntry(entry) {
+    try {
+      return validateBatchEntry(entry);
+    } catch (error) {
+      this.cancel(error);
+      this.#buffer.clear();
+      this.#bufferedBytes = 0;
+      throw error;
     }
-    return size;
   }
 
   #recomputeMinCursor() {
@@ -432,7 +519,7 @@ class SyncShareImpl {
   #consumers = new SafeSet();
   #sourceIterator = null;
   #sourceExhausted = false;
-  #sourceError = null;
+  #sourceError = kNoShareError;
   #cancelled = false;
   #cachedMinCursor = 0;
   #cachedMinCursorConsumers = 0;
@@ -462,6 +549,7 @@ class SyncShareImpl {
       __proto__: null,
       cursor: this.#bufferStart,
       detached: false,
+      error: kNoShareError,
     };
 
     this.#consumers.add(state);
@@ -482,12 +570,14 @@ class SyncShareImpl {
           __proto__: null,
           next() {
             if (state.detached) {
+              if (state.error !== kNoShareError) throw state.error;
               return { __proto__: null, done: true, value: undefined };
             }
-            if (self.#sourceError) {
+            if (self.#sourceError !== kNoShareError) {
               state.detached = true;
+              state.error = self.#sourceError;
               self.#deleteConsumer(state);
-              throw self.#sourceError;
+              throw state.error;
             }
             if (self.#cancelled) {
               state.detached = true;
@@ -497,7 +587,7 @@ class SyncShareImpl {
 
             const bufferIndex = state.cursor - self.#bufferStart;
             if (bufferIndex < self.#buffer.length) {
-              const chunk = self.#buffer.get(bufferIndex);
+              const chunk = self.#readEntry(self.#buffer.get(bufferIndex));
               const cursor = state.cursor;
               state.cursor++;
               if (
@@ -516,6 +606,7 @@ class SyncShareImpl {
             }
 
             // Check buffer limit
+            let dropped = false;
             if (self.#bufferedBytes >= self.#options.budget) {
               switch (self.#options.backpressure) {
                 case "strict":
@@ -524,20 +615,13 @@ class SyncShareImpl {
                     `< ${self.#options.budget}`,
                     self.#bufferedBytes,
                   );
-                case "unbounded":
-                  throw new ERR_OUT_OF_RANGE(
-                    "buffered bytes",
-                    `< ${self.#options.budget} ` +
-                      "(unbounded not available in sync context)",
-                    self.#bufferedBytes,
-                  );
                 case "drop-oldest":
                   while (
                     self.#bufferedBytes >= self.#options.budget &&
                     self.#buffer.length > 0
                   ) {
                     const evicted = self.#buffer.shift();
-                    self.#bufferedBytes -= self.#batchByteSize(evicted);
+                    self.#bufferedBytes -= evicted.byteLength;
                     self.#bufferStart++;
                   }
                   for (const consumer of self.#consumers) {
@@ -549,23 +633,31 @@ class SyncShareImpl {
                   self.#recomputeMinCursor();
                   break;
                 case "drop-newest":
-                  state.detached = true;
-                  self.#deleteConsumer(state);
-                  return { __proto__: null, done: true, value: undefined };
+                  // Discarding does not reclaim budget, and the slowest
+                  // consumer cannot advance while this synchronous next() is
+                  // running, so at most one entry may be dropped per call.
+                  // Looping here would spin forever on an unbounded source
+                  // and drain a finite one in a single call.
+                  self.#pullFromSource(true);
+                  dropped = true;
+                  break;
               }
             }
 
-            self.#pullFromSource();
+            if (!dropped) {
+              self.#pullFromSource();
+            }
 
-            if (self.#sourceError) {
+            if (self.#sourceError !== kNoShareError) {
               state.detached = true;
+              state.error = self.#sourceError;
               self.#deleteConsumer(state);
-              throw self.#sourceError;
+              throw state.error;
             }
 
             const newBufferIndex = state.cursor - self.#bufferStart;
             if (newBufferIndex < self.#buffer.length) {
-              const chunk = self.#buffer.get(newBufferIndex);
+              const chunk = self.#readEntry(self.#buffer.get(newBufferIndex));
               const cursor = state.cursor;
               state.cursor++;
               if (
@@ -608,17 +700,24 @@ class SyncShareImpl {
 
   cancel(reason) {
     if (this.#cancelled) return;
+    const hasReason = arguments.length > 0;
     this.#cancelled = true;
 
-    if (reason !== undefined) {
+    if (hasReason) {
       this.#sourceError = reason;
     }
 
-    if (this.#sourceIterator?.return) {
-      this.#sourceIterator.return();
+    try {
+      const returnMethod = this.#sourceIterator?.return;
+      if (typeof returnMethod === "function") {
+        FunctionPrototypeCall(returnMethod, this.#sourceIterator);
+      }
+    } catch {
+      // Cancellation has precedence over source cleanup errors.
     }
 
     for (const consumer of this.#consumers) {
+      if (hasReason) consumer.error = reason;
       consumer.detached = true;
     }
     this.#consumers.clear();
@@ -628,7 +727,7 @@ class SyncShareImpl {
     this.cancel();
   }
 
-  #pullFromSource() {
+  #pullFromSource(discard = false) {
     if (this.#sourceExhausted || this.#cancelled) return;
 
     try {
@@ -638,12 +737,13 @@ class SyncShareImpl {
 
       if (result.done) {
         this.#sourceExhausted = true;
-      } else {
-        this.#buffer.push(result.value);
-        this.#bufferedBytes += this.#batchByteSize(result.value);
+      } else if (!discard) {
+        const entry = createBatchEntry(result.value);
+        this.#buffer.push(entry);
+        this.#bufferedBytes += entry.byteLength;
       }
     } catch (error) {
-      this.#sourceError = wrapError(error);
+      this.#sourceError = error;
       this.#sourceExhausted = true;
     }
   }
@@ -656,19 +756,22 @@ class SyncShareImpl {
     if (trimCount > 0) {
       for (let i = 0; i < trimCount; i++) {
         const evicted = this.#buffer.get(i);
-        this.#bufferedBytes -= this.#batchByteSize(evicted);
+        this.#bufferedBytes -= evicted.byteLength;
       }
       this.#buffer.trimFront(trimCount);
       this.#bufferStart = this.#cachedMinCursor;
     }
   }
 
-  #batchByteSize(batch) {
-    let size = 0;
-    for (let i = 0; i < batch.length; i++) {
-      size += TypedArrayPrototypeGetByteLength(batch[i]);
+  #readEntry(entry) {
+    try {
+      return validateBatchEntry(entry);
+    } catch (error) {
+      this.cancel(error);
+      this.#buffer.clear();
+      this.#bufferedBytes = 0;
+      throw error;
     }
-    return size;
   }
 
   #recomputeMinCursor() {
@@ -707,17 +810,16 @@ function onShareCancel(shareImpl, signal) {
 function share(source, options = { __proto__: null }) {
   // Normalize source via from() - accepts strings, ArrayBuffers, protocols, etc.
   const normalized = from(source);
-  validateObject(options, "options");
+  options = converters.ShareOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
   const {
     budget = kMultiConsumerDefaultBudget,
     backpressure = "strict",
     signal,
   } = options;
   validateInteger(budget, "options.budget", 16384);
-  validateBackpressure(backpressure);
-  if (signal !== undefined) {
-    validateAbortSignal(signal, "options.signal");
-  }
 
   const opts = {
     __proto__: null,
@@ -738,13 +840,22 @@ function share(source, options = { __proto__: null }) {
 function shareSync(source, options = { __proto__: null }) {
   // Normalize source via fromSync() - accepts strings, ArrayBuffers, protocols, etc.
   const normalized = fromSync(source);
-  validateObject(options, "options");
+  options = converters.ShareSyncOptions(options, {
+    __proto__: null,
+    context: "options",
+  });
   const {
     budget = kMultiConsumerDefaultBudget,
     backpressure = "strict",
   } = options;
   validateInteger(budget, "options.budget", 16384);
-  validateBackpressure(backpressure);
+  if (backpressure === "unbounded") {
+    throw new ERR_INVALID_ARG_VALUE(
+      "options.backpressure",
+      backpressure,
+      "unbounded is not supported by shareSync()",
+    );
+  }
 
   const opts = {
     __proto__: null,

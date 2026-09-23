@@ -1,6 +1,6 @@
 // deno-lint-ignore-file
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Node.js v26.7.0 lib/internal/streams/iter/transform.js.
+// Ported from Node.js v26.10.0 lib/internal/streams/iter/transform.js.
 
 (function () {
 const { core, primordials } = __bootstrap;
@@ -43,9 +43,6 @@ const {
   },
   genericNodeError,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
-const { lazyDOMException } = core.loadExtScript(
-  "ext:deno_node/internal/util.mjs",
-);
 const {
   isArrayBufferView,
   isAnyArrayBuffer,
@@ -148,9 +145,7 @@ function validateDictionary(dictionary) {
 
 function validateParams(params, maxParam, errClass) {
   if (params === undefined) return;
-  if (typeof params !== "object" || params === null) {
-    throw new ERR_INVALID_ARG_TYPE("options.params", "Object", params);
-  }
+  validateObject(params, "options.params", { allowArray: true });
   const keys = ObjectKeys(params);
   for (let i = 0; i < keys.length; i++) {
     const origKey = keys[i];
@@ -515,10 +510,7 @@ function makeZlibTransform(createHandleFn, processFlag, finishFlag) {
         resolveWrite = undefined;
         rejectWrite = undefined;
         if (reject) {
-          reject(
-            signal.reason ??
-              lazyDOMException("The operation was aborted", "AbortError"),
-          );
+          reject(signal.reason);
         }
       };
       signal.addEventListener("abort", onAbort, {

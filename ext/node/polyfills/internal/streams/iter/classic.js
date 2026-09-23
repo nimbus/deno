@@ -1,6 +1,6 @@
 // deno-lint-ignore-file
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Node.js v26.7.0 lib/internal/streams/iter/classic.js.
+// Ported from Node.js v26.10.0 lib/internal/streams/iter/classic.js.
 
 (function () {
 const { core, primordials } = __bootstrap;
@@ -17,8 +17,8 @@ const { core, primordials } = __bootstrap;
 //   toWritable(writer)           -- stream/iter Writer -> classic Writable
 
 const {
-  ArrayIsArray,
   ArrayPrototypePush,
+  FunctionPrototypeCall,
   NumberMAX_SAFE_INTEGER,
   Promise,
   PromisePrototypeThen,
@@ -39,9 +39,11 @@ const {
   AbortError,
   aggregateTwoErrors,
   codes: {
+    ERR_FALSY_VALUE_REJECTION,
     ERR_INVALID_ARG_TYPE,
     ERR_INVALID_ARG_VALUE,
     ERR_INVALID_STATE,
+    ERR_OPERATION_FAILED,
     ERR_STREAM_WRITE_AFTER_END,
   },
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
@@ -65,15 +67,35 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/types.js");
 
 const {
+  convertChunks,
   getWriterSignal,
   validateBackpressure,
-  toUint8Array,
+  toWriterUint8Array,
 } = core.loadExtScript("ext:deno_node/internal/streams/iter/utils.js");
 
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const destroyImpl = core.loadExtScript(
   "ext:deno_node/internal/streams/destroy.js",
 );
+const { isError } = core.loadExtScript("ext:deno_node/internal/util.mjs");
+
+// Classic stream error channels require a truthy Error object.
+function toClassicError(reason, reasonMap) {
+  try {
+    if (isError(reason)) return reason;
+  } catch {
+    // Wrap values whose proxy traps make the Error check fail.
+  }
+  let error;
+  if (!reason) {
+    error = new ERR_FALSY_VALUE_REJECTION.HideStackFramesError(reason);
+  } else {
+    error = new ERR_OPERATION_FAILED("Non-Error value");
+    error.reason = reason;
+  }
+  reasonMap?.set(error, { __proto__: null, reason });
+  return error;
+}
 
 // Lazy-loaded to avoid circular dependencies. Readable and Writable
 // both require this module's parent, so we defer the require.
@@ -318,14 +340,20 @@ function toReadable(source, options = kNullPrototype) {
         backpressure.resolve();
         backpressure = null;
       }
-      if (typeof iterator.return === "function") {
+      try {
+        const returnMethod = iterator.return;
+        if (typeof returnMethod !== "function") {
+          cb(err);
+          return;
+        }
+        const returned = FunctionPrototypeCall(returnMethod, iterator);
         PromisePrototypeThen(
-          iterator.return(),
+          PromiseResolve(returned),
           () => cb(err),
-          (e) => cb(e || err),
+          (error) => cb(err || toClassicError(error)),
         );
-      } else {
-        cb(err);
+      } catch (error) {
+        cb(err || toClassicError(error));
       }
     },
   });
@@ -353,7 +381,7 @@ function toReadable(source, options = kNullPrototype) {
       }
     } catch (err) {
       done = true;
-      readable.destroy(err);
+      readable.destroy(toClassicError(err));
     }
   }
 
@@ -393,30 +421,43 @@ function toReadableSync(source, options = kNullPrototype) {
     __proto__: null,
     highWaterMark,
     read() {
-      for (;;) {
-        if (hasBatch) {
-          while (batchIndex < batch.length) {
-            if (!this.push(batch[batchIndex++])) return;
+      try {
+        for (;;) {
+          if (hasBatch) {
+            while (batchIndex < batch.length) {
+              if (!this.push(batch[batchIndex++])) return;
+            }
+            batch = undefined;
+            hasBatch = false;
+            batchIndex = 0;
           }
-          batch = undefined;
-          hasBatch = false;
-          batchIndex = 0;
-        }
 
-        const result = iterator.next();
-        const { done } = result;
-        if (done) {
-          this.push(null);
-          return;
+          const result = iterator.next();
+          const { done } = result;
+          if (done) {
+            this.push(null);
+            return;
+          }
+          batch = result.value;
+          hasBatch = true;
         }
-        batch = result.value;
-        hasBatch = true;
+      } catch (error) {
+        const classicError = toClassicError(error);
+        throw classicError;
       }
     },
     destroy(err, cb) {
       batch = undefined;
       hasBatch = false;
-      if (typeof iterator.return === "function") iterator.return();
+      try {
+        const returnMethod = iterator.return;
+        if (typeof returnMethod === "function") {
+          FunctionPrototypeCall(returnMethod, iterator);
+        }
+      } catch (error) {
+        cb(err || toClassicError(error));
+        return;
+      }
       cb(err);
     },
   });
@@ -497,6 +538,9 @@ function fromWritable(writable, options = kNullPrototype) {
   // expose the full stream.Writable property set.
   const hwm = writable.writableHighWaterMark ?? 16384;
   let totalBytes = 0;
+  let errored = false;
+  let error;
+  let pendingEnd;
 
   // Waiters pending on backpressure resolution (block policy only).
   // Multiple un-awaited writes can each add a waiter, so this must be
@@ -530,11 +574,19 @@ function fromWritable(writable, options = kNullPrototype) {
   }
 
   // Reject all pending waiters and remove the drain/error listeners.
-  function cleanup(err) {
+  function cleanup(err, preserveReason = false) {
     const pending = waiters;
     waiters = [];
     for (let i = 0; i < pending.length; i++) {
-      pending[i].reject(err ?? new AbortError());
+      if (
+        !preserveReason &&
+        (err === undefined || err === null) &&
+        pending[i].close !== undefined
+      ) {
+        pending[i].close();
+      } else {
+        pending[i].reject(preserveReason ? err : err ?? new AbortError());
+      }
     }
     if (!listenersInstalled) return;
     listenersInstalled = false;
@@ -552,7 +604,8 @@ function fromWritable(writable, options = kNullPrototype) {
   function isWritable() {
     // Duck-typed streams may not have these properties -- treat missing
     // as false (i.e., writable is still open).
-    return !(writable.destroyed ?? false) &&
+    return !errored &&
+      !(writable.destroyed ?? false) &&
       !(writable.writableFinished ?? false) &&
       !(writable.writableEnded ?? false);
   }
@@ -564,7 +617,7 @@ function fromWritable(writable, options = kNullPrototype) {
   function writeChunks(chunks) {
     let ok = true;
     for (let i = 0; i < chunks.length; i++) {
-      const bytes = toUint8Array(chunks[i]);
+      const bytes = chunks[i];
       totalBytes += TypedArrayPrototypeGetByteLength(bytes);
       ok = writable.write(bytes);
     }
@@ -580,10 +633,12 @@ function fromWritable(writable, options = kNullPrototype) {
     },
 
     writeSync(chunk) {
+      toWriterUint8Array(chunk);
       return false;
     },
 
     writevSync(chunks) {
+      convertChunks(chunks);
       return false;
     },
 
@@ -602,16 +657,11 @@ function fromWritable(writable, options = kNullPrototype) {
     // otherwise ignored. Classic stream.Writable has no per-write abort signal
     // support; cancellation should be handled at the pipeline level instead.
     write(chunk, options) {
+      const bytes = toWriterUint8Array(chunk);
       getWriterSignal(options);
+      if (errored) return PromiseReject(error);
       if (!isWritable()) {
         return PromiseReject(new ERR_STREAM_WRITE_AFTER_END());
-      }
-
-      let bytes;
-      try {
-        bytes = toUint8Array(chunk);
-      } catch (err) {
-        return PromiseReject(err);
       }
 
       if (backpressure === "strict" && isFull()) {
@@ -648,10 +698,9 @@ function fromWritable(writable, options = kNullPrototype) {
     },
 
     writev(chunks, options) {
-      if (!ArrayIsArray(chunks)) {
-        throw new ERR_INVALID_ARG_TYPE("chunks", "Array", chunks);
-      }
+      chunks = convertChunks(chunks);
       getWriterSignal(options);
+      if (errored) return PromiseReject(error);
       if (!isWritable()) {
         return PromiseReject(new ERR_STREAM_WRITE_AFTER_END());
       }
@@ -668,9 +717,7 @@ function fromWritable(writable, options = kNullPrototype) {
       if (backpressure === "drop-newest" && isFull()) {
         // Discard entire batch.
         for (let i = 0; i < chunks.length; i++) {
-          totalBytes += TypedArrayPrototypeGetByteLength(
-            toUint8Array(chunks[i]),
-          );
+          totalBytes += TypedArrayPrototypeGetByteLength(chunks[i]);
         }
         return PromiseResolve();
       }
@@ -707,6 +754,8 @@ function fromWritable(writable, options = kNullPrototype) {
     // write().
     end(options) {
       getWriterSignal(options);
+      if (errored) return PromiseReject(error);
+      if (pendingEnd) return pendingEnd.promise;
       if (
         (writable.writableFinished ?? false) ||
         (writable.destroyed ?? false)
@@ -715,45 +764,65 @@ function fromWritable(writable, options = kNullPrototype) {
         return PromiseResolve(totalBytes);
       }
 
-      const { promise, resolve, reject } = PromiseWithResolvers();
+      pendingEnd = PromiseWithResolvers();
+      const { promise, resolve, reject } = pendingEnd;
 
-      if (!(writable.writableEnded ?? false)) {
-        writable.end();
+      try {
+        if (!(writable.writableEnded ?? false)) {
+          writable.end();
+        }
+
+        eos(writable, { writable: true, readable: false }, (err) => {
+          if (errored) return;
+          pendingEnd = undefined;
+          cleanup(err);
+          if (err) reject(err);
+          else resolve(totalBytes);
+        });
+      } catch (reason) {
+        pendingEnd = undefined;
+        errored = true;
+        error = reason;
+        cleanup(reason, true);
+        reject(reason);
+        try {
+          writable.destroy?.(toClassicError(reason));
+        } catch {
+          // Preserve the original terminal reason.
+        }
       }
-
-      eos(writable, { writable: true, readable: false }, (err) => {
-        cleanup(err);
-        if (err) reject(err);
-        else resolve(totalBytes);
-      });
 
       return promise;
     },
 
     fail(reason) {
-      cleanup(reason);
+      if (
+        errored ||
+        (writable.writableFinished ?? false) ||
+        (writable.destroyed ?? false)
+      ) {
+        return;
+      }
+      errored = true;
+      error = reason;
+      pendingEnd?.reject(reason);
+      pendingEnd = undefined;
+      cleanup(reason, true);
       if (typeof writable.destroy === "function") {
-        writable.destroy(reason);
+        writable.destroy(toClassicError(reason));
       }
     },
 
     [SymbolAsyncDispose]() {
+      if (pendingEnd) return pendingEnd.promise;
       if (isWritable()) {
-        cleanup();
-        if (typeof writable.destroy === "function") {
-          writable.destroy();
-        }
+        this.fail();
       }
       return PromiseResolve();
     },
 
     [SymbolDispose]() {
-      if (isWritable()) {
-        cleanup();
-        if (typeof writable.destroy === "function") {
-          writable.destroy();
-        }
-      }
+      this.fail();
     },
   };
 
@@ -763,13 +832,14 @@ function fromWritable(writable, options = kNullPrototype) {
     if ((writable.writableLength ?? 0) < hwm) {
       return PromiseResolve(true);
     }
-    const { promise, resolve } = PromiseWithResolvers();
+    const { promise, resolve, reject } = PromiseWithResolvers();
     ArrayPrototypePush(waiters, {
       __proto__: null,
       resolve() {
         resolve(true);
       },
-      reject() {
+      reject,
+      close() {
         resolve(false);
       },
     });
@@ -808,6 +878,7 @@ function toWritable(writer) {
   const hasEndSync = hasEnd &&
     typeof writer.endSync === "function";
   const hasFail = typeof writer.fail === "function";
+  const classicErrorReasons = new SafeWeakMap();
   // Try-sync-first pattern: attempt the synchronous method and fall back to the
   // async method if it returns false (data not accepted synchronously).
   // When the sync path succeeds, the callback is deferred via queueMicrotask
@@ -826,14 +897,18 @@ function toWritable(writer) {
         }
         // WriteSync returned false: not accepted, fall through to async.
       } catch (err) {
-        cb(err);
+        cb(toClassicError(err, classicErrorReasons));
         return;
       }
     }
     try {
-      PromisePrototypeThen(writer.write(bytes), () => cb(), cb);
+      PromisePrototypeThen(
+        writer.write(bytes),
+        () => cb(),
+        (err) => cb(toClassicError(err, classicErrorReasons)),
+      );
     } catch (err) {
-      cb(err);
+      cb(toClassicError(err, classicErrorReasons));
     }
   }
 
@@ -853,14 +928,18 @@ function toWritable(writer) {
         }
         // WritevSync returned false: not accepted, fall through to async.
       } catch (err) {
-        cb(err);
+        cb(toClassicError(err, classicErrorReasons));
         return;
       }
     }
     try {
-      PromisePrototypeThen(writer.writev(chunks), () => cb(), cb);
+      PromisePrototypeThen(
+        writer.writev(chunks),
+        () => cb(),
+        (err) => cb(toClassicError(err, classicErrorReasons)),
+      );
     } catch (err) {
-      cb(err);
+      cb(toClassicError(err, classicErrorReasons));
     }
   }
 
@@ -878,22 +957,33 @@ function toWritable(writer) {
         }
         // Result < 0: can't end synchronously, fall through to async.
       } catch (err) {
-        cb(err);
+        cb(toClassicError(err, classicErrorReasons));
         return;
       }
     }
     try {
-      PromisePrototypeThen(writer.end(), () => cb(), cb);
+      PromisePrototypeThen(
+        writer.end(),
+        () => cb(),
+        (err) => cb(toClassicError(err, classicErrorReasons)),
+      );
     } catch (err) {
-      cb(err);
+      cb(toClassicError(err, classicErrorReasons));
     }
   }
 
   function _destroy(err, cb) {
     if (err && hasFail) {
-      writer.fail(err);
+      const wrapped = classicErrorReasons.get(err);
+      classicErrorReasons.delete(err);
+      try {
+        writer.fail(wrapped === undefined ? err : wrapped.reason);
+      } catch (error) {
+        cb(err || toClassicError(error, classicErrorReasons));
+        return;
+      }
     }
-    cb();
+    cb(err);
   }
 
   const writableOptions = {
