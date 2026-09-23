@@ -9,7 +9,6 @@ import vm, {
   runInThisContext,
   Script,
   SourceTextModule,
-  SyntheticModule,
 } from "node:vm";
 
 Deno.test({
@@ -228,122 +227,97 @@ Deno.test({
   },
 });
 
-function dynamicImportModule(value: string) {
-  const module = new SyntheticModule(["value"], () => {
-    module.setExport("value", value);
-  });
-  return module;
+// Without `--experimental-vm-modules` Node accepts an `importModuleDynamically`
+// callback but defers the error to the first `import()`, which rejects with
+// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG and never invokes the callback.
+// The positive path is covered by `tests/specs/node/vm_dynamic_import_callback`,
+// which sets the flag through NODE_OPTIONS.
+function mustNotCall() {
+  return () => {
+    throw new Error("importModuleDynamically must not be invoked");
+  };
 }
 
-function referrerName(referrer: unknown) {
-  return (referrer as { constructor?: { name?: string } } | undefined)
-    ?.constructor?.name;
+async function assertMissingFlag(promise: Promise<unknown>) {
+  const err = await assertRejects(() => promise, TypeError);
+  assertEquals(
+    (err as { code?: string }).code,
+    "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG",
+  );
+  assertEquals(
+    err.message,
+    "A dynamic import callback was invoked without --experimental-vm-modules",
+  );
 }
 
 Deno.test({
-  name: "vm importModuleDynamically callback resolves modules",
+  name:
+    "vm importModuleDynamically callback requires --experimental-vm-modules",
   async fn() {
-    const seen: string[] = [];
-    const callback = (
-      specifier: string,
-      referrer: unknown,
-      attributes: Record<string, string | undefined>,
-    ) => {
-      seen.push(
-        `${specifier}:${referrerName(referrer)}:${attributes.type}`,
-      );
-      return dynamicImportModule(`${specifier}:${attributes.type}`);
-    };
-    const code =
-      "globalThis.__p = import('vm:script', { with: { type: 'json' } }).then((m) => m.value);";
-
-    delete (globalThis as typeof globalThis & { __p?: Promise<string> }).__p;
-    new Script(code, { importModuleDynamically: callback })
+    const code = "globalThis.__p = import('vm:script');";
+    delete (globalThis as typeof globalThis & { __p?: Promise<unknown> }).__p;
+    new Script(code, { importModuleDynamically: mustNotCall() })
       .runInThisContext();
-    assertEquals(
-      await (globalThis as typeof globalThis & { __p: Promise<string> }).__p,
-      "vm:script:json",
+    await assertMissingFlag(
+      (globalThis as typeof globalThis & { __p: Promise<unknown> }).__p,
     );
 
     const context = createContext({ Promise });
     runInContext(
-      "globalThis.p = import('vm:context').then((m) => m.value);",
+      "globalThis.p = import('vm:context');",
       context,
-      { importModuleDynamically: callback },
+      { importModuleDynamically: mustNotCall() },
     );
-    assertEquals(await context.p, "vm:context:undefined");
+    await assertMissingFlag(context.p);
 
     const sandbox: Record<string, unknown> = { Promise };
     runInNewContext(
-      "globalThis.p = import('vm:new-context').then((m) => m.value);",
+      "globalThis.p = import('vm:new-context');",
       sandbox,
-      { importModuleDynamically: callback },
+      { importModuleDynamically: mustNotCall() },
     );
-    assertEquals(await sandbox.p, "vm:new-context:undefined");
-
-    assertEquals(seen, [
-      "vm:script:Script:json",
-      "vm:context:Script:undefined",
-      "vm:new-context:Script:undefined",
-    ]);
+    await assertMissingFlag(sandbox.p as Promise<unknown>);
   },
 });
 
 Deno.test({
-  name: "vm importModuleDynamically callback works for compileFunction",
+  name:
+    "vm compileFunction importModuleDynamically callback requires --experimental-vm-modules",
   async fn() {
-    let referrer: unknown;
     const fn = compileFunction("return import('vm:fn');", [], {
-      importModuleDynamically(_specifier, ref) {
-        referrer = ref;
-        return Promise.resolve(dynamicImportModule("from function"));
-      },
+      importModuleDynamically: mustNotCall(),
     });
-    const ns = await fn();
-    assertEquals(ns.value, "from function");
-    assertEquals(referrer, fn);
+    await assertMissingFlag(fn());
   },
 });
 
 Deno.test({
-  name: "vm createContext importModuleDynamically callback is inherited",
+  name:
+    "vm createContext inherited importModuleDynamically callback requires --experimental-vm-modules",
   async fn() {
     const context = createContext({ Promise }, {
-      importModuleDynamically(specifier) {
-        return dynamicImportModule(`context default ${specifier}`);
-      },
+      importModuleDynamically: mustNotCall(),
     });
-    runInContext(
-      "globalThis.p = import('vm:ctx-default').then((m) => m.value);",
-      context,
-    );
-    assertEquals(await context.p, "context default vm:ctx-default");
+    runInContext("globalThis.p = import('vm:ctx-default');", context);
+    await assertMissingFlag(context.p);
   },
 });
 
 Deno.test({
-  name: "vm SourceTextModule importModuleDynamically callback resolves modules",
+  name:
+    "vm SourceTextModule importModuleDynamically callback requires --experimental-vm-modules",
   async fn() {
-    let referrer: unknown;
     const root = new SourceTextModule(
-      "globalThis.__stm = import('vm:stm').then((m) => m.value);",
-      {
-        importModuleDynamically(_specifier: string, ref: unknown) {
-          referrer = ref;
-          return dynamicImportModule("from source text module");
-        },
-      },
+      "globalThis.__stm = import('vm:stm');",
+      { importModuleDynamically: mustNotCall() },
     );
     await root.link(() => {
       throw new Error("unexpected static import");
     });
     await root.evaluate();
-    assertEquals(
-      await (globalThis as typeof globalThis & { __stm: Promise<string> })
-        .__stm,
-      "from source text module",
+    await assertMissingFlag(
+      (globalThis as typeof globalThis & { __stm: Promise<unknown> }).__stm,
     );
-    assertEquals(referrer, root);
   },
 });
 
