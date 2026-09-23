@@ -477,6 +477,10 @@ export namespace primordials {
   export const SafeFinalizationRegistry: typeof globalThis.FinalizationRegistry;
   export const SafeWeakRef: typeof globalThis.WeakRef;
   export const SafePromiseAll: typeof Promise.all;
+  export const SafePromiseAllReturnVoid: <T>(
+    promises: T[],
+    mapFn?: (value: T, index: number) => unknown,
+  ) => Promise<void>;
   // NOTE: Uncomment the following functions when you need to use them
   // export const SafePromiseAllSettled: typeof Promise.allSettled;
   // export const SafePromiseAny: typeof Promise.any;

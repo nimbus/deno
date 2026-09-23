@@ -739,6 +739,71 @@ fn test_cached_synthetic_esm_evaluation_allows_dynamic_import() {
     .unwrap();
 }
 
+deno_core::extension!(
+  synthetic_esm_gate_ext,
+  lazy_loaded_js = [
+    dir "modules/testdata",
+    "synthetic_esm_backing.js",
+    "synthetic_esm_gate.js",
+  ],
+  synthetic_esm = [
+    "custom:allowed" = "ext:synthetic_esm_gate_ext/synthetic_esm_backing.js",
+    "custom:blocked" = "ext:synthetic_esm_gate_ext/synthetic_esm_backing.js",
+  ],
+  synthetic_esm_gate = "ext:synthetic_esm_gate_ext/synthetic_esm_gate.js"
+);
+
+/// A dynamic import of a `synthetic_esm` module rejects with the exact value
+/// that the extension's `synthetic_esm_gate` throws, on every attempt, and
+/// the gate lets other modules load.
+#[tokio::test]
+async fn test_synthetic_esm_gate_dynamic_import() {
+  let main = ModuleSpecifier::parse("file:///main.js").unwrap();
+  let loader = Rc::new(StaticModuleLoader::with(
+    main.clone(),
+    crate::ascii_str_include!("testdata/synthetic_esm_gate_main.js"),
+  ));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![synthetic_esm_gate_ext::init()],
+    module_loader: Some(loader),
+    ..Default::default()
+  });
+
+  let mod_id = runtime.load_main_es_module(&main).await.unwrap();
+  let result = runtime.mod_evaluate(mod_id);
+  runtime.run_event_loop(Default::default()).await.unwrap();
+  result.await.unwrap();
+}
+
+/// A static import of a `synthetic_esm` module fails with the value that
+/// the extension's `synthetic_esm_gate` throws.
+#[tokio::test]
+async fn test_synthetic_esm_gate_static_import() {
+  let main = ModuleSpecifier::parse("file:///main.js").unwrap();
+  let loader = Rc::new(StaticModuleLoader::with(
+    main.clone(),
+    ascii_str!(r#"import { value } from "custom:blocked";"#),
+  ));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![synthetic_esm_gate_ext::init()],
+    module_loader: Some(loader),
+    ..Default::default()
+  });
+
+  let err = match runtime.load_main_es_module(&main).await {
+    Ok(mod_id) => {
+      let result = runtime.mod_evaluate(mod_id);
+      runtime.run_event_loop(Default::default()).await.unwrap();
+      result.await.unwrap_err()
+    }
+    Err(err) => err,
+  };
+  assert!(
+    err.to_string().contains("Error: blocked custom:blocked"),
+    "unexpected error: {err}"
+  );
+}
+
 /// Regression test for https://github.com/denoland/deno/issues/34307
 ///
 /// Two concurrent dynamic `import()` calls each spawn their own

@@ -176,6 +176,7 @@ pub struct EnvironmentOptions {
   pub allow_wasi: bool,
   pub allow_worker_threads: bool,
   pub experimental_repl_await: bool,
+  pub experimental_stream_iter: bool,
   pub experimental_vm_modules: bool,
   pub async_context_frame: bool,
   pub expose_internals: bool,
@@ -313,6 +314,7 @@ impl Default for EnvironmentOptions {
       allow_wasi: false,
       allow_worker_threads: false,
       experimental_repl_await: true,
+      experimental_stream_iter: false,
       experimental_vm_modules: false,
       async_context_frame: true,
       expose_internals: false,
@@ -1127,6 +1129,13 @@ impl OptionsParser {
       OptionType::Boolean,
       OptionEnvvarSettings::AllowedInEnvvar,
       true,
+    );
+    self.add_option(
+      "--experimental-stream-iter",
+      "experimental iterable streams API (node:stream/iter)",
+      OptionType::Boolean,
+      OptionEnvvarSettings::AllowedInEnvvar,
+      false,
     );
     self.add_option(
       "--experimental-vm-modules",
@@ -2390,6 +2399,9 @@ impl OptionsParser {
       "--experimental-repl-await" => {
         options.per_isolate.per_env.experimental_repl_await = value
       }
+      "--experimental-stream-iter" => {
+        options.per_isolate.per_env.experimental_stream_iter = value
+      }
       "--experimental-vm-modules" => {
         options.per_isolate.per_env.experimental_vm_modules = value
       }
@@ -3500,6 +3512,13 @@ pub fn translate_to_deno_args(
   let env_opts = &opts.per_isolate.per_env;
 
   add_tls_node_options(node_options, env_opts);
+
+  // `node:stream/iter` and `node:zlib/iter` are gated on this flag. Deno has
+  // no CLI equivalent, so it rides along through NODE_OPTIONS. Set here so it
+  // survives early-returning translations (`-e`, `--test`, REPL, etc.).
+  if env_opts.experimental_stream_iter {
+    node_options.push("--experimental-stream-iter".to_string());
+  }
 
   // Forward --trace-event-categories regardless of subcommand path. Set here
   // so it survives early-returning translations (`-e`, `--test`, REPL, etc.).
@@ -5066,6 +5085,18 @@ mod tests {
       eval_arg.contains("process.debugPort = 0"),
       "expected process.debugPort assignment in eval arg, got: {eval_arg}"
     );
+  }
+
+  #[test]
+  fn test_translate_experimental_stream_iter_forwards_node_option() {
+    let parsed = parse_args(svec![
+      "--experimental-stream-iter",
+      "-e",
+      "require('node:stream/iter')"
+    ])
+    .unwrap();
+    let result = translate_to_deno_args(parsed, &TranslateOptions::default());
+    assert_eq!(result.node_options, svec!["--experimental-stream-iter"]);
   }
 
   #[test]

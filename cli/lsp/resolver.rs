@@ -1353,7 +1353,7 @@ impl<'a> ResolverFactory<'a> {
         let npm_resolver = self.services.npm_resolver.as_ref()?;
         Some(Arc::new(CliNodeResolver::new(
           self.in_npm_pkg_checker().clone(),
-          DenoIsBuiltInNodeModuleChecker,
+          DenoIsBuiltInNodeModuleChecker::from_env(&self.sys),
           npm_resolver.clone(),
           self.pkg_json_resolver.clone(),
           self.node_resolution_sys.clone(),

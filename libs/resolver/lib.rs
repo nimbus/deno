@@ -618,7 +618,7 @@ impl<
         // Check if the bare specifier is a known Node built-in module.
         // Built-ins always take priority, matching Node.js behavior where
         // built-in modules cannot be shadowed by node_modules packages.
-        if node_resolver.is_builtin_node_module(raw_specifier) {
+        if node_resolver.is_schemeless_builtin_node_module(raw_specifier) {
           return Ok(DenoResolution {
             url: Url::parse(&format!("node:{}", raw_specifier)).unwrap(),
             maybe_diagnostic,

@@ -577,6 +577,11 @@ fn parse_flags(source: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
           n if n.starts_with("--unhandled-rejections=") => {
             node_options.push(flag.to_string());
           }
+          // `node:stream/iter` and `node:zlib/iter` are gated on this flag,
+          // matching Node. Forward it so the stream/iter tests run as Node does.
+          "--experimental-stream-iter" => {
+            node_options.push("--experimental-stream-iter".to_string());
+          }
           // `node:vm` gates `importModuleDynamically` callbacks on this flag,
           // matching Node. Forward it so the vm module tests run as Node does.
           "--experimental-vm-modules" => {

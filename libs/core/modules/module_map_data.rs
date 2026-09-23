@@ -228,6 +228,10 @@ pub(crate) struct ModuleMapData {
   /// `synthetic_esm_files` list. Runtime-only — not snapshotted.
   pub(crate) synthetic_esm_modules:
     Rc<RefCell<HashMap<ModuleName, ModuleName>>>,
+  /// `synthetic_esm` gates: module specifier to the specifier of the gate
+  /// script of its extension. Populated at extension init from each
+  /// extension's `synthetic_esm_gate`. Runtime-only — not snapshotted.
+  pub(crate) synthetic_esm_gates: Rc<RefCell<HashMap<ModuleName, ModuleName>>>,
   /// Set of scripts currently being loaded (for circular dep detection).
   pub(crate) lazy_script_loading: Rc<RefCell<HashSet<ModuleName>>>,
   /// Snapshot-time `__bootstrap` view (frozen clone of `core.ops` etc.)

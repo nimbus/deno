@@ -1,0 +1,12 @@
+dynamic stream/iter loaded object
+dynamic zlib/iter loaded object
+dynamic stream/iter again loaded object
+static import loaded function
+static stream/iter loaded object
+dynamic bare stream/iter loaded object
+dynamic bare zlib/iter loaded object
+static bare import loaded function function
+static bare loaded object
+resolve node:stream/iter node:stream/iter
+resolve stream/iter node:stream/iter
+resolve zlib/iter node:zlib/iter

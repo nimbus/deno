@@ -282,6 +282,10 @@ pub struct LoadedSources {
   /// to a synthetic ESM module derived from the IIFE exports of
   /// `backing_script_specifier`.
   pub synthetic_esm: Vec<(ModuleName, ModuleName)>,
+  /// `(module_specifier, gate_script_specifier)` pairs for the
+  /// `synthetic_esm` modules of each extension that declares a
+  /// `synthetic_esm_gate`.
+  pub synthetic_esm_gates: Vec<(ModuleName, ModuleName)>,
   pub esm_entry_points: Vec<FastString>,
 }
 
@@ -442,6 +446,12 @@ pub fn into_sources_and_source_maps(
         ModuleName::from_static(module_spec),
         ModuleName::from_static(backing_spec),
       ));
+      if let Some(gate_spec) = extension.synthetic_esm_gate {
+        sources.synthetic_esm_gates.push((
+          ModuleName::from_static(module_spec),
+          ModuleName::from_static(gate_spec),
+        ));
+      }
     }
 
     if snapshotted {

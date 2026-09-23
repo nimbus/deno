@@ -1,0 +1,4 @@
+builtinModules false false
+node:stream/iter Error ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: node:stream/iter
+node:zlib/iter Error ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: node:zlib/iter
+stream/iter Error MODULE_NOT_FOUND: Cannot find module 'stream/iter'

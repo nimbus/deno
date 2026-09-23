@@ -478,6 +478,71 @@ impl ModuleMap {
     );
   }
 
+  /// Register the gate script that `check_synthetic_esm_gate` calls before
+  /// the `synthetic_esm` module `module_specifier` is built for an import.
+  pub(crate) fn add_synthetic_esm_gate(
+    &self,
+    module_specifier: ModuleName,
+    gate_specifier: ModuleName,
+  ) {
+    let data = self.data.borrow();
+    assert!(
+      data
+        .synthetic_esm_gates
+        .borrow_mut()
+        .insert(module_specifier, gate_specifier)
+        .is_none(),
+      "Duplicate synthetic_esm gate mapping"
+    );
+  }
+
+  /// Call the gate function of `specifier`'s extension, if it has one,
+  /// before the `synthetic_esm` module is built for an import. Returns the
+  /// value that the gate threw, so that the import fails with that exact
+  /// value (for example a Node.js error with its `code`).
+  pub(crate) fn check_synthetic_esm_gate(
+    &self,
+    scope: &mut v8::PinScope,
+    specifier: &str,
+  ) -> Result<(), v8::Global<v8::Value>> {
+    let gate_specifier = {
+      let data = self.data.borrow();
+      let gates = data.synthetic_esm_gates.borrow();
+      let key: ModuleName = String::from(specifier).into();
+      gates.get(&key).map(|v| v.as_str().to_string())
+    };
+    let Some(gate_specifier) = gate_specifier else {
+      return Ok(());
+    };
+
+    let gate = self
+      .load_ext_script(scope, &gate_specifier)
+      .map_err(|e| e.to_v8_error(scope))?;
+    let gate = v8::Local::new(scope, gate);
+    let Ok(gate) = v8::Local::<v8::Function>::try_from(gate) else {
+      let err = CoreError::from(JsErrorBox::type_error(format!(
+        "synthetic_esm gate script {gate_specifier} did not return a function"
+      )));
+      return Err(err.to_v8_error(scope));
+    };
+
+    v8::tc_scope!(let tc_scope, scope);
+    let specifier = v8::String::new(tc_scope, specifier).unwrap();
+    let undefined: v8::Local<v8::Value> = v8::undefined(tc_scope).into();
+    if gate
+      .call(tc_scope, undefined, &[specifier.into()])
+      .is_some()
+    {
+      return Ok(());
+    }
+    // An empty exception means that execution was terminated; the value is
+    // not observable then.
+    let exception = tc_scope
+      .exception()
+      .unwrap_or_else(|| v8::undefined(tc_scope).into());
+    Err(v8::Global::new(tc_scope, exception))
+  }
+
   /// Build a synthetic module for a `synthetic_esm`-registered specifier
   /// by evaluating its backing script (cache hit on second+ call) and
   /// deriving exports from the returned IIFE object. Returns the new
@@ -526,6 +591,11 @@ impl ModuleMap {
     specifier: &str,
   ) -> Option<v8::Local<'s, v8::Module>> {
     if !self.has_synthetic_esm_module(specifier) {
+      return None;
+    }
+    if let Err(exception) = self.check_synthetic_esm_gate(scope, specifier) {
+      let exception = v8::Local::new(scope, exception);
+      scope.throw_exception(exception);
       return None;
     }
     match self.build_synthetic_esm_module(scope, specifier) {

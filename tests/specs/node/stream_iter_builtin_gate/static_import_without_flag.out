@@ -1,0 +1,2 @@
+error: Uncaught Error[WILDCARD]: No such built-in module: node:stream/iter
+[WILDCARD]
