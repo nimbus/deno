@@ -574,6 +574,9 @@ fn parse_flags(source: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
           n if n.starts_with("--title=") => {
             node_options.push(flag.to_string());
           }
+          n if n.starts_with("--unhandled-rejections=") => {
+            node_options.push(flag.to_string());
+          }
           // Inspector tests opt in to the inspector via `--inspect=PORT`
           // (commonly `--inspect=0` to pick a random port). Forward to
           // Deno, normalizing the bare port form to `127.0.0.1:PORT` since
