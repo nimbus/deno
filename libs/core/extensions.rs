@@ -442,6 +442,10 @@ macro_rules! or {
 ///    Imports of `module_specifier` resolve to a synthetic ESM module whose exports are derived from
 ///    the exports object returned by the IIFE in `backing_script_specifier` (which must be declared
 ///    in `lazy_loaded_js`). Eg: `synthetic_esm = [ "node:zlib" = "ext:deno_node/zlib.js" ]`
+///  * synthetic_esm_gate: the specifier of a `lazy_loaded_js` script that evaluates to a function. Before a
+///    `synthetic_esm` module of this extension is built for an import, the function is called with the module
+///    specifier; if it throws, the import fails with the thrown value. Eg:
+///    `synthetic_esm_gate = "ext:deno_node/internal/esm_builtin_gate.js"`
 ///  * js: a comma-separated list of JS filenames (see [`include_js_files`]), eg: `js = [ dir "dir", "my_file.js" ]`
 ///  * config: a structure-like definition for configuration parameters which will be required when initializing this extension, eg: `config = { my_param: Option<usize> }`
 ///  * middleware: an [`OpDecl`] middleware function with the signature `fn (OpDecl) -> OpDecl`
@@ -464,6 +468,7 @@ macro_rules! extension {
     $(, lazy_loaded_esm = [ $($lazy_loaded_esm:tt)* ] )?
     $(, lazy_loaded_js = [ $($lazy_loaded_js:tt)* ] )?
     $(, synthetic_esm = [ $( $synthetic_esm_module:literal = $synthetic_esm_backing:literal ),* $(,)? ] )?
+    $(, synthetic_esm_gate = $synthetic_esm_gate:literal )?
     $(, js = [ $($js:tt)* ] )?
     $(, options = { $( $options_id:ident : $options_type:ty ),* $(,)? } )?
     $(, middleware = $middleware_fn:expr_2021 )?
@@ -526,6 +531,7 @@ macro_rules! extension {
             ];
             ::std::borrow::Cow::Borrowed(MAPPINGS)
           },
+          synthetic_esm_gate: $crate::or!($(::std::option::Option::Some($synthetic_esm_gate))?, ::std::option::Option::None),
           esm_entry_point: {
             const V: ::std::option::Option<&'static ::std::primitive::str> = $crate::or!($(::std::option::Option::Some($esm_entry_point))?, ::std::option::Option::None);
             V
@@ -686,6 +692,11 @@ pub struct Extension {
   /// returned by the IIFE in `backing_script_specifier` (which must be
   /// declared in `lazy_loaded_js_files`).
   pub synthetic_esm_modules: Cow<'static, [(&'static str, &'static str)]>,
+  /// Specifier of a `lazy_loaded_js` script that evaluates to a function.
+  /// The function is called with the module specifier before one of
+  /// `synthetic_esm_modules` is built for an import, and a throw fails the
+  /// import with the thrown value.
+  pub synthetic_esm_gate: Option<&'static str>,
   pub esm_entry_point: Option<&'static str>,
   pub ops: Cow<'static, [OpDecl]>,
   pub objects: Cow<'static, [OpMethodDecl]>,
@@ -714,6 +725,7 @@ impl Extension {
       lazy_loaded_esm_files: Cow::Borrowed(&[]),
       lazy_loaded_js_files: Cow::Borrowed(&[]),
       synthetic_esm_modules: Cow::Borrowed(&[]),
+      synthetic_esm_gate: None,
       esm_entry_point: None,
       ops: self.ops.clone(),
       objects: self.objects.clone(),
@@ -735,6 +747,7 @@ impl Default for Extension {
       lazy_loaded_esm_files: Cow::Borrowed(&[]),
       lazy_loaded_js_files: Cow::Borrowed(&[]),
       synthetic_esm_modules: Cow::Borrowed(&[]),
+      synthetic_esm_gate: None,
       esm_entry_point: None,
       ops: Cow::Borrowed(&[]),
       objects: Cow::Borrowed(&[]),

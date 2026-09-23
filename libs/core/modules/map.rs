@@ -1482,9 +1482,9 @@ impl ModuleMap {
       {
         return Some(v8::Local::new(scope, handle));
       }
-      if let Some(module) = self.try_resolve_synthetic_esm(scope, specifier) {
-        return Some(module);
-      }
+      // `None` here means that the gate or the build threw into `scope`.
+      // Do not continue to resolve with a pending exception.
+      return self.try_resolve_synthetic_esm(scope, specifier);
     }
 
     let module_type =

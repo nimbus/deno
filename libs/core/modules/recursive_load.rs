@@ -326,6 +326,13 @@ impl RecursiveModuleLoad {
       .module_map_rc
       .has_synthetic_esm_module(module_request.reference.specifier.as_str())
     {
+      self
+        .module_map_rc
+        .check_synthetic_esm_gate(
+          scope,
+          module_request.reference.specifier.as_str(),
+        )
+        .map_err(ModuleError::Exception)?;
       let module_id = self
         .module_map_rc
         .build_synthetic_esm_module(

@@ -434,6 +434,14 @@ impl<
       .is_builtin_node_module(specifier)
   }
 
+  /// See `IsBuiltInNodeModuleChecker::is_schemeless_builtin_node_module`.
+  #[inline(always)]
+  pub fn is_schemeless_builtin_node_module(&self, specifier: &str) -> bool {
+    self
+      .is_built_in_node_module_checker
+      .is_schemeless_builtin_node_module(specifier)
+  }
+
   /// This function is an implementation of `defaultResolve` in
   /// `lib/internal/modules/esm/resolve.js` from Node.
   pub fn resolve(
@@ -476,7 +484,7 @@ impl<
       );
     }
 
-    if self.is_builtin_node_module(specifier) {
+    if self.is_schemeless_builtin_node_module(specifier) {
       return Ok(NodeResolution::BuiltIn(specifier.to_string()));
     }
 
@@ -1489,7 +1497,7 @@ impl<
               Err(err) => {
                 if self
                   .is_built_in_node_module_checker
-                  .is_builtin_node_module(target)
+                  .is_schemeless_builtin_node_module(target)
                 {
                   Ok(MaybeTypesResolvedUrl(LocalUrlOrPath::Url(
                     Url::parse(&format!("node:{}", target)).unwrap(),

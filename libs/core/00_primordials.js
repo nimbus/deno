@@ -309,6 +309,7 @@
     Promise,
     PromisePrototype,
     PromisePrototypeThen,
+    PromiseResolve,
     SymbolIterator,
     TypedArrayPrototypeJoin,
   } = primordials;
@@ -557,6 +558,29 @@
     new Promise((a, b) =>
       SafePromise.all(arrayToSafePromiseIterable(values)).then(a, b)
     );
+
+  /**
+   * Should only be used when we only care about waiting for all the promises
+   * to resolve, not what value they resolve to.
+   * @template T,U
+   * @param {ArrayLike<T | PromiseLike<T>>} promises
+   * @param {(v: T|PromiseLike<T>, k: number) => U|PromiseLike<U>} [mapFn]
+   * @returns {Promise<void>}
+   */
+  primordials.SafePromiseAllReturnVoid = (promises, mapFn) =>
+    new Promise((resolve, reject) => {
+      let pendingPromises = promises.length;
+      if (pendingPromises === 0) resolve();
+      const onFulfilled = () => {
+        if (--pendingPromises === 0) {
+          resolve();
+        }
+      };
+      for (let i = 0; i < promises.length; i++) {
+        const promise = mapFn != null ? mapFn(promises[i], i) : promises[i];
+        PromisePrototypeThen(PromiseResolve(promise), onFulfilled, reject);
+      }
+    });
 
   // /**
   //  * Creates a Promise that is resolved with an array of results when all

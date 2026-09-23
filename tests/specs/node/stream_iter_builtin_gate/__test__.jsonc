@@ -1,0 +1,37 @@
+{
+  "tests": {
+    "import_without_flag": {
+      "args": "run -A import.mjs",
+      "output": "import_without_flag.out"
+    },
+    "static_import_without_flag": {
+      "args": "run -A static_import.mjs",
+      "output": "static_import_without_flag.out",
+      "exitCode": 1
+    },
+    "static_bare_import_without_flag": {
+      "args": "run -A static_bare_import.mjs",
+      "output": "static_bare_import_without_flag.out",
+      "exitCode": 1
+    },
+    "require_without_flag": {
+      "args": "run -A require.cjs",
+      "output": "require_without_flag.out"
+    },
+    "import_with_flag": {
+      "args": "run -A import.mjs",
+      "envs": { "NODE_OPTIONS": "--experimental-stream-iter --no-warnings" },
+      "output": "import_with_flag.out"
+    },
+    "static_bare_import_with_flag": {
+      "args": "run -A static_bare_import.mjs",
+      "envs": { "NODE_OPTIONS": "--experimental-stream-iter --no-warnings" },
+      "output": "static_bare_import_with_flag.out"
+    },
+    "require_with_flag": {
+      "args": "run -A require.cjs",
+      "envs": { "NODE_OPTIONS": "--experimental-stream-iter --no-warnings" },
+      "output": "require_with_flag.out"
+    }
+  }
+}

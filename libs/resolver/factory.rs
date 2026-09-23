@@ -1064,7 +1064,7 @@ impl<TSys: WorkspaceFactorySys> ResolverFactory<TSys> {
     self.node_resolver.get_or_try_init(|| {
       Ok(new_rc(NodeResolver::new(
         self.in_npm_package_checker()?.clone(),
-        DenoIsBuiltInNodeModuleChecker,
+        DenoIsBuiltInNodeModuleChecker::from_env(&self.workspace_factory.sys),
         self.npm_resolver()?.clone(),
         self.pkg_json_resolver().clone(),
         self.sys.clone(),

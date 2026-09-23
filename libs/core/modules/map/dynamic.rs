@@ -142,6 +142,14 @@ impl ModuleMap {
         .borrow()
         .should_load_synthetic_esm(module_specifier.as_str())
     {
+      if let Err(exception) =
+        self.check_synthetic_esm_gate(scope, module_specifier.as_str())
+      {
+        let exception = v8::Local::new(scope, exception);
+        let resolver = resolver_handle.open(scope);
+        resolver.reject(scope, exception).unwrap();
+        return false;
+      }
       match self
         .lazy_load_synthetic_esm_module(scope, module_specifier.as_str())
       {
