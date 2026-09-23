@@ -1,0 +1,5 @@
+noDeprecation=false
+throwDeprecation=true
+deprecate=called
+error: Uncaught DeprecationWarning: DEP0000 message
+[WILDCARD]
