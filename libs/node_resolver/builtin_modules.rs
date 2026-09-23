@@ -30,32 +30,32 @@ impl DenoIsBuiltInNodeModuleChecker {
     Self::from_node_options(sys.env_var("NODE_OPTIONS").ok().as_deref())
   }
 
+  /// Reads the experimental module flags from a `NODE_OPTIONS` value. An
+  /// invalid value sets no flags, because Node does not start with it.
   pub fn from_node_options(node_options: Option<&str>) -> Self {
     let args = node_options
       .and_then(|value| node_shim::parse_node_options_env_var(value).ok())
       .unwrap_or_default();
-    let mut enabled_experimental_flags = Vec::new();
-    for (_, flag) in EXPERIMENTAL_BUILTIN_NODE_MODULES {
-      if enabled_experimental_flags.contains(flag) {
-        continue;
-      }
-      let negated_flag = format!("--no-{}", &flag[2..]);
-      // The last occurrence wins, as in Node's option parser.
-      let is_set = args
-        .iter()
-        .rev()
-        .find_map(|arg| {
-          if arg == flag {
-            Some(true)
-          } else if *arg == negated_flag {
-            Some(false)
-          } else {
-            None
+    Self::from_node_args(args)
+  }
+
+  /// Reads the experimental module flags from Node CLI arguments, e.g. an
+  /// embedder's `process.execArgv`. Other arguments are ignored.
+  pub fn from_node_args(
+    args: impl IntoIterator<Item = impl AsRef<str>>,
+  ) -> Self {
+    let mut enabled_experimental_flags: Vec<&'static str> = Vec::new();
+    for arg in args {
+      let arg = arg.as_ref();
+      for (_, flag) in EXPERIMENTAL_BUILTIN_NODE_MODULES {
+        // The last occurrence wins, as in Node's option parser.
+        if arg == *flag {
+          if !enabled_experimental_flags.contains(flag) {
+            enabled_experimental_flags.push(*flag);
           }
-        })
-        .unwrap_or(false);
-      if is_set {
-        enabled_experimental_flags.push(*flag);
+        } else if arg.strip_prefix("--no-") == flag.strip_prefix("--") {
+          enabled_experimental_flags.retain(|enabled| enabled != flag);
+        }
       }
     }
     Self {
@@ -256,5 +256,65 @@ mod test {
     sys.env_set_var("NODE_OPTIONS", "--experimental-stream-iter");
     let checker = DenoIsBuiltInNodeModuleChecker::from_env(&sys);
     assert!(checker.is_schemeless_builtin_node_module("stream/iter"));
+  }
+
+  #[test]
+  fn test_schemeless_gate_reads_node_args() {
+    let enabled_args: &[&[&str]] = &[
+      &["--experimental-stream-iter"],
+      &["--no-warnings", "--experimental-stream-iter"],
+      &[
+        "--no-experimental-stream-iter",
+        "--experimental-stream-iter",
+      ],
+      &["--experimental-stream-iter", "--experimental-stream-iter"],
+      &["--title", "a b", "--experimental-stream-iter"],
+    ];
+    for args in enabled_args {
+      let checker = DenoIsBuiltInNodeModuleChecker::from_node_args(*args);
+      assert!(
+        checker.is_schemeless_builtin_node_module("stream/iter"),
+        "{args:?}"
+      );
+      assert!(
+        checker.is_schemeless_builtin_node_module("zlib/iter"),
+        "{args:?}"
+      );
+    }
+
+    let disabled_args: &[&[&str]] = &[
+      &[],
+      &["--no-warnings"],
+      &[
+        "--experimental-stream-iter",
+        "--no-experimental-stream-iter",
+      ],
+      &[
+        "--experimental-stream-iter",
+        "--no-experimental-stream-iter",
+        "--no-warnings",
+      ],
+      &["--experimental-stream-iterx"],
+      &["--no-experimental-stream-iterx"],
+      // An argument is one token. `NODE_OPTIONS` splitting does not apply.
+      &["--no-warnings --experimental-stream-iter"],
+    ];
+    for args in disabled_args {
+      let checker = DenoIsBuiltInNodeModuleChecker::from_node_args(*args);
+      assert!(
+        !checker.is_schemeless_builtin_node_module("stream/iter"),
+        "{args:?}"
+      );
+      assert!(
+        !checker.is_schemeless_builtin_node_module("zlib/iter"),
+        "{args:?}"
+      );
+    }
+
+    let checker = DenoIsBuiltInNodeModuleChecker::from_node_args(vec![
+      "--experimental-stream-iter".to_string(),
+    ]);
+    assert!(checker.is_schemeless_builtin_node_module("stream/iter"));
+    assert!(checker.is_schemeless_builtin_node_module("stream"));
   }
 }
