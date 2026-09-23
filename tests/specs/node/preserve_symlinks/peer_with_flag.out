@@ -1,0 +1,2 @@
+moduleA -> app/node_modules/moduleA/index.js
+moduleB = peer

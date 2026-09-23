@@ -1,0 +1,5 @@
+main __dirname = nested
+error: Uncaught (in promise) Error: Cannot find module './submodule_link.cjs'
+Require stack:
+- [WILDCARD]nested/entry.cjs
+[WILDCARD]
