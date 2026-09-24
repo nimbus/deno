@@ -94,6 +94,7 @@ jobs:
         run: |
           cargo build --locked -p deno -p test_server --bin deno --bin test_server
           cargo test --locked -p unit_tests --test unit -- webcrypto_test
+          cargo test --locked -p unit_node_tests --test unit_node -- buffer_test
           cargo test --locked -p unit_node_tests --test unit_node -- module_test
           cargo test --locked -p unit_node_tests --test unit_node -- crypto_cipher_gcm_test
           cargo test --locked -p unit_node_tests --test unit_node -- crypto_dh_test
