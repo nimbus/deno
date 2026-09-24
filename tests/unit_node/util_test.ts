@@ -445,6 +445,27 @@ Deno.test("[util] stripVTControlCharacters() removes OSC 8 hyperlinks", () => {
   assertEquals(util.stripVTControlCharacters(inputBel), "This is a link hello");
 });
 
+Deno.test("[util] stripVTControlCharacters() keeps the restricted OSC payload contract", () => {
+  // Deno tracks a Node.js release before nodejs/node#64319. An OSC payload
+  // outside the restricted character set and a colon-separated SGR parameter
+  // list stay partly in the output. An embedder can select the later
+  // contract with `VtControlStripPolicy::AnyOscPayload`.
+  assertEquals(
+    util.stripVTControlCharacters(
+      "\x1b]8;;https://example.com/(foo\x07label\x1b]8;;\x07",
+    ),
+    "ttps://example.com/(foo\x07label",
+  );
+  assertEquals(
+    util.stripVTControlCharacters("\x1b[38:2:255:0:0mHello\x1b[0m"),
+    ":2:255:0:0mHello",
+  );
+  assertEquals(
+    util.stripVTControlCharacters("\x1b]8;;https://example.com/no-terminator"),
+    "ttps://example.com/no-terminator",
+  );
+});
+
 Deno.test("[util] queryObjects() counts instances", () => {
   class UtilQueryObjectsFixture {}
   // util.queryObjects is not declared on the bundled @types/node yet, but the

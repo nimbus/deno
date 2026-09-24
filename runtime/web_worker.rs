@@ -628,6 +628,7 @@ impl WebWorker {
         deno_node::AssertionErrorDiffPolicy::Myers,
         deno_node::DeepEqualCyclePolicy::EitherSide,
         deno_node::AssertApiPolicy::AssertClassAndCallTracker,
+        deno_node::VtControlStripPolicy::RestrictedOscPayload,
       ),
       // Runtime ops that are always initialized for WebWorkers
       ops::runtime::deno_runtime::init(options.main_module.clone()),
