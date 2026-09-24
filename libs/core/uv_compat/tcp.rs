@@ -121,12 +121,6 @@ pub struct uv_tcp_t {
   pub(crate) internal_alloc_cb: Option<uv_alloc_cb>,
   pub(crate) internal_read_cb: Option<uv_read_cb>,
   pub(crate) internal_reading: bool,
-  /// Set true once a non-zero read has occurred on this connection.
-  /// Used by the broken-connection probe to distinguish a peer that
-  /// FIN'd after sending data (legitimate half-close — write side
-  /// stays valid) from a peer that aborted before sending anything
-  /// (writes can't be delivered). Persists across polls.
-  pub(crate) internal_received_data: bool,
   /// A terminal read status (`UV_EOF` or an error) that `try_read`
   /// returned right after a partial read in the same poll.
   ///
@@ -420,7 +414,6 @@ pub unsafe fn uv_tcp_init(loop_: *mut uv_loop_t, tcp: *mut uv_tcp_t) -> c_int {
     write(addr_of_mut!((*tcp).internal_alloc_cb), None);
     write(addr_of_mut!((*tcp).internal_read_cb), None);
     write(addr_of_mut!((*tcp).internal_reading), false);
-    write(addr_of_mut!((*tcp).internal_received_data), false);
     write(addr_of_mut!((*tcp).internal_deferred_read_status), None);
     write(addr_of_mut!((*tcp).internal_connect), None);
     write(addr_of_mut!((*tcp).internal_write_queue), VecDeque::new());
@@ -1357,7 +1350,6 @@ pub fn new_tcp() -> uv_tcp_t {
     internal_alloc_cb: None,
     internal_read_cb: None,
     internal_reading: false,
-    internal_received_data: false,
     internal_deferred_read_status: None,
     internal_connect: None,
     internal_write_queue: VecDeque::new(),
@@ -1548,7 +1540,6 @@ pub(crate) unsafe fn poll_tcp_handle(
             }
             Ok(n) => {
               any_work = true;
-              (*tcp_ptr).internal_received_data = true;
               let buflen = buf.len;
               read_cb(tcp_ptr as *mut uv_stream_t, n as isize, &buf);
               partial_read = n < buflen;
@@ -1651,76 +1642,6 @@ pub(crate) unsafe fn poll_tcp_handle(
     {
       if let Some(ref stream) = (*tcp_ptr).internal_stream {
         let _ = stream.poll_write_ready(cx);
-
-        // Also poll read readiness when writes are pending. This ensures
-        // we detect a broken connection (peer close / RST) promptly via
-        // the readable side, rather than waiting for a TCP retransmit
-        // timeout on the write side.
-        //
-        // Gate on `!internal_received_data`: if the peer has ever sent
-        // us a byte, treat a subsequent FIN as a legitimate half-close
-        // (write side stays valid — the peer just stopped sending).
-        // Without this gate the perf-fix's single-poll EOF observation
-        // turns test-net-allow-half-open's queued 'asd' write into a
-        // spurious EPIPE: the read loop now consumes the server's
-        // 1024 bytes and the peer FIN in the same poll, so by the time
-        // this probe runs `internal_reading` is already false and the
-        // FIN looks indistinguishable from a peer that aborted before
-        // ever writing. `internal_received_data` resolves the ambiguity.
-        if !(*tcp_ptr).internal_reading
-          && !(*tcp_ptr).internal_received_data
-          && let Poll::Ready(Ok(())) = stream.poll_read_ready(cx)
-        {
-          // Read side is ready -- peek (without consuming) to check
-          // for EOF or errors. Using MSG_PEEK avoids consuming data
-          // that might belong to a higher-level protocol (e.g. TLS).
-          #[cfg(unix)]
-          let n = {
-            use std::os::unix::io::AsRawFd;
-            let fd = stream.as_raw_fd();
-            let mut probe = [0u8; 1];
-            libc::recv(fd, probe.as_mut_ptr() as *mut c_void, 1, libc::MSG_PEEK)
-              as i32
-          };
-          #[cfg(windows)]
-          let n = {
-            use std::os::windows::io::AsRawSocket;
-            unsafe extern "system" {
-              fn recv(
-                s: usize,
-                buf: *mut c_void,
-                len: c_int,
-                flags: c_int,
-              ) -> c_int;
-            }
-            const MSG_PEEK: c_int = 0x2;
-            let socket = stream.as_raw_socket() as usize;
-            let mut probe = [0u8; 1];
-            recv(socket, probe.as_mut_ptr() as *mut c_void, 1, MSG_PEEK)
-          };
-          if n == 0 {
-            // EOF — the connection is broken.
-            // Drain the entire write queue with EPIPE.
-            while let Some(pw) = (*tcp_ptr).internal_write_queue.pop_front() {
-              completed_writes.push((pw.req, pw.cb, UV_EPIPE));
-            }
-          } else if n < 0 {
-            let err =
-              std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            #[cfg(unix)]
-            let would_block = err == libc::EAGAIN || err == libc::EWOULDBLOCK;
-            #[cfg(windows)]
-            let would_block = err == 10035; // WSAEWOULDBLOCK
-            if !would_block {
-              // Real error — connection is broken.
-              while let Some(pw) = (*tcp_ptr).internal_write_queue.pop_front() {
-                completed_writes.push((pw.req, pw.cb, UV_EPIPE));
-              }
-            }
-            // EAGAIN/EWOULDBLOCK means no data yet, connection alive
-          }
-          // n > 0 means data available, connection alive (data not consumed)
-        }
       }
 
       // Match libuv's count=32 limit to prevent starvation.
