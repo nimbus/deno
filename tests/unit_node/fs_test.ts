@@ -2264,3 +2264,26 @@ Deno.test(
     }
   },
 );
+
+Deno.test(
+  "[node/fs] promises.lchmod changes the symlink mode, not the target mode",
+  {
+    permissions: { read: true, write: true },
+    ignore: Deno.build.os !== "darwin",
+  },
+  async () => {
+    const dir = Deno.makeTempDirSync();
+    try {
+      const target = join(dir, "target");
+      const link = join(dir, "link");
+      writeFileSync(target, "x");
+      chmodSync(target, 0o644);
+      symlinkSync(target, link);
+      await fsPromises.lchmod(link, 0o700);
+      assertEquals(lstatSync(link).mode & 0o777, 0o700);
+      assertEquals(statSync(target).mode & 0o777, 0o644);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
