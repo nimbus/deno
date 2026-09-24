@@ -68,6 +68,35 @@ Deno.test("[node/http] finished accepts a drained legacy response", async () => 
   assertEquals(response.writableFinished, false);
 });
 
+Deno.test("[node/http] end(data) sends a separate empty write for finish", async () => {
+  // Deno tracks a Node.js release before nodejs/node#65466. end(data) writes
+  // the chunk and then an empty write that carries 'finish'. An embedder can
+  // select the later contract with `HttpOutgoingEndPolicy::FinishWithFinalChunk`.
+  const response = new ServerResponse({
+    method: "GET",
+    httpVersionMajor: 1,
+    httpVersionMinor: 1,
+    headers: {},
+  } as IncomingMessage);
+  const chunks: Buffer[] = [];
+  const socket = new Duplex({
+    read() {},
+    write(chunk, _encoding, callback) {
+      chunks.push(chunk);
+      setImmediate(callback);
+    },
+  });
+  response.assignSocket(socket as unknown as Socket);
+
+  const finished = once(response, "finish");
+  response.end("hello world");
+  await finished;
+
+  assertEquals(chunks.length, 2);
+  assert(chunks[0].toString().endsWith("hello world"));
+  assertEquals(chunks[1].length, 0);
+});
+
 Deno.test("[node/http] failed writes do not finish outgoing messages", async () => {
   const writeError = new Error("forced write failure");
   const socket = new Duplex({
