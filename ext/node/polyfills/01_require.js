@@ -417,9 +417,26 @@ const lazyNodeModules = {
     core.loadExtScript("ext:deno_node/internal/streams/writable.js").default,
 };
 
-const { experimentalModuleIsEnabled } = core.loadExtScript(
+const {
+  experimentalModuleIsEnabled,
+  getExperimentalModuleIds,
+  isExperimentalModule,
+} = core.loadExtScript(
   "ext:deno_node/internal/experimental_modules.js",
 );
+
+// Match Node's schemelessBlockList: these modules can only be imported
+// via the `node:` scheme (see lib/internal/bootstrap/realm.js), so they
+// appear in `builtinModules` as `node:<name>` rather than `<name>`.
+const schemelessBlockList = new SafeSet([
+  "sqlite",
+  "test",
+  "test/reporters",
+]);
+
+function builtinModulesEntry(name) {
+  return SetPrototypeHas(schemelessBlockList, name) ? `node:${name}` : name;
+}
 
 function defineLazyNativeModule(name, loader) {
   ObjectDefineProperty(nativeModuleExports, name, {
@@ -469,28 +486,17 @@ function setupBuiltinModules() {
     util,
     worker_threads: workerThreads,
   };
-  // Match Node's schemelessBlockList: these modules can only be imported
-  // via the `node:` scheme (see lib/internal/bootstrap/realm.js), so they
-  // appear in `builtinModules` as `node:<name>` rather than `<name>`.
-  const schemelessBlockList = new SafeSet([
-    "sqlite",
-    "test",
-    "test/reporters",
-  ]);
   function registerName(name) {
     // `internal/*` modules are only exposed under --expose-internals, so
-    // they aren't part of the public builtinModules list.
-    if (StringPrototypeStartsWith(name, "internal/")) {
+    // they aren't part of the public builtinModules list. Experimental
+    // modules are added by `syncExperimentalBuiltinModules()`.
+    if (
+      StringPrototypeStartsWith(name, "internal/") ||
+      isExperimentalModule(name)
+    ) {
       return;
     }
-    if (!experimentalModuleIsEnabled(name)) {
-      return;
-    }
-    if (SetPrototypeHas(schemelessBlockList, name)) {
-      ArrayPrototypePush(builtinModules, `node:${name}`);
-    } else {
-      ArrayPrototypePush(builtinModules, name);
-    }
+    ArrayPrototypePush(builtinModules, builtinModulesEntry(name));
   }
   for (const [name, moduleExports] of ObjectEntries(nodeModules)) {
     nativeModuleExports[name] = moduleExports;
@@ -502,6 +508,37 @@ function setupBuiltinModules() {
   }
 }
 setupBuiltinModules();
+
+// Match Node's setupStreamIter (lib/internal/process/pre_execution.js): an
+// experimental builtin is in `builtinModules` only while its flag is set,
+// after all other builtins and in table order. The option source is not
+// final when this module is evaluated for a snapshot, so the list is synced
+// again from `initialize()` and on each option source change. The sync
+// mutates the array in place, because `Module.builtinModules` and the
+// `node:module` export share it.
+function syncExperimentalBuiltinModules() {
+  const ids = getExperimentalModuleIds();
+  for (let i = 0; i < ids.length; i++) {
+    const index = ArrayPrototypeIndexOf(
+      builtinModules,
+      builtinModulesEntry(ids[i]),
+    );
+    if (index !== -1) {
+      ArrayPrototypeSplice(builtinModules, index, 1);
+    }
+  }
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    if (
+      ObjectHasOwn(nativeModuleExports, id) && experimentalModuleIsEnabled(id)
+    ) {
+      ArrayPrototypePush(builtinModules, builtinModulesEntry(id));
+    }
+  }
+}
+syncExperimentalBuiltinModules();
+core.loadExtScript("ext:deno_node/internal_binding/node_options.ts")
+  .onOptionSourceChange(syncExperimentalBuiltinModules);
 
 // Loading node:module has to bootstrap node:process. `_next_tick.ts`'s
 // `nextTick()` returns without queueing anything until `enableNextTick()` runs,
@@ -3404,6 +3441,7 @@ function initialize(args) {
       false,
       runningOnMainThread,
     );
+    syncExperimentalBuiltinModules();
     internals.__initWorkerThreads(
       runningOnMainThread,
       workerId,

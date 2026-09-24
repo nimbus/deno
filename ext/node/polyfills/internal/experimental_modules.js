@@ -7,22 +7,42 @@
 // ESM specifiers such as `import "stream/iter"`.
 (function () {
 const { core, primordials } = __bootstrap;
-const { ArrayPrototypeForEach } = primordials;
+const { ArrayPrototypeForEach, ArrayPrototypePush } = primordials;
 const { op_require_experimental_builtin_modules } = core.ops;
 
+let experimentalModuleIds;
 let experimentalModuleFlags;
 let getOptionValue;
 
-function experimentalModuleIsEnabled(id) {
-  if (experimentalModuleFlags === undefined) {
-    experimentalModuleFlags = { __proto__: null };
-    ArrayPrototypeForEach(
-      op_require_experimental_builtin_modules(),
-      ({ 0: moduleId, 1: flag }) => {
-        experimentalModuleFlags[moduleId] = flag;
-      },
-    );
+function loadExperimentalModules() {
+  if (experimentalModuleFlags !== undefined) {
+    return;
   }
+  experimentalModuleIds = [];
+  experimentalModuleFlags = { __proto__: null };
+  ArrayPrototypeForEach(
+    op_require_experimental_builtin_modules(),
+    ({ 0: moduleId, 1: flag }) => {
+      ArrayPrototypePush(experimentalModuleIds, moduleId);
+      experimentalModuleFlags[moduleId] = flag;
+    },
+  );
+}
+
+// The experimental builtin ids in table order. Node appends enabled ids to
+// `builtinModules` in this order, after all other builtins.
+function getExperimentalModuleIds() {
+  loadExperimentalModules();
+  return experimentalModuleIds;
+}
+
+function isExperimentalModule(id) {
+  loadExperimentalModules();
+  return experimentalModuleFlags[id] !== undefined;
+}
+
+function experimentalModuleIsEnabled(id) {
+  loadExperimentalModules();
   const flag = experimentalModuleFlags[id];
   if (flag === undefined) {
     return true;
@@ -32,5 +52,9 @@ function experimentalModuleIsEnabled(id) {
   return getOptionValue(flag) === true;
 }
 
-return { experimentalModuleIsEnabled };
+return {
+  experimentalModuleIsEnabled,
+  getExperimentalModuleIds,
+  isExperimentalModule,
+};
 })();

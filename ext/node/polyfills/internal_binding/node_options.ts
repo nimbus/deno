@@ -57,11 +57,20 @@ type OptionValue = { value: string | boolean };
 let optionsMap: Map<string, OptionValue> | undefined;
 let execArgvOptionsMap: Map<string, OptionValue> | undefined;
 let execArgvSnapshot: string[] | undefined;
+const optionSourceListeners: (() => void)[] = [];
+
+// State derived from option values (such as the experimental entries of
+// `Module.builtinModules`) registers here, so that it follows a change of
+// the option source.
+function onOptionSourceChange(listener: () => void) {
+  ArrayPrototypePush(optionSourceListeners, listener);
+}
 
 function setOptionSourceExecArgv(execArgv: string[]) {
   execArgvSnapshot = ArrayPrototypeSlice(execArgv);
   optionsMap = undefined;
   execArgvOptionsMap = undefined;
+  ArrayPrototypeForEach(optionSourceListeners, (listener) => listener());
 }
 
 // Defaults are listed only for options whose Node default is the same on
@@ -298,6 +307,7 @@ function getExecArgvOptions() {
 return {
   getExecArgvOptions,
   getOptions,
+  onOptionSourceChange,
   setOptionSourceExecArgv,
 };
 })();
