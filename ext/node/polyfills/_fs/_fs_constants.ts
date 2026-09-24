@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 (function () {
 const { core, primordials } = __bootstrap;
-const { ObjectAssign, ObjectCreate } = primordials;
+const { ObjectAssign, ObjectCreate, ObjectKeys } = primordials;
 const { fs } = core.loadExtScript(
   "ext:deno_node/internal_binding/constants.ts",
 );
@@ -66,7 +66,7 @@ const {
   O_NOATIME,
 } = fs;
 
-return ObjectAssign(ObjectCreate(null), {
+const constants = ObjectAssign(ObjectCreate(null), {
   F_OK,
   R_OK,
   W_OK,
@@ -125,4 +125,15 @@ return ObjectAssign(ObjectCreate(null), {
   O_DIRECT,
   O_NOATIME,
 });
+
+// The binding omits a constant that the platform does not define, for
+// example O_NOATIME outside Linux. Node does not define the key then.
+const keys = ObjectKeys(constants);
+for (let i = 0; i < keys.length; ++i) {
+  if (constants[keys[i]] === undefined) {
+    delete constants[keys[i]];
+  }
+}
+
+return constants;
 })();
