@@ -695,6 +695,7 @@ impl MainWorker {
           deno_node::AssertionErrorDiffPolicy::Myers,
           deno_node::DeepEqualCyclePolicy::EitherSide,
           deno_node::AssertApiPolicy::AssertClassAndCallTracker,
+          deno_node::VtControlStripPolicy::RestrictedOscPayload,
         ),
         ops::runtime::deno_runtime::args(main_module.clone()),
         ops::worker_host::deno_worker_host::args(

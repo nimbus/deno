@@ -208,6 +208,38 @@ impl BufferDetachedValidationPolicy {
   }
 }
 
+/// Which escape sequences `util.stripVTControlCharacters()` removes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VtControlStripPolicy {
+  /// Match Node.js 24.20, 26.7, and earlier. An OSC sequence is removed only
+  /// when its payload uses a restricted character set, and an SGR parameter
+  /// list uses only `;` separators.
+  RestrictedOscPayload,
+  /// Match Node.js 24.21, 26.8, and later (nodejs/node#64319). An OSC
+  /// sequence is removed up to its first terminator whatever its payload, and
+  /// an SGR parameter list can also use `:` separators.
+  AnyOscPayload,
+}
+
+impl VtControlStripPolicy {
+  fn strips_any_osc_payload(self) -> bool {
+    matches!(self, Self::AnyOscPayload)
+  }
+}
+
+#[cfg(test)]
+mod vt_control_strip_policy_tests {
+  use super::VtControlStripPolicy;
+
+  #[test]
+  fn strips_any_osc_payload_only_for_the_current_contract() {
+    assert!(
+      !VtControlStripPolicy::RestrictedOscPayload.strips_any_osc_payload()
+    );
+    assert!(VtControlStripPolicy::AnyOscPayload.strips_any_osc_payload());
+  }
+}
+
 /// How `buf.asciiWrite()`, `buf.latin1Write()`, and `buf.utf8Write()` check
 /// `offset` and `length`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -470,6 +502,15 @@ fn op_node_buffer_detached_validation_throws(state: &OpState) -> bool {
     .copied()
     .unwrap_or(BufferDetachedValidationPolicy::Throw)
     .throws()
+}
+
+#[op2(fast)]
+fn op_node_strip_vt_any_osc_payload(state: &OpState) -> bool {
+  state
+    .try_borrow::<VtControlStripPolicy>()
+    .copied()
+    .unwrap_or(VtControlStripPolicy::RestrictedOscPayload)
+    .strips_any_osc_payload()
 }
 
 #[op2(fast)]
@@ -750,6 +791,7 @@ deno_core::extension!(deno_node,
     op_node_buffer_detached_validation_throws,
     op_node_buffer_string_write_checks_before_truncation,
     op_node_buffer_string_write_rejects_long_length,
+    op_node_strip_vt_any_osc_payload,
     op_node_assertion_error_uses_myers_diff,
     op_node_deep_equal_stops_at_either_cycle,
     op_node_assert_class_api_exposed,
@@ -1247,6 +1289,7 @@ deno_core::extension!(deno_node,
     assertion_error_diff_policy: AssertionErrorDiffPolicy,
     deep_equal_cycle_policy: DeepEqualCyclePolicy,
     assert_api_policy: AssertApiPolicy,
+    vt_control_strip_policy: VtControlStripPolicy,
   },
   state = |state, options| {
     state.put(options.fs.clone());
@@ -1265,6 +1308,7 @@ deno_core::extension!(deno_node,
     state.put(options.assertion_error_diff_policy);
     state.put(options.deep_equal_cycle_policy);
     state.put(options.assert_api_policy);
+    state.put(options.vt_control_strip_policy);
     state.put(ops::module_hooks::LoaderHookRegistry::default());
 
     if let Some(init) = &options.maybe_init {

@@ -22,6 +22,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_node_strip_vt_any_osc_payload } = core.ops;
 const {
   ArrayIsArray,
   ArrayPrototypeFilter,
@@ -280,16 +281,32 @@ const builtInObjects = new SafeSet(
   ),
 );
 
-// Regex used for ansi escape code splitting
+// Regexes used for ansi escape code splitting
 // Adopted from https://github.com/chalk/ansi-regex/blob/HEAD/index.js
 // License: MIT, authors: @sindresorhus, Qix-, arjunmehta and LitoMore
-// Matches all ansi escape code sequences in a string
-const ansiPattern = "[\\u001B\\u009B][[\\]()#;?]*" +
+// Each matches all ansi escape code sequences in a string.
+// Node.js 24.20, 26.7, and earlier: an OSC payload uses a restricted
+// character set.
+const restrictedOscAnsiPattern = "[\\u001B\\u009B][[\\]()#;?]*" +
   "(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*" +
   "|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)" +
   "?(?:\\u0007|\\u001B\\u005C|\\u009C))" +
   "|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))";
-const ansi = new SafeRegExp(ansiPattern, "g");
+// Node.js 24.21, 26.8, and later (nodejs/node#64319): an OSC sequence ends at
+// its first terminator, and SGR parameters can use `:` separators.
+const anyOscAnsiPattern =
+  "(?:\\u001B\\][\\s\\S]*?(?:\\u0007|\\u001B\\u005C|\\u009C))" +
+  "|[\\u001B\\u009B][[\\]()#;?]*" +
+  "(?:\\d{1,4}(?:[;:]\\d{0,4})*)?" +
+  "[\\dA-PR-TZcf-nq-uy=><~]";
+const restrictedOscAnsi = new SafeRegExp(restrictedOscAnsiPattern, "g");
+const anyOscAnsi = new SafeRegExp(anyOscAnsiPattern, "g");
+
+// The embedder selects the policy per runtime, so read it at each call and not
+// at module load, which a snapshot can capture.
+function getAnsiRegExp() {
+  return op_node_strip_vt_any_osc_payload() ? anyOscAnsi : restrictedOscAnsi;
+}
 
 const reEmojiPresentation = new SafeRegExp("^\\p{Emoji_Presentation}$", "u");
 
@@ -630,7 +647,7 @@ function formatWithOptionsInternal(inspectOptions, args) {
 function stripVTControlCharacters(str) {
   validateString(str, "str");
 
-  return StringPrototypeReplace(str, ansi, "");
+  return StringPrototypeReplace(str, getAnsiRegExp(), "");
 }
 
 // Mirrors Node's lib/util.js styleText(): build openCodes by appending and
