@@ -122,6 +122,10 @@ pub struct BootstrapOptions {
   pub close_on_idle: bool,
   /// When true, the `OffscreenCanvas` global is removed at bootstrap.
   pub disable_offscreen_canvas: bool,
+  /// When true, an uncaught exception is reported in the Node.js fatal
+  /// exception format instead of the Deno format. Set when the process runs
+  /// as a Node.js entry.
+  pub node_fatal_report: bool,
 }
 
 impl Default for BootstrapOptions {
@@ -162,6 +166,7 @@ impl Default for BootstrapOptions {
       otel_config: Default::default(),
       close_on_idle: false,
       disable_offscreen_canvas: false,
+      node_fatal_report: false,
     }
   }
 }
@@ -217,6 +222,8 @@ struct BootstrapV8<'a>(
   Option<&'a str>,
   // disable offscreen canvas
   bool,
+  // node fatal report
+  bool,
 );
 
 impl BootstrapOptions {
@@ -253,6 +260,7 @@ impl BootstrapOptions {
       self.node_cluster_unique_id.as_deref(),
       self.node_cluster_sched_policy.as_deref(),
       self.disable_offscreen_canvas,
+      self.node_fatal_report,
     );
 
     bootstrap.serialize(ser).unwrap()

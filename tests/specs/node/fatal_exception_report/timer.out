@@ -1,0 +1,10 @@
+[WILDLINE]/timer.js:4
+  throw e;
+  ^
+
+RangeError: late
+    at [WILDCARD] {
+  code: 'ERR_X'
+}
+
+Node.js v[WILDLINE]

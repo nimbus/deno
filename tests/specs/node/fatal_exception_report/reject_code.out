@@ -1,0 +1,10 @@
+[WILDLINE]/reject_code.js:1
+const e = new Error("rejected");
+          ^
+
+Error: rejected
+    at [WILDCARD] {
+  code: 'EREJ'
+}
+
+Node.js v[WILDLINE]

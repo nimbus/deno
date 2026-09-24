@@ -270,6 +270,14 @@ function fork(
         DENO_NODE_TRACE_EVENT_CATEGORIES: result.traceEventCategories,
       };
     }
+    if (result.nodeEntry) {
+      options.env = {
+        ...(options.env ?? lazyProcess().default.env),
+        DENO_NODE_ENTRY: "1",
+      };
+    } else if (options.env?.DENO_NODE_ENTRY) {
+      delete options.env.DENO_NODE_ENTRY;
+    }
   }
 
   if (typeof options.stdio === "string") {

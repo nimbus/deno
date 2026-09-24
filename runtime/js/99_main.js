@@ -958,6 +958,7 @@ function bootstrapMainRuntime(runtimeOptions, warmup = false) {
       17: nodeClusterUniqueId,
       18: nodeClusterSchedPolicy,
       19: disableOffscreenCanvas,
+      20: nodeFatalReport,
     } = runtimeOptions;
 
     denoNs.build.standalone = standalone;
@@ -1191,6 +1192,16 @@ function bootstrapMainRuntime(runtimeOptions, warmup = false) {
       // 01_require.js self-bootstrap from them when first lazily loaded (on
       // the first node:* use), so non-node programs never pay node bootstrap.
       internals.__nodeBootstrapArgs = nodeBootstrapArgs;
+    }
+
+    if (nodeFatalReport) {
+      // This program runs as a Node.js entry: report an uncaught exception in
+      // the Node.js format. The report module loads only on a fatal error.
+      internals.nodeFatalReport = true;
+      core.setFatalExceptionHandler((error) =>
+        core.loadExtScript("ext:deno_node/internal/process/fatal_report.ts")
+          .reportFatalException(error)
+      );
     }
   } else {
     // Warmup

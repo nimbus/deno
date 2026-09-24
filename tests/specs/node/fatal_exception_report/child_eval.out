@@ -1,0 +1,31 @@
+--- throw 'x'
+status 1
+
+[eval]:1
+throw 'x'
+^
+x
+(Use `node --trace-uncaught ...` to show where the exception was thrown)
+
+Node.js <version>
+--- throw {a:1}
+status 1
+[eval]:1
+throw {a:1}
+^
+
+{ a: 1 }
+
+Node.js <version>
+--- const e = new Error('child'); e.code = 'ECHILD'; throw e;
+status 1
+[eval]:1
+const e = new Error('child'); e.code = 'ECHILD'; throw e;
+                                                 ^
+
+Error: child
+    at [WILDCARD] {
+  code: 'ECHILD'
+}
+
+Node.js <version>

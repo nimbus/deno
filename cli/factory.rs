@@ -1407,6 +1407,18 @@ impl CliFactory {
         std::env::var("DENO_DISABLE_OFFSCREEN_CANVAS").as_deref(),
         Ok("1") | Ok("true")
       ),
+      // Only a program that runs as a Node.js entry gets Node.js fatal
+      // exception reports. Other subcommands (test, repl, ...) keep their own
+      // error output. With `--abort-on-uncaught-exception`, the default
+      // dispatch must abort the process, like in Node.js.
+      node_fatal_report: crate::node_compat_shim::is_node_entry()
+        && matches!(
+          cli_options.sub_command(),
+          DenoSubcommand::Run(_) | DenoSubcommand::Eval(_)
+        )
+        && !crate::util::v8::aborts_on_uncaught_exception(
+          cli_options.v8_flags(),
+        ),
     })
   }
 
