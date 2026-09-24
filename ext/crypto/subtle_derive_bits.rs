@@ -549,6 +549,14 @@ pub fn run(
       if iterations == 0 {
         return Err(op_error("iterations must not be zero".to_string()));
       }
+      // WebIDL accepts any `unsigned long`, but Node limits PBKDF2 to Int32
+      // iterations. A larger count would also hold a blocking thread for a
+      // very long time.
+      if iterations > i32::MAX as u32 {
+        return Err(not_supported(
+          "iterations exceeds the implementation limit".to_string(),
+        ));
+      }
       // Per w3c/webcrypto#380 a length of 0 derives an empty bit string.
       // Short-circuit before `derive_bits_sync`, which asserts a positive
       // length (and the underlying PBKDF2 primitive panics on empty output).
