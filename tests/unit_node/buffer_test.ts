@@ -1528,3 +1528,63 @@ Deno.test({
     }
   },
 });
+
+// Node.js 24.21 and later convert each argument once (nodejs/node#65043), and
+// the native write truncates it. Deno tracks that contract by default. An
+// embedder can select the Node.js 20 or 22 bounds checks.
+Deno.test({
+  name:
+    "[node/buffer] asciiWrite, latin1Write, and utf8Write convert each argument once",
+  fn() {
+    for (const method of ["asciiWrite", "latin1Write", "utf8Write"] as const) {
+      const write = (offset?: unknown, length?: unknown) => {
+        const buf = Buffer.alloc(4);
+        // deno-lint-ignore no-explicit-any
+        const written = (buf as any)[method]("abcdef", offset, length);
+        return [written, buf.toString("hex")];
+      };
+
+      let calls = 0;
+      const offset = {
+        valueOf() {
+          calls++;
+          return 2;
+        },
+      };
+      assertThrows(
+        // deno-lint-ignore no-explicit-any
+        () => (Buffer.alloc(1) as any)[method]("ww", offset, 1),
+        RangeError,
+        "outside of buffer bounds",
+      );
+      assertEquals(calls, 1, method);
+
+      assertEquals(write(0, 0), [0, "00000000"], method);
+      assertEquals(write(NaN), [0, "00000000"], method);
+      assertEquals(write(1.7), [2, "00616200"], method);
+      assertEquals(write(1, NaN), [0, "00000000"], method);
+      assertEquals(write("1", "2"), [2, "00616200"], method);
+      assertEquals(write(1n, 2n), [2, "00616200"], method);
+      assertEquals(write(null, 2), [2, "61620000"], method);
+      assertEquals(write(4), [0, "00000000"], method);
+      for (const [offset, length] of [[-1], [5], [-0.5], [1, 9], [1, 3.5]]) {
+        const error = assertThrows(() => write(offset, length), RangeError);
+        assertEquals(
+          (error as { code?: string }).code,
+          "ERR_BUFFER_OUT_OF_BOUNDS",
+          `${method}(${offset}, ${length})`,
+        );
+      }
+    }
+  },
+});
+
+Deno.test({
+  name: "[node/buffer] write with a zero length writes nothing",
+  fn() {
+    const buf = Buffer.alloc(4);
+    assertEquals(buf.write("abc", 0, 0), 0);
+    assertEquals(buf.write("abc", 0, 0, "latin1"), 0);
+    assertEquals(buf.toString("hex"), "00000000");
+  },
+});

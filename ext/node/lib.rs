@@ -208,6 +208,54 @@ impl BufferDetachedValidationPolicy {
   }
 }
 
+/// How `buf.asciiWrite()`, `buf.latin1Write()`, and `buf.utf8Write()` check
+/// `offset` and `length`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BufferStringWriteBoundsPolicy {
+  /// Match Node.js 20 and 22.0 through 22.8, where the native write first
+  /// truncates each argument to an integer. It throws `ERR_OUT_OF_RANGE` for a
+  /// negative value and clamps `length` to the bytes that remain.
+  TruncateThenClamp,
+  /// Match Node.js 22.9 and later 22.x (nodejs/node#54310,
+  /// nodejs/node#54524), which throw `ERR_BUFFER_OUT_OF_BOUNDS` for a negative
+  /// or past-the-end `offset` and a negative `length` before truncation, and
+  /// clamp `length` to the bytes that remain.
+  CheckThenClamp,
+  /// Match Node.js 23 and later (nodejs/node#54588), which also throw
+  /// `ERR_BUFFER_OUT_OF_BOUNDS` for a `length` past the end.
+  CheckThenReject,
+}
+
+impl BufferStringWriteBoundsPolicy {
+  fn checks_before_truncation(self) -> bool {
+    !matches!(self, Self::TruncateThenClamp)
+  }
+
+  fn rejects_long_length(self) -> bool {
+    matches!(self, Self::CheckThenReject)
+  }
+}
+
+#[cfg(test)]
+mod buffer_string_write_bounds_policy_tests {
+  use super::BufferStringWriteBoundsPolicy;
+
+  #[test]
+  fn separates_the_node_20_node_22_and_current_bounds_contracts() {
+    let truncate = BufferStringWriteBoundsPolicy::TruncateThenClamp;
+    assert!(!truncate.checks_before_truncation());
+    assert!(!truncate.rejects_long_length());
+
+    let clamp = BufferStringWriteBoundsPolicy::CheckThenClamp;
+    assert!(clamp.checks_before_truncation());
+    assert!(!clamp.rejects_long_length());
+
+    let reject = BufferStringWriteBoundsPolicy::CheckThenReject;
+    assert!(reject.checks_before_truncation());
+    assert!(reject.rejects_long_length());
+  }
+}
+
 #[cfg(test)]
 mod buffer_detached_validation_policy_tests {
   use super::BufferDetachedValidationPolicy;
@@ -422,6 +470,26 @@ fn op_node_buffer_detached_validation_throws(state: &OpState) -> bool {
     .copied()
     .unwrap_or(BufferDetachedValidationPolicy::Throw)
     .throws()
+}
+
+#[op2(fast)]
+fn op_node_buffer_string_write_checks_before_truncation(
+  state: &OpState,
+) -> bool {
+  state
+    .try_borrow::<BufferStringWriteBoundsPolicy>()
+    .copied()
+    .unwrap_or(BufferStringWriteBoundsPolicy::CheckThenReject)
+    .checks_before_truncation()
+}
+
+#[op2(fast)]
+fn op_node_buffer_string_write_rejects_long_length(state: &OpState) -> bool {
+  state
+    .try_borrow::<BufferStringWriteBoundsPolicy>()
+    .copied()
+    .unwrap_or(BufferStringWriteBoundsPolicy::CheckThenReject)
+    .rejects_long_length()
 }
 
 #[op2(fast)]
@@ -680,6 +748,8 @@ deno_core::extension!(deno_node,
     op_node_readable_read_one_buffer_at_a_time,
     op_node_buffer_max_length,
     op_node_buffer_detached_validation_throws,
+    op_node_buffer_string_write_checks_before_truncation,
+    op_node_buffer_string_write_rejects_long_length,
     op_node_assertion_error_uses_myers_diff,
     op_node_deep_equal_stops_at_either_cycle,
     op_node_assert_class_api_exposed,
@@ -1173,6 +1243,7 @@ deno_core::extension!(deno_node,
     readable_read_policy: ReadableReadPolicy,
     buffer_max_length_policy: BufferMaxLengthPolicy,
     buffer_detached_validation_policy: BufferDetachedValidationPolicy,
+    buffer_string_write_bounds_policy: BufferStringWriteBoundsPolicy,
     assertion_error_diff_policy: AssertionErrorDiffPolicy,
     deep_equal_cycle_policy: DeepEqualCyclePolicy,
     assert_api_policy: AssertApiPolicy,
@@ -1190,6 +1261,7 @@ deno_core::extension!(deno_node,
     state.put(options.readable_read_policy);
     state.put(options.buffer_max_length_policy);
     state.put(options.buffer_detached_validation_policy);
+    state.put(options.buffer_string_write_bounds_policy);
     state.put(options.assertion_error_diff_policy);
     state.put(options.deep_equal_cycle_policy);
     state.put(options.assert_api_policy);

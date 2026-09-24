@@ -93,6 +93,8 @@ const {
   op_node_buffer_compare_offset,
   op_node_buffer_detached_validation_throws,
   op_node_buffer_max_length,
+  op_node_buffer_string_write_checks_before_truncation,
+  op_node_buffer_string_write_rejects_long_length,
   op_node_call_is_from_dependency,
   op_node_encoding_slice,
   op_transcode,
@@ -1058,16 +1060,7 @@ Buffer.prototype.asciiSlice = function asciiSlice(offset, length) {
 };
 
 Buffer.prototype.asciiWrite = function asciiWrite(string, offset, length) {
-  // deno-lint-ignore deno-internal/prefer-primordials
-  if (offset < 0 || offset > this.byteLength) {
-    throw new codes.ERR_BUFFER_OUT_OF_BOUNDS("offset");
-  }
-  // deno-lint-ignore deno-internal/prefer-primordials
-  if (length < 0 || length > this.byteLength - offset) {
-    throw new codes.ERR_BUFFER_OUT_OF_BOUNDS("length");
-  }
-
-  return blitBuffer(asciiToBytes(string), this, offset, length);
+  return stringWrite(this, string, offset, length, writeBytes);
 };
 
 Buffer.prototype.base64Slice = function base64Slice(
@@ -1254,7 +1247,7 @@ Buffer.prototype.hexWrite = function hexWrite(string, offset, length) {
   }
 };
 
-function hexIndexOutOfRange() {
+function indexOutOfRange() {
   const err = new RangeError("Index out of range");
   err.code = "ERR_OUT_OF_RANGE";
   return err;
@@ -1272,7 +1265,7 @@ Buffer.prototype.hexSlice = function hexSlice(start, end) {
   start = start === undefined ? 0 : MathTrunc(Number(start)) || 0;
   end = end === undefined ? byteLength : MathTrunc(Number(end)) || 0;
   if (start < 0 || end < 0) {
-    throw hexIndexOutOfRange();
+    throw indexOutOfRange();
   }
   if (end <= start) {
     return "";
@@ -1281,7 +1274,7 @@ Buffer.prototype.hexSlice = function hexSlice(start, end) {
   // the underlying buffer (detached views report length 0).
   byteLength = TypedArrayPrototypeGetByteLength(this);
   if (end > byteLength) {
-    throw hexIndexOutOfRange();
+    throw indexOutOfRange();
   }
   if (end - start > kStringMaxLength / 2) {
     throw genericNodeError(
@@ -1319,16 +1312,7 @@ Buffer.prototype.latin1Write = function latin1Write(
   offset,
   length,
 ) {
-  // deno-lint-ignore deno-internal/prefer-primordials
-  if (offset < 0 || offset > this.byteLength) {
-    throw new codes.ERR_BUFFER_OUT_OF_BOUNDS("offset");
-  }
-  // deno-lint-ignore deno-internal/prefer-primordials
-  if (length < 0 || length > this.byteLength - offset) {
-    throw new codes.ERR_BUFFER_OUT_OF_BOUNDS("length");
-  }
-
-  return blitBuffer(asciiToBytes(string), this, offset, length);
+  return stringWrite(this, string, offset, length, writeBytes);
 };
 
 Buffer.prototype.ucs2Slice = function ucs2Slice(offset, length) {
@@ -1355,22 +1339,91 @@ function utf8Slice(start, end) {
 }
 
 Buffer.prototype.utf8Write = function utf8Write(string, offset, length) {
-  // deno-lint-ignore deno-internal/prefer-primordials
-  if (offset < 0 || offset > this.byteLength) {
+  return stringWrite(this, string, offset, length, writeUtf8);
+};
+
+function writeBytes(buf, string, offset, length) {
+  return blitBuffer(asciiToBytes(string), buf, offset, length);
+}
+
+function writeUtf8(buf, string, offset, length) {
+  const target = offset === 0 && length === buf.length
+    ? buf
+    : TypedArrayPrototypeSubarray(buf, offset, offset + length);
+  return utf8Encoder.encodeInto(string, target).written;
+}
+
+// Converts a write argument as the Node.js release that the embedder selects
+// does. Node.js 24.21 and later call Number() (nodejs/node#65043), which
+// accepts a BigInt. Earlier releases use ToNumber, which throws for one.
+function toWriteNumber(value, rejectsLongLength) {
+  return rejectsLongLength ? Number(value) : +value;
+}
+
+// Matches ParseArrayIndex() in Node's native StringWrite(): it truncates the
+// value, converts NaN to 0, and rejects a negative result.
+function toArrayIndex(value) {
+  const index = MathTrunc(value) || 0;
+  if (index < 0) {
+    throw indexOutOfRange();
+  }
+  return index;
+}
+
+// Implements `buf.asciiWrite()`, `buf.latin1Write()`, and `buf.utf8Write()`.
+// The embedder's BufferStringWriteBoundsPolicy selects the JS bounds checks
+// that come before the native write in Node.js 22.9 and later. The code then
+// does the native steps: truncate each value, and clamp the length to the
+// bytes that remain. Each argument is converted once, so user `valueOf()`
+// code runs at most once, as in Node.js 24.21 and later.
+function stringWrite(buf, string, offset, length, write) {
+  const rejectsLongLength = op_node_buffer_string_write_rejects_long_length();
+  const checksBeforeTruncation = rejectsLongLength ||
+    op_node_buffer_string_write_checks_before_truncation();
+
+  offset = offset === undefined ? 0 : toWriteNumber(offset, rejectsLongLength);
+  if (
+    checksBeforeTruncation &&
+    (offset < 0 || offset > TypedArrayPrototypeGetByteLength(buf))
+  ) {
     throw new codes.ERR_BUFFER_OUT_OF_BOUNDS("offset");
   }
-  // deno-lint-ignore deno-internal/prefer-primordials
-  if (length < 0 || length > this.byteLength - offset) {
+  // The native write checks the offset before it reads the length.
+  const start = toArrayIndex(offset);
+  if (start > TypedArrayPrototypeGetByteLength(buf)) {
+    throw new codes.ERR_BUFFER_OUT_OF_BOUNDS("offset");
+  }
+
+  if (length === undefined) {
+    // Node.js 23 and later default to the bytes after the unconverted
+    // offset. Earlier releases clamp any default to the bytes that remain.
+    length = rejectsLongLength
+      ? TypedArrayPrototypeGetByteLength(buf) - offset
+      : Infinity;
+  } else {
+    length = toWriteNumber(length, rejectsLongLength);
+  }
+  if (
+    checksBeforeTruncation &&
+    (length < 0 ||
+      (rejectsLongLength &&
+        length > TypedArrayPrototypeGetByteLength(buf) - offset))
+  ) {
     throw new codes.ERR_BUFFER_OUT_OF_BOUNDS("length");
   }
 
-  offset = offset || 0;
-  const maxLength = MathMin(length || Infinity, this.length - offset);
-  const buf = offset || maxLength < this.length
-    ? TypedArrayPrototypeSubarray(this, offset, maxLength + offset)
-    : this;
-  return utf8Encoder.encodeInto(string, buf).written;
-};
+  // Read the length again: argument conversion can run user code that
+  // resizes or detaches the underlying buffer.
+  const byteLength = TypedArrayPrototypeGetByteLength(buf);
+  if (start > byteLength) {
+    throw new codes.ERR_BUFFER_OUT_OF_BOUNDS("offset");
+  }
+  const maxLength = MathMin(toArrayIndex(length), byteLength - start);
+  if (maxLength === 0) {
+    return 0;
+  }
+  return write(buf, string, start, maxLength);
+}
 
 Buffer.prototype.write = function write(string, offset, length, encoding) {
   if (typeof string !== "string") {

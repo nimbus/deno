@@ -624,6 +624,7 @@ impl WebWorker {
         deno_node::ReadableReadPolicy::OneBufferAtATime,
         deno_node::BufferMaxLengthPolicy::SafeInteger,
         deno_node::BufferDetachedValidationPolicy::Throw,
+        deno_node::BufferStringWriteBoundsPolicy::CheckThenReject,
         deno_node::AssertionErrorDiffPolicy::Myers,
         deno_node::DeepEqualCyclePolicy::EitherSide,
         deno_node::AssertApiPolicy::AssertClassAndCallTracker,
