@@ -3,6 +3,8 @@ import {
   Buffer,
   constants,
   File as BufferFile,
+  isAscii,
+  isUtf8,
   resolveObjectURL,
   transcode,
 } from "node:buffer";
@@ -1500,5 +1502,29 @@ Deno.test({
     assertEquals(Buffer.from("abc").indexOf("b", 0.5), 1);
     assertEquals(buf.lastIndexOf("a", 4.9), 3);
     assertEquals(buf.lastIndexOf(0x61, 4.9), 3);
+  },
+});
+
+// Deno tracks a Node.js release before nodejs/node#64504, which throws for a
+// detached input. An embedder can select the later empty-input behavior.
+Deno.test({
+  name: "[node/buffer] isAscii and isUtf8 reject a detached buffer or view",
+  fn() {
+    const arrayBuffer = new ArrayBuffer(8);
+    const views = [
+      Buffer.from(arrayBuffer),
+      new Uint8Array(arrayBuffer),
+      new Float64Array(arrayBuffer),
+    ];
+    structuredClone(arrayBuffer, { transfer: [arrayBuffer] });
+    for (const validate of [isAscii, isUtf8]) {
+      for (const input of [arrayBuffer, ...views]) {
+        assertThrows(
+          () => validate(input),
+          Error,
+          "Cannot validate on a detached buffer",
+        );
+      }
+    }
   },
 });

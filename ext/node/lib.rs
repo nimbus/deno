@@ -191,6 +191,34 @@ pub enum DeepEqualCyclePolicy {
   EitherSide,
 }
 
+/// How `buffer.isAscii()` and `buffer.isUtf8()` treat a detached
+/// `ArrayBuffer` or a view backed by one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BufferDetachedValidationPolicy {
+  /// Match Node.js 24.20, 26.7, and earlier, which throw `ERR_INVALID_STATE`.
+  Throw,
+  /// Match Node.js 24.21, 26.8, and later (nodejs/node#64504), which treat
+  /// the input as empty and return `true`.
+  TreatAsEmpty,
+}
+
+impl BufferDetachedValidationPolicy {
+  fn throws(self) -> bool {
+    matches!(self, Self::Throw)
+  }
+}
+
+#[cfg(test)]
+mod buffer_detached_validation_policy_tests {
+  use super::BufferDetachedValidationPolicy;
+
+  #[test]
+  fn throws_only_for_the_legacy_contract() {
+    assert!(BufferDetachedValidationPolicy::Throw.throws());
+    assert!(!BufferDetachedValidationPolicy::TreatAsEmpty.throws());
+  }
+}
+
 #[cfg(test)]
 mod buffer_max_length_policy_tests {
   use super::BufferMaxLengthPolicy;
@@ -385,6 +413,15 @@ fn op_node_buffer_max_length(state: &OpState) -> f64 {
     .copied()
     .unwrap_or(BufferMaxLengthPolicy::SafeInteger)
     .max_length()
+}
+
+#[op2(fast)]
+fn op_node_buffer_detached_validation_throws(state: &OpState) -> bool {
+  state
+    .try_borrow::<BufferDetachedValidationPolicy>()
+    .copied()
+    .unwrap_or(BufferDetachedValidationPolicy::Throw)
+    .throws()
 }
 
 #[op2(fast)]
@@ -642,6 +679,7 @@ deno_core::extension!(deno_node,
     op_node_events_options_require_object,
     op_node_readable_read_one_buffer_at_a_time,
     op_node_buffer_max_length,
+    op_node_buffer_detached_validation_throws,
     op_node_assertion_error_uses_myers_diff,
     op_node_deep_equal_stops_at_either_cycle,
     op_node_assert_class_api_exposed,
@@ -1134,6 +1172,7 @@ deno_core::extension!(deno_node,
     dh_compute_secret_policy: DhComputeSecretPolicy,
     readable_read_policy: ReadableReadPolicy,
     buffer_max_length_policy: BufferMaxLengthPolicy,
+    buffer_detached_validation_policy: BufferDetachedValidationPolicy,
     assertion_error_diff_policy: AssertionErrorDiffPolicy,
     deep_equal_cycle_policy: DeepEqualCyclePolicy,
     assert_api_policy: AssertApiPolicy,
@@ -1150,6 +1189,7 @@ deno_core::extension!(deno_node,
     state.put(options.dh_compute_secret_policy);
     state.put(options.readable_read_policy);
     state.put(options.buffer_max_length_policy);
+    state.put(options.buffer_detached_validation_policy);
     state.put(options.assertion_error_diff_policy);
     state.put(options.deep_equal_cycle_policy);
     state.put(options.assert_api_policy);

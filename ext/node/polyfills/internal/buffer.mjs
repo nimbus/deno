@@ -91,6 +91,7 @@ const {
   op_mark_as_untransferable,
   op_node_buffer_compare,
   op_node_buffer_compare_offset,
+  op_node_buffer_detached_validation_throws,
   op_node_buffer_max_length,
   op_node_call_is_from_dependency,
   op_node_encoding_slice,
@@ -3271,17 +3272,29 @@ function writeU_Int24LE(buf, value, offset, min, max) {
   return offset;
 }
 
+// Returns true when `buffer` is detached and the Node.js target validates it
+// as empty input. Throws when the target rejects a detached buffer.
+function isDetachedEmptyInput(buffer) {
+  if (!isDetachedBuffer(buffer)) {
+    return false;
+  }
+  if (op_node_buffer_detached_validation_throws()) {
+    throw new ERR_INVALID_STATE("Cannot validate on a detached buffer");
+  }
+  return true;
+}
+
 function isUtf8(input) {
   if (isTypedArray(input)) {
-    if (isDetachedBuffer(TypedArrayPrototypeGetBuffer(input))) {
-      throw new ERR_INVALID_STATE("Cannot validate on a detached buffer");
+    if (isDetachedEmptyInput(TypedArrayPrototypeGetBuffer(input))) {
+      return true;
     }
     return op_is_utf8(input);
   }
 
   if (isAnyArrayBuffer(input)) {
-    if (isDetachedBuffer(input)) {
-      throw new ERR_INVALID_STATE("Cannot validate on a detached buffer");
+    if (isDetachedEmptyInput(input)) {
+      return true;
     }
     return op_is_utf8(new Uint8Array(input));
   }
@@ -3295,15 +3308,15 @@ function isUtf8(input) {
 
 function isAscii(input) {
   if (isTypedArray(input)) {
-    if (isDetachedBuffer(TypedArrayPrototypeGetBuffer(input))) {
-      throw new ERR_INVALID_STATE("Cannot validate on a detached buffer");
+    if (isDetachedEmptyInput(TypedArrayPrototypeGetBuffer(input))) {
+      return true;
     }
     return op_is_ascii(input);
   }
 
   if (isAnyArrayBuffer(input)) {
-    if (isDetachedBuffer(input)) {
-      throw new ERR_INVALID_STATE("Cannot validate on a detached buffer");
+    if (isDetachedEmptyInput(input)) {
+      return true;
     }
     return op_is_ascii(new Uint8Array(input));
   }
