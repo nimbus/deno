@@ -19,10 +19,17 @@
 //! Both are best-effort and only kick in when a real `node` is not already
 //! available on `PATH`, so existing Node.js setups are never shadowed. The
 //! behavior can be disabled entirely with `DENO_DISABLE_NODE_SHIM=1`.
+//!
+//! This module also owns the Node.js entry marker ([`is_node_entry`]). A
+//! process is a Node.js entry when its args were Node.js CLI args that were
+//! translated, either here through arg0 dispatch or by a parent that spawned
+//! it through `child_process`.
 
 use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 /// Env var that disables the whole feature when set to a truthy value.
 const DISABLE_ENV_VAR: &str = "DENO_DISABLE_NODE_SHIM";
@@ -32,6 +39,32 @@ const DISABLE_ENV_VAR: &str = "DENO_DISABLE_NODE_SHIM";
 const ACTIVE_ENV_VAR: &str = "DENO_NODE_SHIM_ACTIVE";
 /// Name of the directory under DENO_DIR that holds the `node` shim.
 const SHIM_DIR_NAME: &str = "node_compat_bin";
+/// Internal marker that a parent process sets when it spawns this process
+/// with translated Node.js CLI args (see `child_process` in ext/node).
+const NODE_ENTRY_ENV_VAR: &str = "DENO_NODE_ENTRY";
+
+static NODE_ENTRY: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process runs as a Node.js entry.
+pub fn is_node_entry() -> bool {
+  NODE_ENTRY.load(Ordering::Relaxed)
+}
+
+/// Reads the Node.js entry marker that a parent process set, and removes it
+/// from the environment so that child processes do not inherit it.
+///
+/// Must be called before any threads are spawned, as it mutates the process
+/// environment.
+pub fn take_node_entry_env_var() {
+  if std::env::var_os(NODE_ENTRY_ENV_VAR).is_none() {
+    return;
+  }
+  if std::env::var(NODE_ENTRY_ENV_VAR).is_ok_and(|v| v == "1") {
+    NODE_ENTRY.store(true, Ordering::Relaxed);
+  }
+  // SAFETY: called before any threads are spawned.
+  unsafe { std::env::remove_var(NODE_ENTRY_ENV_VAR) };
+}
 
 fn is_truthy(value: &str) -> bool {
   matches!(
@@ -123,6 +156,7 @@ pub fn maybe_rewrite_node_arg0(args: Vec<OsString>) -> Vec<OsString> {
   let options = node_shim::TranslateOptions::for_node_cli();
   let result = node_shim::translate_to_deno_args(parsed, &options);
 
+  NODE_ENTRY.store(result.node_entry, Ordering::Relaxed);
   apply_env_side_effects(&result);
 
   let mut deno_args = result.deno_args;
