@@ -182,6 +182,21 @@ function buildAllowedFlags() {
     "--report-directory",
     "-r",
     "--trace-events-enabled",
+    // Every flag that the NODE_OPTIONS parser in
+    // internal_binding/node_options.ts accepts and Node accepts in the
+    // environment.
+    "--async-context-frame",
+    "--no-async-context-frame",
+    "--experimental-eventsource",
+    "--experimental-print-required-tla",
+    "--experimental-require-module",
+    "--no-experimental-require-module",
+    "--require-module",
+    "--no-require-module",
+    "--experimental-sqlite",
+    "--no-experimental-sqlite",
+    "--experimental-stream-iter",
+    "--trace-require-module",
   ];
 
   /*
