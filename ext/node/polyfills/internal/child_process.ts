@@ -1602,6 +1602,9 @@ function transformDenoShellCommand(
 
   try {
     const result = op_node_translate_cli_args(args, false, false);
+    if (result.nodeEntry && env) {
+      env.DENO_NODE_ENTRY = "1";
+    }
     // Shell-quote translated args that contain metacharacters so they are
     // safe to embed in a shell command string.
     const quotedArgs = isWindows
@@ -1750,6 +1753,11 @@ function buildCommand(
     if (result.traceEventCategories) {
       env.DENO_NODE_TRACE_EVENT_CATEGORIES = result.traceEventCategories;
     }
+    // Deno args pass through without the marker. Keep a marker that fork()
+    // set when it translated the args.
+    if (result.nodeEntry) {
+      env.DENO_NODE_ENTRY = "1";
+    }
 
     // Update NODE_OPTIONS if needed
     if (result.nodeOptions.length > 0) {
@@ -1814,6 +1822,9 @@ function buildCommand(
       if (argsForDeno.length > 0) {
         try {
           const result = op_node_translate_cli_args(argsForDeno, false, true);
+          if (result.nodeEntry) {
+            env.DENO_NODE_ENTRY = "1";
+          }
           args = [
             ...new SafeArrayIterator(
               ArrayPrototypeSlice(args, 0, denoArgIndex + 1),

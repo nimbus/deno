@@ -135,6 +135,27 @@
 
   let unhandledPromiseRejectionHandler = () => false;
 
+  // Called with every exception and unhandled rejection that nothing handled,
+  // just before it terminates the runtime. The embedder can use it to report
+  // the error in its own format and exit. If it returns, the exception is
+  // dispatched to Rust as usual.
+  let fatalExceptionHandler = null;
+
+  function dispatchException(error, fromPromise) {
+    if (fatalExceptionHandler !== null) {
+      const handler = fatalExceptionHandler;
+      // A throw from the handler must not replace the original exception.
+      fatalExceptionHandler = null;
+      try {
+        handler(error, fromPromise);
+      } catch {
+        // Fall through to the default dispatch.
+      }
+      fatalExceptionHandler = handler;
+    }
+    op_dispatch_exception(error, fromPromise);
+  }
+
   // ---------------------------------------------------------------------------
   // Immediate queue (ImmediateList linked list + drain loop)
   // ---------------------------------------------------------------------------
@@ -342,7 +363,7 @@
         );
         if (!handled) {
           const err = rejections[i + 1];
-          op_dispatch_exception(err, true);
+          dispatchException(err, true);
         }
       } finally {
         setAsyncContext(prevContext);
@@ -487,7 +508,7 @@
         );
         if (!handled) {
           const err = arguments[i + 1];
-          op_dispatch_exception(err, true);
+          dispatchException(err, true);
         }
       } finally {
         setAsyncContext(prevContext);
@@ -535,7 +556,7 @@
   }
 
   let reportExceptionCallback = (error) => {
-    op_dispatch_exception(error, false);
+    dispatchException(error, false);
   };
 
   // Used to report errors thrown from functions passed to `queueMicrotask()`.
@@ -546,7 +567,7 @@
   function setReportExceptionCallback(cb) {
     if (cb === null || cb === undefined) {
       reportExceptionCallback = (error) => {
-        op_dispatch_exception(error, false);
+        dispatchException(error, false);
       };
     } else {
       if (typeof cb != "function") {
@@ -1258,8 +1279,11 @@
       op_set_handled_promise_rejection_handler(handler),
     setUnhandledPromiseRejectionHandler: (handler) =>
       unhandledPromiseRejectionHandler = handler,
-    reportUnhandledException: (e) => op_dispatch_exception(e, false),
-    reportUnhandledPromiseRejection: (e) => op_dispatch_exception(e, true),
+    reportUnhandledException: (e) => dispatchException(e, false),
+    reportUnhandledPromiseRejection: (e) => dispatchException(e, true),
+    setFatalExceptionHandler: (handler) => {
+      fatalExceptionHandler = handler ?? null;
+    },
     createTimer: __timers.createTimer,
     cancelTimer: __timers.cancelTimer,
     refreshTimer: __timers.refreshTimer,

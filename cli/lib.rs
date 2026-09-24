@@ -883,6 +883,7 @@ pub fn main() {
   boot_phase("after aws_lc install");
 
   let args: Vec<_> = env::args_os().collect();
+  node_compat_shim::take_node_entry_env_var();
   // If we were invoked through a `node` shim (a symlink/hardlink named `node`
   // pointing at this binary), translate the Node.js CLI args to Deno args.
   // Done here, before any threads are spawned, because it may set env vars.

@@ -1,0 +1,11 @@
+[WILDLINE]/own_props.js:4
+throw e;
+^
+
+Error: with props
+    at [WILDCARD] {
+  status: 404,
+  details: { path: '/x', tags: [ 'a', 'b' ] }
+}
+
+Node.js v[WILDLINE]

@@ -254,6 +254,18 @@ export namespace core {
   ) => void;
 
   /**
+   * Sets the handler that receives each exception or unhandled promise rejection that is
+   * about to terminate the runtime. The handler can report the error and exit. If it
+   * returns, the runtime raises the error as usual. Pass `null` to remove the handler.
+   */
+  function setFatalExceptionHandler(cb: FatalExceptionCallback | null): void;
+
+  export type FatalExceptionCallback = (
+    error: any,
+    fromPromise: boolean,
+  ) => void;
+
+  /**
    * Report an exception that was not handled by any runtime handler, and escaped to the
    * top level. This terminates the runtime.
    */

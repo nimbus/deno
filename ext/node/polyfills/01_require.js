@@ -13,6 +13,7 @@ import {
   op_module_hooks_register,
   op_module_hooks_respond_load,
   op_napi_open,
+  op_node_apply_recording_error_arrow,
   op_node_has_child_ipc_pipe,
   op_node_strip_typescript_types,
   op_require_as_file_path,
@@ -1677,7 +1678,13 @@ Module._load = function (request, parent, isMain) {
   let threw = true;
   try {
     try {
-      module.load(filename);
+      if (isMain && internals.nodeFatalReport) {
+        // Record where the entry module throws, for the Node.js fatal
+        // exception report.
+        op_node_apply_recording_error_arrow(module.load, module, [filename]);
+      } else {
+        module.load(filename);
+      }
       threw = false;
     } finally {
       if (threw) {
@@ -2188,6 +2195,13 @@ function enrichCJSError(error) {
   }
 }
 
+// The file URLs that CommonJS modules were compiled with, mapped to their
+// paths.
+const cjsScriptPaths = new SafeMap();
+// The fatal exception report prints the path of a CommonJS module, like
+// Node.js, instead of the file URL that the module was compiled with.
+internals.getCjsScriptPath = (scriptUrl) => cjsScriptPaths.get(scriptUrl);
+
 function wrapSafe(
   filename,
   content,
@@ -2196,17 +2210,21 @@ function wrapSafe(
 ) {
   let f;
   let err;
+  const scriptUrl = url.pathToFileURL(filename).toString();
+  if (internals.nodeFatalReport) {
+    cjsScriptPaths.set(scriptUrl, filename);
+  }
 
   if (patched) {
     [f, err] = core.evalContext(
       Module.wrap(content),
-      url.pathToFileURL(filename).toString(),
+      scriptUrl,
       [format !== "module"],
     );
   } else {
     [f, err] = core.compileFunction(
       content,
-      url.pathToFileURL(filename).toString(),
+      scriptUrl,
       [format !== "module"],
       [
         "exports",
