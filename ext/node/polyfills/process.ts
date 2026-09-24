@@ -1829,11 +1829,14 @@ function nodeProcessUnhandledRejection(event: PromiseRejectionEvent) {
 }
 
 function nodeProcessRejectionHandled(event: PromiseRejectionEvent) {
+  // The runtime reports only a rejection that it already delivered as
+  // unhandled. The rejection has no id when a web 'unhandledrejection'
+  // listener prevented the Node report. It still gets 'rejectionHandled',
+  // after the web 'rejectionhandled' event, but no warning.
   const id = reportedUnhandledRejections.get(event.promise);
-  if (id === undefined) {
-    return;
+  if (id !== undefined) {
+    reportedUnhandledRejections.delete(event.promise);
   }
-  reportedUnhandledRejections.delete(event.promise);
   let handled = false;
   try {
     handled = process.emit("rejectionHandled", event.promise);
@@ -1845,7 +1848,7 @@ function nodeProcessRejectionHandled(event: PromiseRejectionEvent) {
     }
     handled = true;
   }
-  if (!handled) {
+  if (!handled && id !== undefined) {
     const warning = new Error(
       `Promise rejection was handled asynchronously (rejection id: ${id})`,
     );
