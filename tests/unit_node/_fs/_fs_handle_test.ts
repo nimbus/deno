@@ -442,6 +442,47 @@ Deno.test(
 );
 
 Deno.test(
+  "[node/fs filehandle.readableWebStream] byob reads into views at a byteOffset of one ArrayBuffer",
+  async function () {
+    // Use this file so that the read needs more than one view.
+    const source = path.fromFileUrl(import.meta.url);
+    const expected = await Deno.readFile(source);
+    assert(expected.byteLength > 300);
+
+    const fileHandle = await fs.open(source);
+    const reader = fileHandle.readableWebStream().getReader({ mode: "byob" });
+
+    let buffer = new ArrayBuffer(expected.byteLength);
+    let offset = 0;
+    let reads = 0;
+    let result;
+    do {
+      result = await reader.read(
+        new DataView(
+          buffer,
+          offset,
+          Math.min(100, buffer.byteLength - offset),
+        ),
+      );
+      if (result.value !== undefined) {
+        assertEquals(result.value.byteOffset, offset);
+        assert(result.value.byteLength <= 100);
+        buffer = result.value.buffer as ArrayBuffer;
+        offset += result.value.byteLength;
+        reads++;
+      }
+    } while (!result.done && offset < buffer.byteLength);
+
+    assert(reads > 1);
+    assertEquals(offset, expected.byteLength);
+    assertEquals(new Uint8Array(buffer), expected);
+
+    reader.releaseLock();
+    await fileHandle.close();
+  },
+);
+
+Deno.test(
   "[node/fs filehandle.readableWebStream] With autoClose option",
   async function () {
     const fileHandle = await fs.open(testData);
