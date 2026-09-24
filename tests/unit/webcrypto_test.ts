@@ -736,6 +736,60 @@ Deno.test(async function testEcdhDeriveBitsWithNullLength() {
   assertEquals(result.byteLength * 8, 384);
 });
 
+Deno.test(async function testPbkdf2IterationsLimit() {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new Uint8Array(16),
+    "PBKDF2",
+    false,
+    ["deriveKey", "deriveBits"],
+  );
+  const salt = new Uint8Array(16);
+
+  for (const iterations of [2 ** 31, 2 ** 32 - 1]) {
+    const params = { name: "PBKDF2", hash: "SHA-256", salt, iterations };
+    const bitsError = await assertRejects(
+      () => crypto.subtle.deriveBits(params, key, 8),
+      DOMException,
+      "iterations exceeds the implementation limit",
+    );
+    assertEquals(bitsError.name, "NotSupportedError");
+    const keyError = await assertRejects(
+      () =>
+        crypto.subtle.deriveKey(
+          params,
+          key,
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["sign"],
+        ),
+      DOMException,
+      "iterations exceeds the implementation limit",
+    );
+    assertEquals(keyError.name, "NotSupportedError");
+  }
+
+  // Zero is checked first and stays an OperationError.
+  const zeroError = await assertRejects(
+    () =>
+      crypto.subtle.deriveBits(
+        { name: "PBKDF2", hash: "SHA-256", salt, iterations: 0 },
+        key,
+        8,
+      ),
+    DOMException,
+  );
+  assertEquals(zeroError.name, "OperationError");
+
+  // A count in the Int32 range still derives bits.
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations: 1 },
+    key,
+    8,
+  );
+  assertEquals(bits.byteLength, 1);
+});
+
 Deno.test(async function testDeriveKey() {
   // Test deriveKey
   const rawKey = crypto.getRandomValues(new Uint8Array(16));
