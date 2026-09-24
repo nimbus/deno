@@ -216,6 +216,9 @@ class Channel {
   }
 
   subscribe(subscription) {
+    // Validate before activation so that an invalid subscription does not
+    // leave the channel active without a subscriber (nodejs/node#65313).
+    validateFunction(subscription, "subscription");
     markActive(this);
     this.subscribe(subscription);
   }
