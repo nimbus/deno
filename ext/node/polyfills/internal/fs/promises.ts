@@ -14,16 +14,10 @@ import { readdirPromise } from "ext:deno_node/_fs/_fs_readdir.ts";
 const { lstatPromise } = core.loadExtScript("ext:deno_node/_fs/_fs_lstat.ts");
 const lazyFs = core.createLazyLoader("node:fs");
 import { globPromise } from "ext:deno_node/_fs/_fs_glob.ts";
-import { getValidatedPathToString } from "ext:deno_node/internal/fs/utils.mjs";
 import type { Buffer } from "node:buffer";
 import Dir from "ext:deno_node/_fs/_fs_dir.ts";
 import { FileHandle } from "ext:deno_node/internal/fs/handle.ts";
 import { primordials } from "ext:core/mod.js";
-const { parseFileMode } = core.loadExtScript(
-  "ext:deno_node/internal/validators.mjs",
-);
-import { op_node_lchmod } from "ext:core/ops";
-const { isMacOS } = core.loadExtScript("ext:deno_node/_util/os.ts");
 const { ERR_METHOD_NOT_IMPLEMENTED, aggregateTwoErrors } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -33,7 +27,6 @@ const lazyProcess = core.createLazyLoader("node:process");
 const {
   ObjectPrototypeIsPrototypeOf,
   Promise,
-  PromiseReject,
   SafeArrayIterator,
   SymbolAsyncDispose,
 } = primordials;
@@ -145,16 +138,20 @@ const chownPromise = lazyPromisifyFs("chown", 3) as (
   gid: number,
 ) => Promise<void>;
 
-const lchmodPromise: (
+// Mirrors Node's lib/internal/fs/promises.js lchmod(): open the symlink
+// itself with O_SYMLINK, then change its mode through the FileHandle and
+// close via handleFdClose. Only macOS defines O_SYMLINK.
+async function lchmodPromise(
   path: string | Buffer | URL,
   mode: number,
-) => Promise<void> = !isMacOS
-  ? () => PromiseReject(new ERR_METHOD_NOT_IMPLEMENTED("lchmod()"))
-  : async (path: string | Buffer | URL, mode: number) => {
-    path = getValidatedPathToString(path);
-    mode = parseFileMode(mode, "mode");
-    return await op_node_lchmod(path, mode);
-  };
+): Promise<void> {
+  const { O_SYMLINK, O_WRONLY } = constants;
+  if (O_SYMLINK === undefined) {
+    throw new ERR_METHOD_NOT_IMPLEMENTED("lchmod()");
+  }
+  const fh = await openPromise(path, O_WRONLY | O_SYMLINK);
+  return handleFdClose(fh.chmod(mode), () => fh.close());
+}
 
 const lchownPromise = lazyPromisifyFs("lchown", 3) as (
   path: string | Buffer | URL,
