@@ -1,0 +1,8 @@
+global undefined
+loaded function
+fixed bytes 1,2,3,4 false false
+fixed arrayBuffer 4 false
+growable bytes 5,6,7,8 false false
+growable arrayBuffer 4 false
+plain bytes same true
+push 5,6,7,8

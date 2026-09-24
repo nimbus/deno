@@ -25,7 +25,6 @@ const {
   NumberIsNaN,
   NumberMAX_SAFE_INTEGER,
   NumberMIN_SAFE_INTEGER,
-  ObjectGetOwnPropertyDescriptor,
   ObjectPrototypeHasOwnProperty,
   ObjectPrototypeIsPrototypeOf,
   SafeSet,
@@ -37,6 +36,8 @@ const {
   TypedArrayPrototypeGetSymbolToStringTag,
 } = primordials;
 
+const { op_node_get_shared_array_buffer_growable } = core.ops;
+
 const { kEmptyObject, setOwnProperty } = core.loadExtScript(
   "ext:deno_node/internal/util.mjs",
 );
@@ -45,12 +46,10 @@ const {
   isTypedArray,
 } = core.loadExtScript("ext:deno_node/internal/util/types.ts");
 
-// Deno has no util binding with getSharedArrayBufferGrowable. Capture the
-// same intrinsic SharedArrayBuffer.prototype.growable getter.
-const getSharedArrayBufferGrowable = ObjectGetOwnPropertyDescriptor(
-  SharedArrayBuffer.prototype,
-  "growable",
-).get;
+// Node takes getSharedArrayBufferGrowable from its util binding. The op
+// returns the same intrinsic SharedArrayBuffer.prototype.growable getter
+// without a read of globalThis.SharedArrayBuffer, which an embedder can remove.
+const getSharedArrayBufferGrowable = op_node_get_shared_array_buffer_growable();
 
 const BIGINT_2_63 = 1n << 63n;
 const BIGINT_2_64 = 1n << 64n;
