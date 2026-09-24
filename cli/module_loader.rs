@@ -1374,12 +1374,15 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
     specifier: &str,
     referrer: &str,
   ) -> Result<ModuleSpecifier, ModuleLoaderError> {
-    self.0.inner_resolve(
-      specifier,
-      referrer,
-      deno_core::ResolutionKind::DynamicImport,
-      true,
-    )
+    self
+      .0
+      .inner_resolve(
+        specifier,
+        referrer,
+        deno_core::ResolutionKind::DynamicImport,
+        true,
+      )
+      .map_err(deno_core::import_meta_resolve_type_error)
   }
 
   fn get_host_defined_options<'s>(

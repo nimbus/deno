@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 
 use deno_error::JsErrorBox;
+use deno_error::JsErrorClass;
 use futures::future::FutureExt;
 
 use super::SourceCodeCacheInfo;
@@ -30,6 +31,15 @@ pub type ModuleLoaderError = JsErrorBox;
 
 /// Result of calling `ModuleLoader::resolve`.
 pub type ModuleResolveResponse = Result<ModuleSpecifier, ModuleLoaderError>;
+
+/// Converts a resolution error into the `TypeError` that the HTML spec requires
+/// `import.meta.resolve()` to throw, whatever the class of the underlying
+/// error is (e.g. a URL parse error surfaces as a `URIError`).
+pub fn import_meta_resolve_type_error(
+  error: ModuleLoaderError,
+) -> ModuleLoaderError {
+  JsErrorBox::type_error(error.get_message().into_owned())
+}
 
 /// Result of calling `ModuleLoader::load`.
 pub enum ModuleLoadResponse {
@@ -111,13 +121,17 @@ pub trait ModuleLoader {
 
   /// Override to customize the behavior of `import.meta.resolve` resolution.
   ///
-  /// The default implementation calls `self.resolve()`.
+  /// `import.meta.resolve()` throws the returned error as is. The default
+  /// implementation calls `self.resolve()` and converts a failure into the
+  /// HTML spec `TypeError` with `import_meta_resolve_type_error`.
   fn import_meta_resolve(
     &self,
     specifier: &str,
     referrer: &str,
   ) -> Result<ModuleSpecifier, ModuleLoaderError> {
-    self.resolve(specifier, referrer, ResolutionKind::DynamicImport)
+    self
+      .resolve(specifier, referrer, ResolutionKind::DynamicImport)
+      .map_err(import_meta_resolve_type_error)
   }
 
   /// Given ModuleSpecifier, load its source code.

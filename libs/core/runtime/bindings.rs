@@ -6,7 +6,6 @@ use std::os::raw::c_void;
 use std::path::PathBuf;
 
 use deno_error::JsErrorBox;
-use deno_error::JsErrorClass;
 use url::Url;
 use v8::MapFnTo;
 
@@ -1595,16 +1594,11 @@ fn import_meta_resolve(
       rv.set(resolved_val);
     }
     Err(err) => {
-      // Per the HTML spec, `import.meta.resolve()` throws a `TypeError` when
-      // the specifier can't be resolved, whatever the underlying loader error
-      // class is (e.g. a URL parse error surfaces as a `URIError`). Coerce to
-      // `TypeError` to match the spec. This used to happen implicitly because
-      // `throw_js_error_class` always built a `TypeError`; now that it faithfully
-      // rebuilds the registered class, the coercion has to be explicit.
-      crate::error::throw_js_error_class(
-        scope,
-        &JsErrorBox::type_error(err.get_message().into_owned()),
-      );
+      // The loader owns the error class. The default
+      // `ModuleLoader::import_meta_resolve` applies the HTML spec `TypeError`
+      // (see `import_meta_resolve_type_error`), and an embedder with other
+      // semantics, such as Node's `ERR_MODULE_NOT_FOUND`, returns its own error.
+      crate::error::throw_js_error_class(scope, &err);
     }
   };
 }

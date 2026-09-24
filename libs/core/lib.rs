@@ -159,6 +159,7 @@ pub use crate::modules::ResolutionKind;
 pub use crate::modules::SourceCodeCacheInfo;
 pub use crate::modules::StaticModuleLoader;
 pub use crate::modules::ValidateImportAttributesCb;
+pub use crate::modules::import_meta_resolve_type_error;
 pub use crate::modules::wrap_lazy_ext_script;
 pub use crate::ops::ExternalOpsTracker;
 pub use crate::ops::OpId;
