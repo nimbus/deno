@@ -5,6 +5,7 @@ pub mod blocklist;
 pub mod buffer;
 pub mod constant;
 pub mod dns;
+pub mod error_arrow;
 pub mod fs;
 pub mod handle_wrap;
 pub mod http;

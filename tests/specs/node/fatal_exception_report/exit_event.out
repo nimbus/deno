@@ -1,0 +1,9 @@
+exit event 1 1
+[WILDLINE]/exit_event.js:2
+throw new Error("boom");
+^
+
+Error: boom
+    at [WILDCARD]
+
+Node.js v[WILDLINE]

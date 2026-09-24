@@ -1,0 +1,10 @@
+file://[WILDLINE]/esm.mjs:1
+const e = new Error("esm boom");
+          ^
+
+Error: esm boom
+    at [WILDCARD] {
+  extra: 1
+}
+
+Node.js v[WILDLINE]

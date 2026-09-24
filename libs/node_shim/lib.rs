@@ -3215,6 +3215,10 @@ pub struct TranslatedArgs {
   /// Comma-separated trace event categories from --trace-event-categories,
   /// propagated to the spawned process via DENO_NODE_TRACE_EVENT_CATEGORIES.
   pub trace_event_categories: String,
+  /// Whether the args were Node.js CLI args that were translated, as opposed
+  /// to Deno args that were passed through unchanged. A translated process
+  /// behaves as a Node.js entry, for example for its fatal error reports.
+  pub node_entry: bool,
 }
 
 /// Wraps eval code for Node.js compatibility.
@@ -3508,6 +3512,7 @@ pub fn translate_to_deno_args(
     return result;
   }
 
+  result.node_entry = true;
   let opts = &parsed_args.options;
   let env_opts = &opts.per_isolate.per_env;
 

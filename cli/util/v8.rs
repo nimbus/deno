@@ -12,6 +12,20 @@ pub fn get_v8_flags_from_env() -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Whether V8 aborts the process on an uncaught exception, as with
+/// `--abort-on-uncaught-exception`. The last flag wins, like in V8.
+pub fn aborts_on_uncaught_exception(v8_flags: &[String]) -> bool {
+  let mut aborts = false;
+  for flag in get_v8_flags_from_env().iter().chain(v8_flags) {
+    match flag.replace('_', "-").as_str() {
+      "--abort-on-uncaught-exception" => aborts = true,
+      "--no-abort-on-uncaught-exception" => aborts = false,
+      _ => {}
+    }
+  }
+  aborts
+}
+
 pub fn init_v8_flags(
   default_v8_flags: &[String],
   v8_flags: &[String],

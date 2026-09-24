@@ -4,7 +4,8 @@
 // deno-lint-ignore-file no-this-alias
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
+const { op_node_apply_recording_error_arrow } = core.ops;
 const {
   createTimer: createTimer_,
   cancelTimer: cancelTimer_,
@@ -195,6 +196,11 @@ Timeout.prototype[createTimer] = function () {
     const currentCb = wasRepeat ? self._onTimeout : callback;
     const args = self._timerArgs;
     try {
+      if (internals.nodeFatalReport) {
+        // Record where the callback throws, for the Node.js fatal exception
+        // report.
+        return op_node_apply_recording_error_arrow(currentCb, self, args ?? []);
+      }
       if (args !== undefined && args.length > 0) {
         return ReflectApply(currentCb, self, args);
       } else {

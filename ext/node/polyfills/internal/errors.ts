@@ -443,6 +443,18 @@ class NodeErrorAbstraction extends Error {
   }
 }
 
+// Like Node.js, the `toString` of an error instance is an own property that
+// util.inspect() does not show.
+function defineOwnToString(error: Error, toString: () => string) {
+  ObjectDefineProperty(error, "toString", {
+    __proto__: null,
+    value: toString,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+}
+
 class NodeError extends NodeErrorAbstraction {
   constructor(code: string, message: string) {
     super(Error.prototype.name, code, message);
@@ -453,9 +465,9 @@ class NodeSyntaxError extends NodeErrorAbstraction implements SyntaxError {
   constructor(code: string, message: string) {
     super(SyntaxError.prototype.name, code, message);
     ObjectSetPrototypeOf(this, SyntaxErrorPrototype);
-    this.toString = function () {
+    defineOwnToString(this, function () {
       return `${this.name} [${this.code}]: ${this.message}`;
-    };
+    });
   }
 }
 
@@ -463,9 +475,9 @@ class NodeRangeError extends NodeErrorAbstraction {
   constructor(code: string, message: string) {
     super(RangeError.prototype.name, code, message);
     ObjectSetPrototypeOf(this, RangeErrorPrototype);
-    this.toString = function () {
+    defineOwnToString(this, function () {
       return `${this.name} [${this.code}]: ${this.message}`;
-    };
+    });
   }
 }
 
@@ -473,9 +485,9 @@ class NodeTypeError extends NodeErrorAbstraction implements TypeError {
   constructor(code: string, message: string) {
     super(TypeError.prototype.name, code, message);
     ObjectSetPrototypeOf(this, TypeErrorPrototype);
-    this.toString = function () {
+    defineOwnToString(this, function () {
       return `${this.name} [${this.code}]: ${this.message}`;
-    };
+    });
   }
 }
 
@@ -483,9 +495,9 @@ class NodeURIError extends NodeErrorAbstraction implements URIError {
   constructor(code: string, message: string) {
     super(URIError.prototype.name, code, message);
     ObjectSetPrototypeOf(this, URIErrorPrototype);
-    this.toString = function () {
+    defineOwnToString(this, function () {
       return `${this.name} [${this.code}]: ${this.message}`;
-    };
+    });
   }
 }
 
@@ -652,10 +664,16 @@ function makeNodeErrorWithCode(Base: typeof Error, key: string) {
           : template as string,
       );
       this.code = key;
-      this[kIsNodeError] = true;
-      this.toString = function () {
+      ObjectDefineProperty(this, kIsNodeError, {
+        __proto__: null,
+        value: true,
+        enumerable: false,
+        writable: false,
+        configurable: true,
+      });
+      defineOwnToString(this, function () {
         return `${this.name} [${this.code}]: ${this.message}`;
-      };
+      });
     }
   };
 }
@@ -2160,7 +2178,7 @@ class ERR_REQUIRE_ASYNC_MODULE extends NodeError {
       value: requireStack,
     });
     this.name = `Error [${this.code}]`;
-    this.toString = nodeErrorToStringWithEmbeddedCode;
+    defineOwnToString(this, nodeErrorToStringWithEmbeddedCode);
   }
 }
 class ERR_REQUIRE_CYCLE_MODULE extends NodeError {
@@ -2170,7 +2188,7 @@ class ERR_REQUIRE_CYCLE_MODULE extends NodeError {
       `Cannot require() ES Module ${filename} in a cycle. (from ${parentFilename})`,
     );
     this.name = `Error [${this.code}]`;
-    this.toString = nodeErrorToStringWithEmbeddedCode;
+    defineOwnToString(this, nodeErrorToStringWithEmbeddedCode);
   }
 }
 function nodeErrorToStringWithEmbeddedCode(this: NodeErrorAbstraction) {

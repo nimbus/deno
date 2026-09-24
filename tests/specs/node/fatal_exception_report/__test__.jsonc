@@ -1,0 +1,136 @@
+// Through the `node` shim, an uncaught exception gets the Node.js fatal
+// exception report. Only stack frame lines are wildcards.
+{
+  "tempDir": true,
+  "tests": {
+    "node_error_code": {
+      // The `node` shim is a symlink to the binary.
+      "if": "unix",
+      "steps": [{
+        "args": "eval Deno.symlinkSync(Deno.execPath(),'./node')",
+        "output": ""
+      }, {
+        "commandName": "./node",
+        "args": "node_error_code.js",
+        "output": "node_error_code.out",
+        "exitCode": 1
+      }]
+    },
+    "own_props": {
+      // The `node` shim is a symlink to the binary.
+      "if": "unix",
+      "steps": [{
+        "args": "eval Deno.symlinkSync(Deno.execPath(),'./node')",
+        "output": ""
+      }, {
+        "commandName": "./node",
+        "args": "own_props.js",
+        "output": "own_props.out",
+        "exitCode": 1
+      }]
+    },
+    "eval_primitive": {
+      // The `node` shim is a symlink to the binary.
+      "if": "unix",
+      "steps": [{
+        "args": "eval Deno.symlinkSync(Deno.execPath(),'./node')",
+        "output": ""
+      }, {
+        "commandName": "./node",
+        "args": ["-e", "throw 'x'"],
+        "output": "eval_primitive.out",
+        "exitCode": 1
+      }]
+    },
+    "eval_object": {
+      // The `node` shim is a symlink to the binary.
+      "if": "unix",
+      "steps": [{
+        "args": "eval Deno.symlinkSync(Deno.execPath(),'./node')",
+        "output": ""
+      }, {
+        "commandName": "./node",
+        "args": ["-e", "throw {a:1}"],
+        "output": "eval_object.out",
+        "exitCode": 1
+      }]
+    },
+    "reject_code": {
+      // The `node` shim is a symlink to the binary.
+      "if": "unix",
+      "steps": [{
+        "args": "eval Deno.symlinkSync(Deno.execPath(),'./node')",
+        "output": ""
+      }, {
+        "commandName": "./node",
+        "args": "reject_code.js",
+        "output": "reject_code.out",
+        "exitCode": 1
+      }]
+    },
+    "timer": {
+      // The `node` shim is a symlink to the binary.
+      "if": "unix",
+      "steps": [{
+        "args": "eval Deno.symlinkSync(Deno.execPath(),'./node')",
+        "output": ""
+      }, {
+        "commandName": "./node",
+        "args": "timer.js",
+        "output": "timer.out",
+        "exitCode": 1
+      }]
+    },
+    "esm": {
+      // The `node` shim is a symlink to the binary.
+      "if": "unix",
+      "steps": [{
+        "args": "eval Deno.symlinkSync(Deno.execPath(),'./node')",
+        "output": ""
+      }, {
+        "commandName": "./node",
+        "args": "esm.mjs",
+        "output": "esm.out",
+        "exitCode": 1
+      }]
+    },
+    "cause": {
+      // The `node` shim is a symlink to the binary.
+      "if": "unix",
+      "steps": [{
+        "args": "eval Deno.symlinkSync(Deno.execPath(),'./node')",
+        "output": ""
+      }, {
+        "commandName": "./node",
+        "args": "cause.js",
+        "output": "cause.out",
+        "exitCode": 1
+      }]
+    },
+    "exit_event": {
+      // The `node` shim is a symlink to the binary.
+      "if": "unix",
+      "steps": [{
+        "args": "eval Deno.symlinkSync(Deno.execPath(),'./node')",
+        "output": ""
+      }, {
+        "commandName": "./node",
+        "args": "exit_event.js",
+        "output": "exit_event.out",
+        "exitCode": 1
+      }]
+    },
+    // A child process that runs Node.js args, without the arg0 shim. The
+    // report of `-e` points at the throw site, like in Node.js.
+    "child_eval": {
+      "args": "run -A child_eval.cjs",
+      "output": "child_eval.out"
+    },
+    // Plain Deno keeps its own error format.
+    "deno_mode": {
+      "args": "run own_props.js",
+      "output": "deno_mode.out",
+      "exitCode": 1
+    }
+  }
+}
