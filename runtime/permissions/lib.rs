@@ -4410,11 +4410,49 @@ impl PermissionsContainer {
       // un-resolved path. The /proc, /dev, /sys prefix guard inside
       // `check_special_file` still fires when the caller-supplied path is
       // itself a kernel-magic location (e.g. `/proc/self/root/...`).
+      self.check_no_follow_parent_special_file(&path, access_kind, api_name)?;
       SpecialFilePathQueryDescriptor::from_path_query_no_canonicalize(path)
     } else {
       self.descriptor_parser.parse_special_file_descriptor(path)?
     };
     self.check_special_file(special_path, access_kind, api_name)
+  }
+
+  /// A no-follow operation acts on the last path component itself, but the
+  /// kernel still resolves every parent component. Apply the special-file
+  /// guard to that resolved location too, so that a directory symlink cannot
+  /// lead into `/dev` past the guard.
+  fn check_no_follow_parent_special_file(
+    &self,
+    path: &PathQueryDescriptor,
+    access_kind: OpenAccessKind,
+    api_name: Option<&str>,
+  ) -> Result<(), PermissionCheckError> {
+    // The special files that this guard protects on Windows are device
+    // namespace paths, which are not reached through a directory symlink.
+    if !cfg!(unix) {
+      return Ok(());
+    }
+    let (Some(parent), Some(file_name)) =
+      (path.path.parent(), path.path.file_name())
+    else {
+      return Ok(());
+    };
+    let resolved_parent =
+      self.descriptor_parser.parse_special_file_descriptor(
+        PathQueryDescriptor::new_known_absolute(Cow::Borrowed(parent)),
+      )?;
+    if !resolved_parent.canonicalized || resolved_parent.path == parent {
+      // The guard on the named path covers this location.
+      return Ok(());
+    }
+    let resolved = SpecialFilePathQueryDescriptor {
+      path: Cow::Owned(resolved_parent.path.join(file_name)),
+      requested: path.requested.clone(),
+      canonicalized: true,
+    };
+    self.check_special_file(resolved, access_kind, api_name)?;
+    Ok(())
   }
 
   #[inline(always)]
