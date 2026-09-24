@@ -33,6 +33,19 @@
       "envs": { "NODE_OPTIONS": "--experimental-stream-iter --no-warnings" },
       "output": "require_with_flag.out"
     },
+    "builtin_modules_without_flag": {
+      "args": "run -A builtin_modules.mjs",
+      "output": "builtin_modules_without_flag.out"
+    },
+    "builtin_modules_with_flag": {
+      "args": "run -A builtin_modules.mjs",
+      "envs": { "NODE_OPTIONS": "--experimental-stream-iter --no-warnings" },
+      "output": "builtin_modules_with_flag.out"
+    },
+    "builtin_modules_worker_exec_argv": {
+      "args": "run -A builtin_modules_worker.mjs",
+      "output": "builtin_modules_worker_exec_argv.out"
+    },
     "shared_array_buffer_removed_with_flag": {
       "args": "run -A shared_array_buffer_removed.cjs",
       "envs": { "NODE_OPTIONS": "--experimental-stream-iter --no-warnings" },

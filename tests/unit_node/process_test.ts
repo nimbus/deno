@@ -464,6 +464,32 @@ Deno.test({
 });
 
 Deno.test({
+  name: "process.allowedNodeEnvironmentFlags has the parsed NODE_OPTIONS flags",
+  fn() {
+    // Each flag is parsed by internal_binding/node_options.ts and allowed by
+    // Node in NODE_OPTIONS and in Worker execArgv.
+    for (
+      const flag of [
+        "--async-context-frame",
+        "--no-async-context-frame",
+        "--experimental-eventsource",
+        "--experimental-print-required-tla",
+        "--experimental-require-module",
+        "--no-experimental-require-module",
+        "--require-module",
+        "--no-require-module",
+        "--experimental-sqlite",
+        "--no-experimental-sqlite",
+        "--experimental-stream-iter",
+        "--trace-require-module=warning",
+      ]
+    ) {
+      assert(process.allowedNodeEnvironmentFlags.has(flag), flag);
+    }
+  },
+});
+
+Deno.test({
   name: "process.env",
   fn() {
     assert(Object.prototype.hasOwnProperty.call(process, "env"));
