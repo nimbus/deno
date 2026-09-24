@@ -95,7 +95,6 @@ const {
   Symbol,
   SymbolAsyncDispose,
   TypedArrayPrototypeGetByteLength,
-  TypedArrayPrototypeGetByteOffset,
   Uint8ArrayPrototype,
 } = primordials;
 
@@ -429,9 +428,10 @@ export class FileHandle extends EventEmitter {
 
       pull: async (controller) => {
         const view = controller.byobRequest!.view! as Uint8Array;
+        // The read offset is relative to the view, so it is always 0.
         const { bytesRead } = await this.read(
           view,
-          TypedArrayPrototypeGetByteOffset(view),
+          0,
           TypedArrayPrototypeGetByteLength(view),
         );
 
