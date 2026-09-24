@@ -71,6 +71,7 @@ mod wasm;
 use dynamic::DynImportModEvaluate;
 use dynamic::DynImportState;
 use dynamic::PrepareLoadFuture;
+pub(crate) use ext_script::LazyLoadError;
 pub use ext_script::wrap_lazy_ext_script;
 use tracked::TrackedFutures;
 use tracked::TrackedVec;

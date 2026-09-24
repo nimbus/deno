@@ -10,15 +10,94 @@ use crate::ModuleLoadResponse;
 use crate::ModuleSource;
 use crate::ModuleSpecifier;
 use crate::error::CoreErrorKind;
-use crate::error::JsError;
 use crate::error::exception_to_err;
+use crate::error::throw_js_error_class;
 use crate::modules::LazyEsmModuleLoader;
 use crate::modules::ModuleCodeString;
+use crate::modules::ModuleError;
 use crate::modules::ModuleId;
 use crate::modules::ModuleLoader;
 use crate::modules::ModuleName;
 use crate::modules::RequestedModuleType;
 use crate::modules::loaders::ModuleLoadOptions;
+use crate::runtime::JsRealm;
+
+/// The failure of a lazy script or lazy ES module load.
+///
+/// A value that JavaScript throws while the script or module runs stays
+/// as is. Lazy loads nest (a lazy script loads its own lazy dependencies),
+/// so a failure must reach the outermost caller as the original value. A
+/// conversion to `CoreError` makes a new error object at each level, and
+/// each level adds the inner stack to the message.
+pub(crate) enum LazyLoadError {
+  /// JavaScript threw this value.
+  Thrown(v8::Global<v8::Value>),
+  /// The load failed outside JavaScript, or execution was terminated.
+  Core(CoreError),
+}
+
+impl LazyLoadError {
+  fn thrown(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Self {
+    Self::Thrown(v8::Global::new(scope, exception))
+  }
+
+  /// The value to throw into JavaScript, or to reject a promise with.
+  pub(crate) fn to_v8_error(
+    &self,
+    scope: &mut v8::PinScope,
+  ) -> v8::Global<v8::Value> {
+    match self {
+      Self::Thrown(exception) => exception.clone(),
+      Self::Core(error) => error.to_v8_error(scope),
+    }
+  }
+
+  /// Throw the error into `scope` without re-entering JavaScript.
+  pub(crate) fn throw(&self, scope: &mut v8::PinScope) {
+    match self {
+      Self::Thrown(exception) => {
+        let exception = v8::Local::new(scope, exception);
+        scope.throw_exception(exception);
+      }
+      Self::Core(error) => throw_js_error_class(scope, error),
+    }
+  }
+
+  /// Convert the error for a Rust caller of the public module API.
+  pub(crate) fn into_core_error(self, scope: &mut v8::PinScope) -> CoreError {
+    match self {
+      Self::Thrown(exception) => {
+        let exception = v8::Local::new(scope, exception);
+        CoreErrorKind::Js(exception_to_err(scope, exception, false, true))
+          .into_box()
+      }
+      Self::Core(error) => error,
+    }
+  }
+}
+
+impl std::fmt::Debug for LazyLoadError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Thrown(_) => f.write_str("LazyLoadError::Thrown"),
+      Self::Core(error) => {
+        f.debug_tuple("LazyLoadError::Core").field(error).finish()
+      }
+    }
+  }
+}
+
+impl From<CoreError> for LazyLoadError {
+  fn from(error: CoreError) -> Self {
+    Self::Core(error)
+  }
+}
+
+impl From<JsErrorBox> for LazyLoadError {
+  fn from(error: JsErrorBox) -> Self {
+    Self::Core(error.into())
+  }
+}
 
 fn residual_source_from_static_table(
   entries: &'static [(&'static str, &'static str)],
@@ -67,8 +146,9 @@ impl ModuleMap {
     module_specifier: &str,
     source_code: ModuleCodeString,
     code_cache_info: Option<CodeCacheInfo>,
-  ) -> Result<v8::Global<v8::Value>, CoreError> {
-    let specifier = ModuleSpecifier::parse(module_specifier)?;
+  ) -> Result<v8::Global<v8::Value>, LazyLoadError> {
+    let specifier =
+      ModuleSpecifier::parse(module_specifier).map_err(CoreError::from)?;
     let previous_loading_internal_modules =
       is_internal_scheme(specifier.scheme())
         .then(|| self.loading_internal_modules.replace(true));
@@ -90,7 +170,7 @@ impl ModuleMap {
     specifier: ModuleSpecifier,
     source_code: ModuleCodeString,
     code_cache_info: Option<CodeCacheInfo>,
-  ) -> Result<v8::Global<v8::Value>, CoreError> {
+  ) -> Result<v8::Global<v8::Value>, LazyLoadError> {
     let mod_id = self
       .new_es_module(
         scope,
@@ -100,12 +180,14 @@ impl ModuleMap {
         false,
         code_cache_info,
       )
-      .map_err(|e| e.into_error(scope, false, true))?;
+      .map_err(|e| match e {
+        ModuleError::Exception(exception) => LazyLoadError::Thrown(exception),
+        e => LazyLoadError::Core(e.into_error(scope, false, true)),
+      })?;
 
-    self.instantiate_module(scope, mod_id).map_err(|e| {
-      let exception = v8::Local::new(scope, e);
-      exception_to_err(scope, exception, false, true)
-    })?;
+    self
+      .instantiate_module(scope, mod_id)
+      .map_err(LazyLoadError::Thrown)?;
 
     let module_handle = self.get_handle(mod_id).unwrap();
     let module_local = v8::Local::<v8::Module>::new(scope, module_handle);
@@ -126,14 +208,7 @@ impl ModuleMap {
     if !self.evaluating_top_level.get() {
       scope.perform_microtask_checkpoint();
     }
-    let promise = v8::Local::<v8::Promise>::try_from(value).unwrap();
-    let result = promise.result(scope);
-    if !result.is_undefined() {
-      return Err(
-        CoreErrorKind::Js(exception_to_err(scope, result, false, true))
-          .into_box(),
-      );
-    }
+    Self::check_lazy_esm_evaluation(scope, value)?;
 
     let status = module_local.get_status();
     assert_eq!(status, v8::ModuleStatus::Evaluated);
@@ -249,6 +324,30 @@ impl ModuleMap {
     Ok(value)
   }
 
+  /// Check the evaluation promise of a lazy ES module. The caller gets a
+  /// rejection as a thrown error, so the promise is marked as handled and
+  /// is not also reported as an unhandled rejection.
+  fn check_lazy_esm_evaluation(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+  ) -> Result<(), LazyLoadError> {
+    let promise = v8::Local::<v8::Promise>::try_from(value).unwrap();
+    if promise.state() != v8::PromiseState::Rejected {
+      return Ok(());
+    }
+    promise.mark_as_handled();
+    let exception_state = JsRealm::exception_state_from_scope(scope);
+    // TODO: remove after crrev.com/c/7595271
+    exception_state.track_promise_rejection(
+      scope,
+      promise,
+      v8::PromiseRejectEvent::PromiseHandlerAddedAfterReject,
+      None,
+    );
+    let exception = promise.result(scope);
+    Err(LazyLoadError::thrown(scope, exception))
+  }
+
   /// Lazy load and evaluate an ES module. Only modules that have been added
   /// during build time can be executed (the ones stored in
   /// `ModuleMapData::lazy_esm_sources`), not _any, random_ module.
@@ -258,7 +357,7 @@ impl ModuleMap {
     &self,
     scope: &mut v8::PinScope,
     module_specifier: &str,
-  ) -> Result<v8::Global<v8::Value>, CoreError> {
+  ) -> Result<v8::Global<v8::Value>, LazyLoadError> {
     // Use existing module if already constructed.
     let cached_handle = {
       let data = self.data.borrow();
@@ -273,14 +372,7 @@ impl ModuleMap {
         if !self.evaluating_top_level.get() {
           scope.perform_microtask_checkpoint();
         }
-        let promise = v8::Local::<v8::Promise>::try_from(value).unwrap();
-        let result = promise.result(scope);
-        if !result.is_undefined() {
-          return Err(
-            CoreErrorKind::Js(exception_to_err(scope, result, false, true))
-              .into_box(),
-          );
-        }
+        Self::check_lazy_esm_evaluation(scope, value)?;
       }
       return Ok(v8::Global::new(scope, handle_local.get_module_namespace()));
     }
@@ -292,14 +384,7 @@ impl ModuleMap {
     if !self.evaluating_top_level.get() {
       scope.perform_microtask_checkpoint();
     }
-    let promise = v8::Local::<v8::Promise>::try_from(value).unwrap();
-    let result = promise.result(scope);
-    if !result.is_undefined() {
-      return Err(
-        CoreErrorKind::Js(exception_to_err(scope, result, false, true))
-          .into_box(),
-      );
-    }
+    Self::check_lazy_esm_evaluation(scope, value)?;
     Ok(v8::Global::new(scope, handle_local.get_module_namespace()))
   }
 
@@ -307,7 +392,7 @@ impl ModuleMap {
     &self,
     scope: &mut v8::PinScope,
     module_specifier: &str,
-  ) -> Result<v8::Global<v8::Value>, CoreError> {
+  ) -> Result<v8::Global<v8::Value>, LazyLoadError> {
     if !self.has_lazy_esm_source(module_specifier) {
       return Err(
         JsErrorBox::generic(format!(
@@ -356,10 +441,15 @@ impl ModuleMap {
       // `get_module_namespace` requires Instantiated+, so drive the module
       // forward synchronously here.
       if handle_local.get_status() == v8::ModuleStatus::Uninstantiated {
-        self.instantiate_module(scope, cached_id).map_err(|e| {
-          let exception = v8::Local::new(scope, e);
-          exception_to_err(scope, exception, false, true)
-        })?;
+        self
+          .instantiate_module(scope, cached_id)
+          .map_err(LazyLoadError::Thrown)?;
+      }
+      // A module that failed evaluation fails each later load with the same
+      // error, as an import of it does.
+      if handle_local.get_status() == v8::ModuleStatus::Errored {
+        let exception = handle_local.get_exception();
+        return Err(LazyLoadError::thrown(scope, exception));
       }
       // Returning the namespace before evaluation leaves `export const`
       // bindings in the temporal dead zone, so trigger evaluation here.
@@ -368,14 +458,7 @@ impl ModuleMap {
         if !self.evaluating_top_level.get() {
           scope.perform_microtask_checkpoint();
         }
-        let promise = v8::Local::<v8::Promise>::try_from(value).unwrap();
-        let result = promise.result(scope);
-        if !result.is_undefined() {
-          return Err(
-            CoreErrorKind::Js(exception_to_err(scope, result, false, true))
-              .into_box(),
-          );
-        }
+        Self::check_lazy_esm_evaluation(scope, value)?;
       }
       let module = v8::Global::new(scope, handle_local.get_module_namespace());
       return Ok(module);
@@ -385,7 +468,8 @@ impl ModuleMap {
     // parse/compile/evaluate cost at runtime.
     crate::modules::import_graph::record_lazy_esm(scope, module_specifier);
 
-    let specifier = ModuleSpecifier::parse(module_specifier)?;
+    let specifier =
+      ModuleSpecifier::parse(module_specifier).map_err(CoreError::from)?;
 
     let load_response = loader.load(
       &specifier,
@@ -552,7 +636,7 @@ impl ModuleMap {
     &self,
     scope: &mut v8::PinScope,
     specifier: &str,
-  ) -> Result<ModuleId, CoreError> {
+  ) -> Result<ModuleId, LazyLoadError> {
     let backing_specifier = {
       let data = self.data.borrow();
       let modules = data.synthetic_esm_modules.borrow();
@@ -604,7 +688,7 @@ impl ModuleMap {
         Some(v8::Local::new(scope, handle))
       }
       Err(e) => {
-        crate::error::throw_js_error_class(scope, &e);
+        e.throw(scope);
         None
       }
     }
@@ -621,7 +705,7 @@ impl ModuleMap {
     &self,
     scope: &mut v8::PinScope,
     specifier: &str,
-  ) -> Result<v8::Global<v8::Value>, CoreError> {
+  ) -> Result<v8::Global<v8::Value>, LazyLoadError> {
     crate::modules::import_graph::record_lazy_script(scope, specifier);
     let specifier_str = String::from(specifier);
     let data = self.data.borrow();
@@ -777,15 +861,19 @@ impl ModuleMap {
     ) {
       Some(f) => f,
       None => {
-        let exception = tc_scope.exception().unwrap();
-        let err = JsError::from_v8_exception(tc_scope, exception);
+        let error = match tc_scope.exception() {
+          Some(exception) if !tc_scope.has_terminated() => {
+            LazyLoadError::thrown(tc_scope, exception)
+          }
+          _ => CoreErrorKind::ExecutionTerminated.into_box().into(),
+        };
         self
           .data
           .borrow()
           .lazy_script_loading
           .borrow_mut()
           .remove(&ModuleName::from(specifier_str.clone()));
-        return Err(CoreErrorKind::Js(err).into_box());
+        return Err(error);
       }
     };
     // Store the freshly-compiled cache on the first run (cold), or if V8
@@ -821,15 +909,19 @@ impl ModuleMap {
       Some(value) => v8::Global::new(tc_scope, value),
       None => {
         assert!(tc_scope.has_caught());
-        let exception = tc_scope.exception().unwrap();
-        let err = JsError::from_v8_exception(tc_scope, exception);
+        let error = match tc_scope.exception() {
+          Some(exception) if !tc_scope.has_terminated() => {
+            LazyLoadError::thrown(tc_scope, exception)
+          }
+          _ => CoreErrorKind::ExecutionTerminated.into_box().into(),
+        };
         self
           .data
           .borrow()
           .lazy_script_loading
           .borrow_mut()
           .remove(&ModuleName::from(specifier_str.clone()));
-        return Err(CoreErrorKind::Js(err).into_box());
+        return Err(error);
       }
     };
 

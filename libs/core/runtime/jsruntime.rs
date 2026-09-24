@@ -1797,12 +1797,14 @@ impl JsRuntime {
 
     for file_source in &BUILTIN_ES_MODULES {
       mark_as_loaded_from_fs_during_snapshot(files_loaded, &file_source.code);
-      module_map.lazy_load_es_module_with_code(
-        scope,
-        file_source.specifier,
-        file_source.load()?,
-        None,
-      )?;
+      module_map
+        .lazy_load_es_module_with_code(
+          scope,
+          file_source.specifier,
+          file_source.load()?,
+          None,
+        )
+        .map_err(|e| e.into_core_error(scope))?;
     }
 
     Ok(())
