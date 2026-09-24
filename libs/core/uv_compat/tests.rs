@@ -4050,3 +4050,134 @@ async fn tcp_eof_after_partial_read_is_delivered_next_tick() {
   })
   .await;
 }
+
+// ========== TCP: a peer's FIN does not fail later writes ==========
+
+/// A peer that shuts down its write side (FIN) half-closes the connection.
+/// libuv reports a write failure only when `write(2)` fails, so a write to
+/// that peer succeeds and the peer receives the data. This is also the state
+/// of a socket that a process receives over IPC after the sender read the
+/// peer's data: this side has not read anything, and the read side can
+/// report EOF.
+#[tokio::test(flavor = "current_thread")]
+async fn tcp_write_after_peer_half_close_succeeds() {
+  run_test(async |runtime, uv_loop| {
+    // Peer: a blocking std listener that half-closes at once, then reads
+    // until this side closes.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (half_closed_tx, half_closed_rx) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || {
+      use std::io::Read;
+      let (mut sock, _) = listener.accept().unwrap();
+      sock.shutdown(std::net::Shutdown::Write).unwrap();
+      half_closed_tx.send(()).unwrap();
+      let mut received = Vec::new();
+      sock.read_to_end(&mut received).unwrap();
+      received
+    });
+
+    let connected = Rc::new(Cell::new(false));
+    let connected_ptr = Rc::into_raw(connected.clone());
+
+    unsafe extern "C" fn on_connect(req: *mut uv_connect_t, status: i32) {
+      assert_eq!(status, 0);
+      let connected = unsafe { Rc::from_raw((*req).data as *const Cell<bool>) };
+      connected.set(true);
+      let _ = Rc::into_raw(connected);
+    }
+
+    let mut client = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+    let client_ptr = client.as_mut_ptr();
+    let mut connect_req = std::mem::MaybeUninit::<uv_connect_t>::uninit();
+    let connect_req_ptr = connect_req.as_mut_ptr();
+
+    unsafe {
+      uv_tcp_init(uv_loop, client_ptr);
+      (*connect_req_ptr).data = connected_ptr as *mut c_void;
+
+      let mut addr = std::mem::MaybeUninit::<sockaddr_in>::uninit();
+      let ip = std::ffi::CString::new("127.0.0.1").unwrap();
+      uv_ip4_addr(ip.as_ptr(), port as i32, addr.as_mut_ptr());
+      assert_ok(uv_tcp_connect(
+        connect_req_ptr,
+        client_ptr,
+        addr.as_ptr() as *const c_void,
+        Some(on_connect),
+      ));
+    }
+
+    for _ in 0..100 {
+      tick(runtime).await;
+      if connected.get() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(connected.get(), "client should have connected");
+
+    // Wait until the peer's FIN is sent, then give the loop time to see
+    // the read side become ready. This side never starts reading.
+    half_closed_rx
+      .recv_timeout(std::time::Duration::from_secs(10))
+      .expect("peer should half-close");
+    for _ in 0..10 {
+      tick(runtime).await;
+      tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+
+    let write_status = Rc::new(Cell::new(None::<i32>));
+    let write_status_ptr = Rc::into_raw(write_status.clone());
+
+    unsafe extern "C" fn write_cb(req: *mut uv_write_t, status: i32) {
+      let write_status =
+        unsafe { Rc::from_raw((*req).data as *const Cell<Option<i32>>) };
+      write_status.set(Some(status));
+      let _ = Rc::into_raw(write_status);
+    }
+
+    let write_data = b"hello".to_vec();
+    let mut write_req = std::mem::MaybeUninit::<uv_write_t>::uninit();
+    let write_req_ptr = write_req.as_mut_ptr();
+
+    unsafe {
+      (*write_req_ptr).data = write_status_ptr as *mut c_void;
+      let buf = uv_buf_t {
+        base: write_data.as_ptr() as *mut _,
+        len: write_data.len(),
+      };
+      assert_ok(uv_write(
+        write_req_ptr,
+        client_ptr as *mut uv_stream_t,
+        &buf,
+        1,
+        Some(write_cb),
+      ));
+    }
+
+    for _ in 0..100 {
+      tick(runtime).await;
+      if write_status.get().is_some() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert_eq!(
+      write_status.get(),
+      Some(0),
+      "a write after the peer's FIN must succeed"
+    );
+
+    unsafe {
+      uv_close(client_ptr as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+    assert_eq!(peer.join().unwrap(), b"hello");
+
+    unsafe {
+      Rc::from_raw(connected_ptr);
+      Rc::from_raw(write_status_ptr);
+    }
+  })
+  .await;
+}
