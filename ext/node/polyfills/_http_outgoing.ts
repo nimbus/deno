@@ -4,6 +4,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 import { core, primordials } from "ext:core/mod.js";
+import { op_node_http_end_finishes_with_final_chunk } from "ext:core/ops";
 const {
   Array,
   ArrayIsArray,
@@ -578,6 +579,8 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
         encoding = null;
       }
 
+      let finishCallback = null;
+
       if (chunk) {
         if (this.finished) {
           _onError(
@@ -596,7 +599,20 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
           this.socket.cork();
         }
 
-        write_(this, chunk, encoding, null, true);
+        if (
+          op_node_http_end_finishes_with_final_chunk() &&
+          maybePrepareFinalChunk(this, chunk, encoding)
+        ) {
+          // One final write finishes the message, so attach 'finish' to it
+          // and skip the separate send.
+          if (typeof callback === "function") {
+            queueEndCallback(this, callback);
+            callback = undefined;
+          }
+          finishCallback = FunctionPrototypeBind(onFinish, undefined, this);
+        }
+
+        write_(this, chunk, encoding, finishCallback, true);
       } else if (this.finished) {
         if (typeof callback === "function") {
           queueEndCallback(this, callback);
@@ -625,14 +641,21 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
         );
       }
 
-      const finish = FunctionPrototypeBind(onFinish, undefined, this);
+      if (finishCallback === null) {
+        // Send the last data and schedule 'finish'.
+        finishCallback = FunctionPrototypeBind(onFinish, undefined, this);
 
-      if (this._hasBody && this.chunkedEncoding) {
-        this._send("0\r\n" + this._trailer + "\r\n", "latin1", finish);
-      } else if (!this._headerSent || this.writableLength || chunk) {
-        this._send("", "latin1", finish);
-      } else {
-        (globalThis as any).process.nextTick(finish);
+        if (this._hasBody && this.chunkedEncoding) {
+          this._send(
+            "0\r\n" + this._trailer + "\r\n",
+            "latin1",
+            finishCallback,
+          );
+        } else if (!this._headerSent || this.writableLength || chunk) {
+          this._send("", "latin1", finishCallback);
+        } else {
+          (globalThis as any).process.nextTick(finishCallback);
+        }
       }
 
       if (this.socket) {
@@ -1478,6 +1501,32 @@ function write_(
   }
 
   return ret;
+}
+
+// If this last write can be the final chunk, prepare the message for it and
+// return true. Otherwise return false, and end() sends the last data
+// separately (nodejs/node#65466).
+function maybePrepareFinalChunk(
+  msg: any,
+  chunk: any,
+  encoding: string | null,
+): boolean {
+  if (typeof chunk !== "string" && !isUint8Array(chunk)) {
+    return false;
+  }
+
+  if (msg.destroyed || msg.strictContentLength) {
+    return false;
+  }
+
+  if (!msg._header) {
+    msg._contentLength = typeof chunk === "string"
+      ? Buffer.byteLength(chunk, encoding)
+      : TypedArrayPrototypeGetByteLength(chunk);
+    msg._implicitHeader();
+  }
+
+  return !!msg._header && msg._hasBody && !msg.chunkedEncoding;
 }
 
 function connectionCorkNT(conn: any) {

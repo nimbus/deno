@@ -227,6 +227,24 @@ impl VtControlStripPolicy {
   }
 }
 
+/// How `OutgoingMessage#end()` with a final chunk delivers `'finish'`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HttpOutgoingEndPolicy {
+  /// Match Node.js 24.20, 26.7, and earlier. `end(data)` writes the chunk
+  /// and then sends a separate empty write that carries `'finish'`.
+  SeparateFinishWrite,
+  /// Match Node.js 24.21, 26.8, and later (nodejs/node#65466). When the
+  /// chunk can be the final write, `'finish'` rides on that write and no
+  /// empty write follows.
+  FinishWithFinalChunk,
+}
+
+impl HttpOutgoingEndPolicy {
+  fn finishes_with_final_chunk(self) -> bool {
+    matches!(self, Self::FinishWithFinalChunk)
+  }
+}
+
 #[cfg(test)]
 mod vt_control_strip_policy_tests {
   use super::VtControlStripPolicy;
@@ -237,6 +255,21 @@ mod vt_control_strip_policy_tests {
       !VtControlStripPolicy::RestrictedOscPayload.strips_any_osc_payload()
     );
     assert!(VtControlStripPolicy::AnyOscPayload.strips_any_osc_payload());
+  }
+}
+
+#[cfg(test)]
+mod http_outgoing_end_policy_tests {
+  use super::HttpOutgoingEndPolicy;
+
+  #[test]
+  fn finishes_with_final_chunk_only_for_the_current_contract() {
+    assert!(
+      !HttpOutgoingEndPolicy::SeparateFinishWrite.finishes_with_final_chunk()
+    );
+    assert!(
+      HttpOutgoingEndPolicy::FinishWithFinalChunk.finishes_with_final_chunk()
+    );
   }
 }
 
@@ -511,6 +544,15 @@ fn op_node_strip_vt_any_osc_payload(state: &OpState) -> bool {
     .copied()
     .unwrap_or(VtControlStripPolicy::RestrictedOscPayload)
     .strips_any_osc_payload()
+}
+
+#[op2(fast)]
+fn op_node_http_end_finishes_with_final_chunk(state: &OpState) -> bool {
+  state
+    .try_borrow::<HttpOutgoingEndPolicy>()
+    .copied()
+    .unwrap_or(HttpOutgoingEndPolicy::SeparateFinishWrite)
+    .finishes_with_final_chunk()
 }
 
 #[op2(fast)]
@@ -792,6 +834,7 @@ deno_core::extension!(deno_node,
     op_node_buffer_string_write_checks_before_truncation,
     op_node_buffer_string_write_rejects_long_length,
     op_node_strip_vt_any_osc_payload,
+    op_node_http_end_finishes_with_final_chunk,
     op_node_assertion_error_uses_myers_diff,
     op_node_deep_equal_stops_at_either_cycle,
     op_node_assert_class_api_exposed,
@@ -1290,6 +1333,7 @@ deno_core::extension!(deno_node,
     deep_equal_cycle_policy: DeepEqualCyclePolicy,
     assert_api_policy: AssertApiPolicy,
     vt_control_strip_policy: VtControlStripPolicy,
+    http_outgoing_end_policy: HttpOutgoingEndPolicy,
   },
   state = |state, options| {
     state.put(options.fs.clone());
@@ -1309,6 +1353,7 @@ deno_core::extension!(deno_node,
     state.put(options.deep_equal_cycle_policy);
     state.put(options.assert_api_policy);
     state.put(options.vt_control_strip_policy);
+    state.put(options.http_outgoing_end_policy);
     state.put(ops::module_hooks::LoaderHookRegistry::default());
 
     if let Some(init) = &options.maybe_init {

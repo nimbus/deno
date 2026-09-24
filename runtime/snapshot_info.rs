@@ -77,6 +77,7 @@ pub fn get_extensions_in_snapshot() -> Vec<Extension> {
       deno_node::DeepEqualCyclePolicy::EitherSide,
       deno_node::AssertApiPolicy::AssertClassAndCallTracker,
       deno_node::VtControlStripPolicy::RestrictedOscPayload,
+      deno_node::HttpOutgoingEndPolicy::SeparateFinishWrite,
     ),
     ops::runtime::deno_runtime::init("deno:runtime".parse().unwrap()),
     ops::worker_host::deno_worker_host::init(
