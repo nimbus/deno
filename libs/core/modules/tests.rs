@@ -897,6 +897,141 @@ fn test_lazy_loaded_script_not_found() {
   );
 }
 
+/// A lazy script that throws fails with the original error object, also
+/// when another lazy script loads it. Each nested load used to make a new
+/// error, and each level added the inner stack to the message.
+#[test]
+fn test_lazy_loaded_script_rethrows_original_error() {
+  deno_core::extension!(
+    test_ext,
+    lazy_loaded_js = [
+      dir "modules/testdata",
+      "lazy_script_throw.js",
+      "lazy_script_throw_dep.js",
+      "lazy_script_syntax_error.js",
+    ]
+  );
+
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![test_ext::init()],
+    ..Default::default()
+  });
+
+  runtime
+    .execute_script(
+      "test_lazy_script_throw.js",
+      r#"
+      let caught;
+      try {
+        Deno.core.loadExtScript("ext:test_ext/lazy_script_throw_dep.js");
+      } catch (e) {
+        caught = e;
+      }
+      if (caught !== globalThis.lazyScriptError) {
+        throw new Error(`expected the original error, got ${caught?.message}`);
+      }
+      if (
+        !(caught instanceof RangeError) ||
+        caught.message !== "lazy script failure" ||
+        caught.code !== "ERR_TEST_LAZY_SCRIPT"
+      ) {
+        throw new Error(`unexpected error: ${caught}`);
+      }
+
+      caught = undefined;
+      try {
+        Deno.core.loadExtScript("ext:test_ext/lazy_script_syntax_error.js");
+      } catch (e) {
+        caught = e;
+      }
+      if (
+        !(caught instanceof SyntaxError) ||
+        caught.message !== "Identifier 'value' has already been declared"
+      ) {
+        throw new Error(`unexpected error: ${caught}`);
+      }
+      "#,
+    )
+    .unwrap();
+}
+
+/// A lazy ES module or a `synthetic_esm` backing script that throws fails
+/// with the original error object through `createLazyLoader` and through a
+/// dynamic import.
+#[tokio::test]
+async fn test_lazy_loaded_esm_rethrows_original_error() {
+  deno_core::extension!(
+    test_ext,
+    lazy_loaded_esm = [
+      dir "modules/testdata",
+      "custom:lazy_throw" = "lazy_loaded_throw.js",
+    ],
+    lazy_loaded_js = [dir "modules/testdata", "synthetic_esm_throw.js"],
+    synthetic_esm = [
+      "custom:synthetic_throw" = "ext:test_ext/synthetic_esm_throw.js",
+    ],
+  );
+
+  let main = ModuleSpecifier::parse("file:///main.js").unwrap();
+  let loader = Rc::new(StaticModuleLoader::with(
+    main.clone(),
+    crate::ascii_str_include!("testdata/lazy_load_throw_main.js"),
+  ));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![test_ext::init()],
+    module_loader: Some(loader),
+    ..Default::default()
+  });
+
+  let mod_id = runtime.load_main_es_module(&main).await.unwrap();
+  let result = runtime.mod_evaluate(mod_id);
+  runtime.run_event_loop(Default::default()).await.unwrap();
+  result.await.unwrap();
+}
+
+/// A static import of a `synthetic_esm` module whose backing script throws
+/// fails with the original error, not with a copy that repeats the message.
+#[tokio::test]
+async fn test_synthetic_esm_static_import_rethrows_original_error() {
+  deno_core::extension!(
+    test_ext,
+    lazy_loaded_js = [dir "modules/testdata", "synthetic_esm_throw.js"],
+    synthetic_esm = [
+      "custom:synthetic_throw" = "ext:test_ext/synthetic_esm_throw.js",
+    ],
+  );
+
+  let main = ModuleSpecifier::parse("file:///main.js").unwrap();
+  let loader = Rc::new(StaticModuleLoader::with(
+    main.clone(),
+    ascii_str!(r#"import { value } from "custom:synthetic_throw";"#),
+  ));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![test_ext::init()],
+    module_loader: Some(loader),
+    ..Default::default()
+  });
+
+  let err = match runtime.load_main_es_module(&main).await {
+    Ok(mod_id) => {
+      let result = runtime.mod_evaluate(mod_id);
+      runtime.run_event_loop(Default::default()).await.unwrap();
+      result.await.unwrap_err()
+    }
+    Err(err) => err,
+  };
+  let message = err.to_string();
+  assert!(
+    message.starts_with("RangeError: synthetic backing failure\n"),
+    "unexpected error: {message}"
+  );
+  assert_eq!(
+    message.matches("synthetic backing failure").count(),
+    1,
+    "unexpected error: {message}"
+  );
+}
+
 #[test]
 fn test_json_text_bytes_modules() {
   let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::default()));

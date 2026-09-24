@@ -40,6 +40,7 @@ pub use loaders::ModuleLoaderError;
 pub use loaders::ModuleResolveResponse;
 pub use loaders::NoopModuleLoader;
 pub use loaders::StaticModuleLoader;
+pub(crate) use map::LazyLoadError;
 pub(crate) use map::ModuleMap;
 pub(crate) use map::script_origin;
 pub(crate) use map::synthetic_module_evaluation_steps;
