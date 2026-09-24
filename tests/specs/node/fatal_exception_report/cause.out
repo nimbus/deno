@@ -1,0 +1,13 @@
+[WILDLINE]/cause.js:2
+throw new Error("outer", { cause: inner });
+^
+
+Error: outer
+    at [WILDCARD]
+    ... [WILDCARD] lines matching cause stack trace ...
+    at [WILDCARD] {
+  [cause]: Error: inner
+      at [WILDCARD]
+}
+
+Node.js v[WILDLINE]

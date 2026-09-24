@@ -1,0 +1,4 @@
+error: Uncaught (in promise) Error: with props
+const e = new Error("with props");
+          ^
+    at file:///[WILDLINE]/own_props.js:1:11

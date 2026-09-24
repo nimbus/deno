@@ -1790,6 +1790,7 @@ pub async fn run_with_options(
       std::env::var("DENO_DISABLE_OFFSCREEN_CANVAS").as_deref(),
       Ok("1") | Ok("true")
     ),
+    node_fatal_report: false,
   };
   let worker_factory = LibMainWorkerFactory::new(
     blob_store,

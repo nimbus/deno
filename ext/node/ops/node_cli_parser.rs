@@ -51,6 +51,9 @@ pub struct TranslatedArgs {
   /// Comma-separated trace event categories from --trace-event-categories,
   /// to be propagated via DENO_NODE_TRACE_EVENT_CATEGORIES.
   pub trace_event_categories: Option<String>,
+  /// Whether the child process runs as a Node.js entry, to be propagated via
+  /// DENO_NODE_ENTRY.
+  pub node_entry: bool,
 }
 
 /// Translate parsed Node.js CLI arguments to Deno CLI arguments.
@@ -92,6 +95,7 @@ fn translate_to_deno_args(
     use_openssl_ca,
     needs_npm_process_state: script_in_npm_package,
     trace_event_categories,
+    node_entry: result.node_entry,
   }
 }
 
@@ -120,6 +124,7 @@ pub fn op_node_translate_cli_args(
       use_openssl_ca: false,
       needs_npm_process_state: script_in_npm_package,
       trace_event_categories: None,
+      node_entry: true,
     });
   }
 
