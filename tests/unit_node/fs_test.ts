@@ -2179,3 +2179,84 @@ Deno.test(
     }
   },
 );
+
+// With scoped permissions, open used to check and open the resolved symlink
+// target. O_NOFOLLOW and O_SYMLINK then acted on the target, not the link.
+Deno.test(
+  "[node/fs] openSync with O_NOFOLLOW fails on a symlink",
+  {
+    permissions: { read: true, write: true },
+    ignore: Deno.build.os === "windows",
+  },
+  () => {
+    const dir = Deno.makeTempDirSync();
+    try {
+      const target = join(dir, "target");
+      const link = join(dir, "link");
+      writeFileSync(target, "data");
+      symlinkSync(target, link);
+      // deno-lint-ignore no-explicit-any
+      const err: any = assertThrows(() =>
+        openSync(link, constants.O_RDONLY | constants.O_NOFOLLOW)
+      );
+      assertEquals(err.code, "ELOOP");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+Deno.test(
+  "[node/fs] openSync with O_SYMLINK opens the symlink itself",
+  {
+    permissions: { read: true, write: true },
+    ignore: Deno.build.os !== "darwin",
+  },
+  () => {
+    const dir = Deno.makeTempDirSync();
+    try {
+      const target = join(dir, "target");
+      const link = join(dir, "link");
+      writeFileSync(target, "data");
+      chmodSync(target, 0o644);
+      symlinkSync(target, link);
+      const fd = openSync(link, constants.O_WRONLY | constants.O_SYMLINK);
+      try {
+        fchmodSync(fd, 0o700);
+      } finally {
+        closeSync(fd);
+      }
+      assertEquals(lstatSync(link).mode & 0o777, 0o700);
+      assertEquals(statSync(target).mode & 0o777, 0o644);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+Deno.test(
+  "[node/fs] openSync with O_NOFOLLOW keeps the special file guard",
+  {
+    permissions: { read: true, write: true },
+    ignore: Deno.build.os !== "linux" && Deno.build.os !== "darwin",
+  },
+  () => {
+    const dir = Deno.makeTempDirSync();
+    try {
+      // The kernel resolves the parent directory symlink, so the path names
+      // /dev/tty, which is never writable without --allow-all.
+      const devLink = join(dir, "dev_link");
+      symlinkSync("/dev", devLink);
+      assertThrows(
+        () =>
+          openSync(
+            join(devLink, "tty"),
+            constants.O_WRONLY | constants.O_NOFOLLOW,
+          ),
+        Deno.errors.NotCapable,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

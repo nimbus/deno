@@ -79,11 +79,32 @@ impl OpenOptions {
       || self.create_new
       || self.truncate;
 
-    match (read, write) {
-      (true, true) => OpenAccessKind::ReadWrite,
-      (false, true) => OpenAccessKind::Write,
-      (true, false) | (false, false) => OpenAccessKind::Read,
+    match (read, write, self.no_follow()) {
+      (true, true, false) => OpenAccessKind::ReadWrite,
+      (true, true, true) => OpenAccessKind::ReadWriteNoFollow,
+      (false, true, false) => OpenAccessKind::Write,
+      (false, true, true) => OpenAccessKind::WriteNoFollow,
+      (true, false, false) | (false, false, false) => OpenAccessKind::Read,
+      (true, false, true) | (false, false, true) => {
+        OpenAccessKind::ReadNoFollow
+      }
     }
+  }
+
+  /// Whether the custom flags stop the open at a symlink in the last path
+  /// component. `O_NOFOLLOW` fails on the link, and macOS `O_SYMLINK` opens
+  /// the link itself. The permission check must then use the named path, not
+  /// the link target.
+  fn no_follow(&self) -> bool {
+    #[cfg(unix)]
+    if let Some(flags) = self.custom_flags {
+      #[cfg(target_os = "macos")]
+      let mask = libc::O_NOFOLLOW | libc::O_SYMLINK;
+      #[cfg(not(target_os = "macos"))]
+      let mask = libc::O_NOFOLLOW;
+      return flags & mask != 0;
+    }
+    false
   }
 }
 
@@ -175,6 +196,33 @@ mod tests {
     assert_eq!(
       OpenOptions::write(false, false, false, None).access_kind(),
       OpenAccessKind::Write
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn nofollow_flag_selects_no_follow_access() {
+    assert_eq!(
+      OpenOptions::from(libc::O_RDONLY | libc::O_NOFOLLOW).access_kind(),
+      OpenAccessKind::ReadNoFollow
+    );
+    assert_eq!(
+      OpenOptions::from(libc::O_WRONLY | libc::O_NOFOLLOW).access_kind(),
+      OpenAccessKind::WriteNoFollow
+    );
+    assert_eq!(
+      OpenOptions::from(libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW)
+        .access_kind(),
+      OpenAccessKind::ReadWriteNoFollow
+    );
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn symlink_flag_selects_no_follow_access() {
+    assert_eq!(
+      OpenOptions::from(libc::O_WRONLY | libc::O_SYMLINK).access_kind(),
+      OpenAccessKind::WriteNoFollow
     );
   }
 }

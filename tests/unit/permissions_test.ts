@@ -266,3 +266,22 @@ Deno.test(
     }, Deno.errors.NotCapable);
   },
 );
+
+Deno.test(
+  { permissions: { read: true, write: true } },
+  function permissionNoFollowGuardsSpecialFileThroughDirSymlink() {
+    if (Deno.build.os !== "linux" && Deno.build.os !== "darwin") {
+      return;
+    }
+    // lstat does not follow the last component, but the kernel resolves
+    // the parent directory symlink, so the path names /dev/stdin.
+    const dir = Deno.makeTempDirSync();
+    const devLink = dir + "/dev_link";
+    Deno.symlinkSync("/dev", devLink);
+    assertThrows(
+      () => Deno.lstatSync(devLink + "/stdin"),
+      Deno.errors.NotCapable,
+    );
+    Deno.removeSync(dir, { recursive: true });
+  },
+);
