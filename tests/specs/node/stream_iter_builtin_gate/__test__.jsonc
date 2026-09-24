@@ -32,6 +32,11 @@
       "args": "run -A require.cjs",
       "envs": { "NODE_OPTIONS": "--experimental-stream-iter --no-warnings" },
       "output": "require_with_flag.out"
+    },
+    "shared_array_buffer_removed_with_flag": {
+      "args": "run -A shared_array_buffer_removed.cjs",
+      "envs": { "NODE_OPTIONS": "--experimental-stream-iter --no-warnings" },
+      "output": "shared_array_buffer_removed.out"
     }
   }
 }

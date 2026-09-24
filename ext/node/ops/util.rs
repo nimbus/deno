@@ -83,6 +83,41 @@ pub fn op_node_view_has_buffer(buffer: v8::Local<v8::ArrayBufferView>) -> bool {
   buffer.has_buffer()
 }
 
+/// Returns the intrinsic `SharedArrayBuffer.prototype.growable` getter.
+///
+/// The getter comes from the prototype of a new SharedArrayBuffer, not from
+/// `globalThis.SharedArrayBuffer`, so it stays available when an embedder
+/// removes that global. This mirrors Node's `getSharedArrayBufferGrowable`
+/// util binding.
+#[op2]
+pub fn op_node_get_shared_array_buffer_growable<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
+  let error = || {
+    JsErrorBox::type_error(
+      "Failed to get the SharedArrayBuffer.prototype.growable getter",
+    )
+  };
+  let buffer = v8::SharedArrayBuffer::new(scope, 0).ok_or_else(error)?;
+  let prototype: v8::Local<v8::Object> = buffer
+    .get_prototype(scope)
+    .ok_or_else(error)?
+    .try_into()
+    .map_err(|_| error())?;
+  let key = v8::String::new(scope, "growable").ok_or_else(error)?;
+  let descriptor: v8::Local<v8::Object> = prototype
+    .get_own_property_descriptor(scope, key.into())
+    .ok_or_else(error)?
+    .try_into()
+    .map_err(|_| error())?;
+  let key = v8::String::new(scope, "get").ok_or_else(error)?;
+  let getter = descriptor.get(scope, key.into()).ok_or_else(error)?;
+  if !getter.is_function() {
+    return Err(error());
+  }
+  Ok(getter)
+}
+
 /// Checks if the current call site is from a dependency package.
 #[op2(fast)]
 pub fn op_node_call_is_from_dependency<
