@@ -2511,6 +2511,139 @@ async fn import_meta_resolve() {
   b.await.unwrap().unwrap();
 }
 
+async fn run_import_meta_resolve_module(
+  loader: Rc<dyn ModuleLoader>,
+  source: &'static str,
+) {
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    module_loader: Some(loader),
+    ..Default::default()
+  });
+  let spec = ModuleSpecifier::parse("file:///test.js").unwrap();
+  let id = runtime
+    .load_main_es_module_from_code(&spec, source)
+    .await
+    .unwrap();
+  let evaluate = runtime.mod_evaluate(id);
+  runtime.run_event_loop(Default::default()).await.unwrap();
+  evaluate.await.unwrap();
+}
+
+#[tokio::test]
+async fn import_meta_resolve_throws_the_loader_error() {
+  #[derive(Debug, thiserror::Error, deno_error::JsError)]
+  #[error("Cannot find package 'nope' imported from /test.js")]
+  #[class(generic)]
+  #[property("code" = "ERR_MODULE_NOT_FOUND")]
+  struct PackageNotFoundError;
+
+  struct Loader;
+
+  impl ModuleLoader for Loader {
+    fn resolve(
+      &self,
+      specifier: &str,
+      referrer: &str,
+      _kind: ResolutionKind,
+    ) -> ModuleResolveResponse {
+      resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
+    }
+
+    fn import_meta_resolve(
+      &self,
+      _specifier: &str,
+      _referrer: &str,
+    ) -> Result<ModuleSpecifier, ModuleLoaderError> {
+      Err(JsErrorBox::from_err(PackageNotFoundError))
+    }
+
+    fn load(
+      &self,
+      _module_specifier: &ModuleSpecifier,
+      _maybe_referrer: Option<&ModuleLoadReferrer>,
+      _options: ModuleLoadOptions,
+    ) -> ModuleLoadResponse {
+      unreachable!();
+    }
+  }
+
+  // A loader that overrides `import_meta_resolve` owns the thrown error: its
+  // class, message, and additional properties reach JavaScript unchanged.
+  run_import_meta_resolve_module(
+    Rc::new(Loader),
+    r#"
+      let caught;
+      try {
+        import.meta.resolve("nope");
+      } catch (e) {
+        caught = e;
+      }
+      if (!caught) throw new Error("expected a throw");
+      if (caught instanceof TypeError) throw new Error("class was coerced");
+      if (!(caught instanceof Error)) throw new Error("not an Error");
+      if (caught.code !== "ERR_MODULE_NOT_FOUND") {
+        throw new Error(`code: ${caught.code}`);
+      }
+      if (caught.message !== "Cannot find package 'nope' imported from /test.js") {
+        throw new Error(`message: ${caught.message}`);
+      }
+    "#,
+  )
+  .await;
+}
+
+#[tokio::test]
+async fn import_meta_resolve_default_throws_type_error() {
+  struct Loader;
+
+  impl ModuleLoader for Loader {
+    fn resolve(
+      &self,
+      specifier: &str,
+      referrer: &str,
+      _kind: ResolutionKind,
+    ) -> ModuleResolveResponse {
+      if specifier == "boom" {
+        return Err(JsErrorBox::new("URIError", "boom is not a URL"));
+      }
+      resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
+    }
+
+    fn load(
+      &self,
+      _module_specifier: &ModuleSpecifier,
+      _maybe_referrer: Option<&ModuleLoadReferrer>,
+      _options: ModuleLoadOptions,
+    ) -> ModuleLoadResponse {
+      unreachable!();
+    }
+  }
+
+  // The default `import_meta_resolve` keeps the HTML spec `TypeError`,
+  // whatever the class of the `resolve` error is.
+  run_import_meta_resolve_module(
+    Rc::new(Loader),
+    r#"
+      if (import.meta.resolve("./mod.js") !== "file:///mod.js") {
+        throw new Error("resolve");
+      }
+      let caught;
+      try {
+        import.meta.resolve("boom");
+      } catch (e) {
+        caught = e;
+      }
+      if (!(caught instanceof TypeError)) {
+        throw new Error(`class: ${caught?.constructor?.name}`);
+      }
+      if (caught.message !== "boom is not a URL") {
+        throw new Error(`message: ${caught.message}`);
+      }
+    "#,
+  )
+  .await;
+}
+
 #[test]
 fn builtin_core_module() {
   let main_specifier = resolve_url("ext:///main_module.js").unwrap();
