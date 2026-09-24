@@ -17,6 +17,7 @@ use crate::error::CoreError;
 use crate::error::JsError;
 use crate::error::is_instance_of_error;
 use crate::io::ResourceError;
+use crate::modules::LazyLoadError;
 use crate::modules::script_origin;
 use crate::op2;
 use crate::ops_builtin::WasmStreamingResource;
@@ -193,11 +194,12 @@ pub fn op_lazy_load_esm(
   // route them through their own sync-load path. `createLazyLoader` calls
   // this op from JS land for builtins it wants to keep deferred (e.g.
   // `node:worker_threads.ts` uses `createLazyLoader("node:url")`).
-  if module_map_rc.has_synthetic_esm_module(&module_specifier) {
-    return module_map_rc
-      .lazy_load_synthetic_esm_module(scope, &module_specifier);
-  }
-  module_map_rc.lazy_load_esm_module(scope, &module_specifier)
+  let result = if module_map_rc.has_synthetic_esm_module(&module_specifier) {
+    module_map_rc.lazy_load_synthetic_esm_module(scope, &module_specifier)
+  } else {
+    module_map_rc.lazy_load_esm_module(scope, &module_specifier)
+  };
+  lazy_load_op_result(scope, result)
 }
 
 #[op2(reentrant)]
@@ -209,7 +211,27 @@ pub fn op_load_ext_script(
   // this script captures the fast op overloads. No-op after the first call.
   crate::runtime::bindings::ensure_fast_ops_upgraded(scope);
   let module_map_rc = JsRealm::module_map_from(scope);
-  module_map_rc.load_ext_script(scope, &specifier)
+  let result = module_map_rc.load_ext_script(scope, &specifier);
+  lazy_load_op_result(scope, result)
+}
+
+/// Rethrow a value that a lazy script or module threw as is, so that the
+/// caller sees the original error object and not a new wrapper.
+fn lazy_load_op_result(
+  scope: &mut v8::PinScope,
+  result: Result<v8::Global<v8::Value>, LazyLoadError>,
+) -> Result<v8::Global<v8::Value>, CoreError> {
+  match result {
+    Ok(value) => Ok(value),
+    Err(LazyLoadError::Thrown(exception)) => {
+      let exception = v8::Local::new(scope, exception);
+      scope.throw_exception(exception);
+      // Dummy value, this result will be discarded because an error was thrown.
+      let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+      Ok(v8::Global::new(scope, undefined))
+    }
+    Err(LazyLoadError::Core(error)) => Err(error),
+  }
 }
 
 /// Stash the snapshot-time `__bootstrap` view (a frozen clone of

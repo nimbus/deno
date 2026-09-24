@@ -728,11 +728,13 @@ impl JsRealm {
   ) -> Result<v8::Global<v8::Value>, CoreError> {
     let module_map_rc = self.0.module_map();
     context_scope!(scope, self, isolate);
-    module_map_rc.lazy_load_es_module_with_code(
-      scope,
-      module_specifier.as_str(),
-      code,
-      None,
-    )
+    module_map_rc
+      .lazy_load_es_module_with_code(
+        scope,
+        module_specifier.as_str(),
+        code,
+        None,
+      )
+      .map_err(|e| e.into_core_error(scope))
   }
 }
